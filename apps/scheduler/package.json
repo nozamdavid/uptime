@@ -1,0 +1,19 @@
+{
+  "name": "@uptime/scheduler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@uptime/config": "workspace:*",
+    "@uptime/contracts": "workspace:*",
+    "@uptime/database": "workspace:*",
+    "drizzle-orm": "^0.44.5",
+    "tsx": "^4.20.5"
+  }
+}
