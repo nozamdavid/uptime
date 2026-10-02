@@ -1,21 +1,36 @@
 import { regionIdSchema } from '@uptime/contracts';
-import { regions, type RegionEndpointEnvName } from '@uptime/regions';
+import { parseRegionList } from '@uptime/regions';
 import { z } from 'zod';
 
 const nonEmpty = z.string().trim().min(1);
-const httpUrl = z.url().refine((value) => ['http:', 'https:'].includes(new URL(value).protocol));
 const secret = z.string().min(32);
 const envBoolean = z.union([
   z.boolean(),
   z.enum(['true', 'false']).transform((value) => value === 'true'),
 ]);
-type RegionEndpointEnvShape = { readonly [Name in RegionEndpointEnvName]: typeof httpUrl };
-const regionEndpointEnvShape = Object.fromEntries(
-  regions.map((region) => [region.endpointEnvName, httpUrl]),
-) as RegionEndpointEnvShape;
-// `@phc/format`, used by the installed argon2 package, only accepts the
-// unpadded base64 form emitted by argon2.hash(). A startsWith check would allow
-// padded values that crash later when a user tries to log in.
+const workerUrlDomain = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(
+    /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/,
+    'must be a bare domain such as account.workers.dev',
+  );
+const regionList = z
+  .string()
+  .optional()
+  .transform((value, context) => {
+    try {
+      return parseRegionList(value);
+    } catch (error) {
+      context.addIssue({
+        code: 'custom',
+        message: error instanceof Error ? error.message : 'REGIONS_LIST is invalid',
+      });
+      return z.NEVER;
+    }
+  });
+// Match the unpadded PHC form emitted and accepted by the installed argon2 package.
 const canonicalArgon2idPhc =
   /^\$argon2id\$v=19\$m=[1-9]\d*,t=[1-9]\d*,p=[1-9]\d*\$[A-Za-z0-9+/.-]+\$[A-Za-z0-9+/.-]+$/;
 
@@ -24,6 +39,7 @@ export const databaseEnvSchema = z.object({
 });
 
 export const apiEnvSchema = databaseEnvSchema.extend({
+  REGIONS_LIST: regionList,
   API_HOST: nonEmpty.default('0.0.0.0'),
   API_PORT: z.coerce.number().int().min(1).max(65_535).default(3_000),
   API_TRUST_PROXY_HOPS: z.coerce.number().int().nonnegative().default(0),
@@ -37,13 +53,12 @@ export const apiEnvSchema = databaseEnvSchema.extend({
 });
 
 export const schedulerEnvSchema = databaseEnvSchema.extend({
+  REGIONS_LIST: regionList,
   PROBE_SIGNING_SECRET: secret,
   PROBE_REQUEST_MAX_SKEW_SECONDS: z.coerce.number().int().min(15).max(300).default(60),
-  ...regionEndpointEnvShape,
+  WORKERS_URL_DOMAIN: workerUrlDomain,
   SCHEDULER_POLL_INTERVAL_MS: z.coerce.number().int().min(250).max(60_000).default(1_000),
-  // This is a process-wide cap for a scheduler tick. It bounds outbound Worker
-  // requests when many monitors are due at once without constraining a monitor
-  // to run its selected regions serially.
+  // Process-wide limit for concurrent Worker requests.
   SCHEDULER_MAX_CONCURRENT_PROBES: z.coerce.number().int().min(1).max(100).default(32),
   SCHEDULER_INSTANCE_ID: nonEmpty,
 });

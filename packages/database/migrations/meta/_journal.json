@@ -30,6 +30,69 @@
       "when": 1788350400000,
       "tag": "0004_public_monitor_sharing",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788354000000,
+      "tag": "0005_status_pages",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788357600000,
+      "tag": "0006_daily_uptime_rollups",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788361200000,
+      "tag": "0007_imported_uptime_weights",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788364800000,
+      "tag": "0008_public_monitor_slugs",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788368400000,
+      "tag": "0009_public_monitor_slug_length",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788372000000,
+      "tag": "0010_dotted_public_monitor_slugs",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788375600000,
+      "tag": "0011_status_page_slugs",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1789584000000,
+      "tag": "0012_notifications",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1789587600000,
+      "tag": "0013_notification_providers",
+      "breakpoints": true
     }
   ]
 }

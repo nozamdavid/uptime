@@ -1,14 +1,20 @@
 import { sql } from 'drizzle-orm';
 
-import { regionById, type SchedulerEnv } from '@uptime/config';
-import type { DnsDiagnosticResult, ProbeResponse, RegionId } from '@uptime/contracts';
-import { dnsDiagnosticResultSchema, probeResponseSchema } from '@uptime/contracts';
+import { regionById, regionIds, type SchedulerEnv } from '@uptime/config';
+import type { DnsDiagnosticResult, ProbeItem, ProbeResponse, RegionId } from '@uptime/contracts';
+import {
+  dnsDiagnosticResultSchema,
+  probeBatchResponseSchema,
+  probeBatchSize,
+  probeResponseSchema,
+} from '@uptime/contracts';
 import { createDatabase, type Database } from '@uptime/database';
 
-import { signProbeRequest } from './signing.js';
+import { signProbeBatchRequest } from './signing.js';
 import { assertCurrentlyPublicTarget } from './url-policy.js';
 import { utcDayWindow } from './dns-diagnostics.js';
 import { ConcurrencyLimiter } from './concurrency.js';
+import { SchedulerNotifications } from './notifications.js';
 
 const collectionGraceMs = 15_000;
 const retentionBatchSize = 1_000;
@@ -31,6 +37,18 @@ interface ReservedDiagnostic {
   windowStartedAt: Date;
 }
 
+interface ProbeTask {
+  readonly run: ClaimedRun;
+  readonly regionId: RegionId;
+  readonly reserved: ReservedDiagnostic | undefined;
+  readonly item: ProbeItem;
+}
+
+interface RegionalProbeBatch {
+  readonly regionId: RegionId;
+  readonly tasks: ProbeTask[];
+}
+
 type DiagnosticDisposition =
   { kind: 'missing' } | { kind: 'invalid' } | { kind: 'complete'; result: DnsDiagnosticResult };
 
@@ -48,23 +66,40 @@ export interface SchedulerDependencies {
 
 export class Scheduler {
   private readonly probeConcurrency: ConcurrencyLimiter;
+  private readonly notifications: SchedulerNotifications;
 
   public constructor(
     private readonly env: SchedulerEnv,
     private readonly dependencies: SchedulerDependencies,
   ) {
     this.probeConcurrency = new ConcurrencyLimiter(env.SCHEDULER_MAX_CONCURRENT_PROBES);
+    this.notifications = new SchedulerNotifications(dependencies, env.REGIONS_LIST);
   }
 
   public async tick(): Promise<void> {
     await this.finalizeStaleDiagnostics();
     await this.finalizeExpiredRuns();
     const runs = await this.claimDueRuns();
-    await Promise.all(runs.map((run) => this.executeRun(run)));
+    const prepared = await Promise.all(runs.map((run) => this.prepareRun(run)));
+    const batches = regionalProbeBatches(prepared.flat());
+    await Promise.all(batches.map((batch) => this.executeBatch(batch)));
+    await Promise.all(runs.map((run) => this.finalizeRun(run.id)));
+    try {
+      await this.notifications.tick();
+    } catch {
+      this.dependencies.log.error({ event: 'notification_tick_failed' });
+    }
   }
 
   public async maintenance(): Promise<void> {
     const db = this.dependencies.db;
+    await db.execute(finalizeDailyUptimeRollupsQuery(this.dependencies.now()));
+    await db.execute(sql`
+      delete from notification_deliveries where id in (
+        select id from notification_deliveries where created_at < now() - interval '90 days'
+          and status in ('sent', 'cancelled', 'failed') order by created_at limit ${retentionBatchSize}
+      )
+    `);
     await db.execute(sql`
       WITH expired AS (
         SELECT id FROM check_runs
@@ -91,12 +126,12 @@ export class Scheduler {
   }
 
   private async claimDueRuns(): Promise<ClaimedRun[]> {
-    /* next_check_at moves by calendar interval, never completion time. SKIP LOCKED makes replicas safe. */
-    const result = await this.dependencies.db.execute(claimDueRunsQuery());
+    // Advance from the schedule, not completion time; SKIP LOCKED supports multiple schedulers.
+    const result = await this.dependencies.db.execute(claimDueRunsQuery(this.env.REGIONS_LIST));
     return result as unknown as ClaimedRun[];
   }
 
-  private async executeRun(run: ClaimedRun): Promise<void> {
+  private async prepareRun(run: ClaimedRun): Promise<ProbeTask[]> {
     try {
       await assertCurrentlyPublicTarget(run.monitor_url);
     } catch (error) {
@@ -109,24 +144,26 @@ export class Scheduler {
         UPDATE check_runs SET status = 'partial', completed_at = now()
         WHERE id = ${run.id} AND status = 'pending'
       `);
-      return;
+      return [];
     }
     const diagnostics = run.dns_diagnostics_enabled
       ? await this.reserveDiagnostics(run)
       : new Map<RegionId, ReservedDiagnostic>();
-    const results = await Promise.all(
-      run.region_ids.map(async (regionId) => {
-        const reserved = diagnostics.get(regionId);
-        const baseRequest = {
+    return run.region_ids.map((regionId) => {
+      const reserved = diagnostics.get(regionId);
+      return {
+        run,
+        regionId,
+        reserved,
+        item: {
           checkRunId: run.id,
           monitorId: run.monitor_id,
           windowStartedAt: new Date(run.window_started_at).toISOString(),
-          regionId,
           url: run.monitor_url,
           timeoutMs: run.timeout_ms,
-          method: 'GET' as const,
-          maxRedirects: 5 as const,
-          maxBodyBytes: 65_536 as const,
+          method: 'GET',
+          maxRedirects: 5,
+          maxBodyBytes: 65_536,
           dnsDiagnostic: reserved
             ? {
                 diagnosticId: reserved.id,
@@ -134,60 +171,83 @@ export class Scheduler {
                 deadlineMs: dnsDiagnosticDeadlineMs,
               }
             : null,
-        };
-        const signed = signProbeRequest(
-          baseRequest,
-          this.env.PROBE_SIGNING_SECRET,
-          this.dependencies.now(),
-        );
-        try {
-          const response = await this.probeConcurrency.run(() =>
-            this.dependencies.fetch(probeEndpointFor(this.env, regionId), {
-              method: 'POST',
-              headers: signed.headers,
-              body: signed.body,
-              signal: AbortSignal.timeout(run.timeout_ms + collectionGraceMs),
-            }),
-          );
-          if (!response.ok) throw new Error(`Probe returned ${response.status}`);
-          const parsed = parseProbeResponseDetails(await response.json());
-          if (parsed.observation.regionId !== regionId)
-            throw new Error('Probe returned a mismatched region');
-          return { regionId, parsed, reserved };
-        } catch (error) {
-          this.dependencies.log.warn({
-            event: 'probe_unreachable',
-            runId: run.id,
-            regionId,
-            error: String(error),
-          });
-          return { regionId, parsed: null, reserved };
-        }
-      }),
+        },
+      };
+    });
+  }
+
+  private async executeBatch(batch: RegionalProbeBatch): Promise<void> {
+    const signed = signProbeBatchRequest(
+      { regionId: batch.regionId, items: batch.tasks.map((task) => task.item) },
+      this.env.PROBE_SIGNING_SECRET,
+      this.dependencies.now(),
     );
-    await Promise.all(
-      results
-        .filter(
-          (
-            result,
-          ): result is {
-            regionId: RegionId;
-            parsed: ParsedProbeResponse;
-            reserved: ReservedDiagnostic | undefined;
-          } => result.parsed !== null,
-        )
-        .map(async (result) => {
+    try {
+      const response = await this.probeConcurrency.run(() =>
+        this.dependencies.fetch(probeEndpointFor(this.env, batch.regionId), {
+          method: 'POST',
+          headers: signed.headers,
+          body: signed.body,
+          signal: AbortSignal.timeout(
+            batch.tasks.reduce((total, task) => total + task.run.timeout_ms, collectionGraceMs),
+          ),
+        }),
+      );
+      if (!response.ok) throw new Error(`Probe batch returned ${response.status}`);
+      const envelope = probeBatchResponseSchema.parse(await response.json());
+      if (envelope.requestId !== signed.requestId || envelope.regionId !== batch.regionId)
+        throw new Error('Probe batch returned a mismatched identity');
+      const expectedKeys = new Set(batch.tasks.map(probeTaskKey));
+      const resultByKey = new Map<string, (typeof envelope.results)[number]>();
+      for (const result of envelope.results) {
+        const key = probeResultKey(result);
+        if (!expectedKeys.has(key) || resultByKey.has(key))
+          throw new Error('Probe batch returned an unexpected or duplicate result');
+        resultByKey.set(key, result);
+      }
+      await Promise.all(
+        batch.tasks.map(async (task) => {
+          const result = resultByKey.get(probeTaskKey(task));
+          if (!result) {
+            this.dependencies.log.warn({
+              event: 'probe_result_missing',
+              runId: task.run.id,
+              regionId: task.regionId,
+            });
+            return;
+          }
+          let parsed: ParsedProbeResponse;
+          try {
+            parsed = parseProbeResponseDetails(result.response);
+            if (parsed.observation.regionId !== task.regionId)
+              throw new Error('Probe returned a mismatched region');
+          } catch (error) {
+            this.dependencies.log.warn({
+              event: 'probe_result_invalid',
+              runId: task.run.id,
+              regionId: task.regionId,
+              error: String(error),
+            });
+            return;
+          }
           const observationId = await this.persistObservation(
-            run,
-            result.regionId,
-            result.parsed.observation,
+            task.run,
+            task.regionId,
+            parsed.observation,
           );
-          if (result.reserved) {
-            await this.persistDiagnostic(result.reserved, observationId, result.parsed.diagnostic);
+          if (task.reserved) {
+            await this.persistDiagnostic(task.reserved, observationId, parsed.diagnostic);
           }
         }),
-    );
-    await this.finalizeRun(run.id);
+      );
+    } catch (error) {
+      this.dependencies.log.warn({
+        event: 'probe_batch_failed',
+        runIds: batch.tasks.map((task) => task.run.id),
+        regionId: batch.regionId,
+        error: String(error),
+      });
+    }
   }
 
   private async reserveDiagnostics(run: ClaimedRun): Promise<Map<RegionId, ReservedDiagnostic>> {
@@ -197,7 +257,7 @@ export class Scheduler {
         const inserted = await schedulerRows<{
           id: string;
           regionId: RegionId;
-          windowStartedAt: Date;
+          windowStartedAt: Date | string;
         }>(
           this.dependencies.db,
           sql`
@@ -210,8 +270,17 @@ export class Scheduler {
             RETURNING id, region_id as "regionId", window_started_at as "windowStartedAt"
           `,
         );
-        const reservation = inserted[0];
-        return reservation ? ([regionId, reservation] as const) : null;
+        const returned = inserted[0];
+        if (!returned) return null;
+        const reservation: ReservedDiagnostic = {
+          ...returned,
+          windowStartedAt: new Date(
+            returned.windowStartedAt instanceof Date
+              ? returned.windowStartedAt.getTime()
+              : returned.windowStartedAt,
+          ),
+        };
+        return [regionId, reservation] as const;
       }),
     );
     return new Map(
@@ -306,12 +375,40 @@ export class Scheduler {
   }
 }
 
-/** Resolve a logical region through the one canonical registry/env-name mapping. */
-export function probeEndpointFor(env: SchedulerEnv, regionId: RegionId): string {
-  return env[regionById[regionId].endpointEnvName];
+function probeTaskKey(task: ProbeTask): string {
+  return `${task.item.checkRunId}:${task.item.monitorId}`;
 }
 
-export function claimDueRunsQuery() {
+function probeResultKey(result: { checkRunId: string; monitorId: string }): string {
+  return `${result.checkRunId}:${result.monitorId}`;
+}
+
+function regionalProbeBatches(tasks: ProbeTask[]): RegionalProbeBatch[] {
+  const byRegion = new Map<RegionId, ProbeTask[]>();
+  for (const task of tasks) {
+    const regional = byRegion.get(task.regionId) ?? [];
+    regional.push(task);
+    byRegion.set(task.regionId, regional);
+  }
+  const batches: RegionalProbeBatch[] = [];
+  for (const [regionId, regional] of byRegion) {
+    for (let index = 0; index < regional.length; index += probeBatchSize) {
+      batches.push({ regionId, tasks: regional.slice(index, index + probeBatchSize) });
+    }
+  }
+  return batches;
+}
+
+/** Resolve a logical region from its canonical Worker name and the shared domain suffix. */
+export function probeEndpointFor(env: SchedulerEnv, regionId: RegionId): string {
+  return `https://${regionById[regionId].workerName}.${env.WORKERS_URL_DOMAIN}`;
+}
+
+export function claimDueRunsQuery(enabledRegionIds: readonly RegionId[] = regionIds) {
+  const enabledRegionList = sql.join(
+    enabledRegionIds.map((regionId) => sql`${regionId}`),
+    sql`, `,
+  );
   return sql`
     WITH due AS (
       SELECT id, url, timeout_ms, interval_seconds, dns_diagnostics_enabled, next_check_at
@@ -331,6 +428,7 @@ export function claimDueRunsQuery() {
       INSERT INTO check_runs (monitor_id, window_started_at, expected_region_count, monitor_url, timeout_ms, dns_diagnostics_enabled)
       SELECT a.id, a.next_check_at, COUNT(mr.region_id), a.url, a.timeout_ms, a.dns_diagnostics_enabled
       FROM advanced a JOIN monitor_regions mr ON mr.monitor_id = a.id
+        AND mr.region_id IN (${enabledRegionList})
       GROUP BY a.id, a.next_check_at, a.url, a.timeout_ms, a.dns_diagnostics_enabled
       ON CONFLICT (monitor_id, window_started_at) DO NOTHING
       RETURNING id, monitor_id, monitor_url, timeout_ms, window_started_at, dns_diagnostics_enabled
@@ -344,6 +442,7 @@ export function claimDueRunsQuery() {
       i.dns_diagnostics_enabled,
       ARRAY_AGG(mr.region_id)::text[] AS region_ids
     FROM inserted i JOIN monitor_regions mr ON mr.monitor_id = i.monitor_id
+      AND mr.region_id IN (${enabledRegionList})
     GROUP BY
       i.id,
       i.monitor_id,
@@ -354,20 +453,55 @@ export function claimDueRunsQuery() {
   `;
 }
 
-/**
- * Keeps the scheduler compatible with Workers deployed before endpoint evidence
- * existed. A present value is always parsed by the shared contract; it is never
- * silently discarded if malformed.
- */
+export function finalizeDailyUptimeRollupsQuery(currentTime: Date) {
+  const today = new Date(currentTime);
+  today.setUTCHours(0, 0, 0, 0);
+  return sql`
+    WITH closed_runs AS (
+      SELECT cr.id, cr.monitor_id,
+        (cr.window_started_at AT TIME ZONE 'UTC')::date AS day
+      FROM check_runs cr
+      WHERE cr.window_started_at < ${today.toISOString()}
+        AND cr.status IN ('complete', 'partial')
+    ), daily AS (
+      SELECT r.monitor_id, r.day,
+        count(*)::integer AS received_count,
+        count(*) FILTER (WHERE o.success)::integer AS success_count,
+        avg(o.response_ms) FILTER (
+          WHERE o.success AND o.response_ms IS NOT NULL
+        )::double precision AS average_response_ms
+      FROM closed_runs r
+      JOIN observations o ON o.check_run_id = r.id
+      GROUP BY r.monitor_id, r.day
+    )
+    INSERT INTO monitor_daily_uptime (
+      monitor_id, day, uptime_percentage, average_response_ms, weight,
+      received_count, success_count, source, finalized_at, created_at, updated_at
+    )
+    SELECT monitor_id, day,
+      (success_count::double precision / received_count) * 100,
+      average_response_ms, received_count::double precision,
+      received_count, success_count, 'calculated', ${currentTime.toISOString()}, now(), now()
+    FROM daily
+    WHERE received_count > 0
+    ON CONFLICT (monitor_id, day) DO UPDATE SET
+      uptime_percentage = EXCLUDED.uptime_percentage,
+      average_response_ms = EXCLUDED.average_response_ms,
+      weight = EXCLUDED.weight,
+      received_count = EXCLUDED.received_count,
+      success_count = EXCLUDED.success_count,
+      finalized_at = EXCLUDED.finalized_at,
+      updated_at = now()
+    WHERE monitor_daily_uptime.source = 'calculated'
+  `;
+}
+
+/** Accept responses from Workers that predate endpoint evidence. */
 export function parseProbeResponse(payload: unknown): ProbeResponse {
   return parseProbeResponseDetails(payload).observation;
 }
 
-/**
- * Core uptime data and an optional diagnostic use separate validation paths.
- * A diagnostic protocol failure is stored as diagnostic evidence, never turned
- * into a target outage.
- */
+/** Parse optional diagnostics without turning diagnostic failures into target outages. */
 export function parseProbeResponseDetails(payload: unknown): ParsedProbeResponse {
   if (payload !== null && typeof payload === 'object' && !Array.isArray(payload)) {
     const record = payload as Record<string, unknown>;

@@ -6,19 +6,9 @@
   "scripts": {
     "dev": "wrangler dev --config ../../deploy/cloudflare/wrangler.us-east.toml",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
-    "deploy:us-east": "wrangler deploy --config ../../deploy/cloudflare/wrangler.us-east.toml",
-    "deploy:us-west": "wrangler deploy --config ../../deploy/cloudflare/wrangler.us-west.toml",
-    "deploy:canada-central": "wrangler deploy --config ../../deploy/cloudflare/wrangler.canada-central.toml",
-    "deploy:eu-west": "wrangler deploy --config ../../deploy/cloudflare/wrangler.eu-west.toml",
-    "deploy:eu-north": "wrangler deploy --config ../../deploy/cloudflare/wrangler.eu-north.toml",
-    "deploy:eu-south": "wrangler deploy --config ../../deploy/cloudflare/wrangler.eu-south.toml",
-    "deploy:asia": "wrangler deploy --config ../../deploy/cloudflare/wrangler.asia.toml",
-    "deploy:asia-east": "wrangler deploy --config ../../deploy/cloudflare/wrangler.asia-east.toml",
-    "deploy:asia-south": "wrangler deploy --config ../../deploy/cloudflare/wrangler.asia-south.toml"
+    "test": "vitest run"
   },
   "dependencies": {
-    "@uptime/config": "workspace:*",
     "@uptime/contracts": "workspace:*",
     "@uptime/regions": "workspace:*"
   },

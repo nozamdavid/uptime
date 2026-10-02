@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: scripts/tests/deploy-workers.sh
+      - run: scripts/tests/reset-admin.sh
+      - name: Validate Docker Compose
+        env:
+          DATABASE_URL: postgresql://uptime:test@database.example.com:5432/uptime
+          ADMIN_PASSWORD_HASH: $argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA
+          SESSION_SECRET: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          PROBE_SIGNING_SECRET: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          WORKERS_URL_DOMAIN: account.workers.dev
+        run: docker compose config --quiet

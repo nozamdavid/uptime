@@ -1,0 +1,14 @@
+name = "uptime-staging-probe-canada-central"
+main = "../../../../apps/probe-worker/src/index.ts"
+compatibility_date = "2026-08-30"
+compatibility_flags = ["global_fetch_strictly_public"]
+workers_dev = true
+[observability]
+enabled = true
+[placement]
+region = "aws:ca-central-1"
+[vars]
+PROBE_REGION = "canada-central"
+PROBE_REQUEST_MAX_SKEW_SECONDS = "60"
+PROBE_MAX_REQUEST_BYTES = "65536"
+PROBE_VERSION = "0.1.0"

@@ -1,0 +1,35 @@
+# Cloudflare Pages response headers.
+#
+# `_headers` matches on path globs. Rules are applied in order and later
+# matching rules win; the specific asset rules below intentionally follow the
+# global security block.
+#
+# NOTE: The API Worker must set its own CORS headers. This file cannot add
+# `Access-Control-Allow-Credentials` to cross-origin API responses because the
+# API is a separate Worker/origin from these Pages assets.
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+  Permissions-Policy: geolocation=(), microphone=(), camera=()
+  # Baseline CSP for the built SPA. The admin app calls the API and (for public
+  # pages) the report host cross-origin, so those origins must be allowed. The
+  # Vite build inlines no eval; styles are the app's own stylesheet plus inline
+  # style attributes used by charts and badges.
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'
+
+# Vite emits content-hashed filenames under /assets, so they are immutable.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# The HTML shell must always be revalidated so new asset hashes are picked up.
+/index.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+/
+  Cache-Control: public, max-age=0, must-revalidate
+
+# Static files copied from `public/` are not content-hashed.
+/favicon.ico
+  Cache-Control: public, max-age=86400

@@ -1,8 +1,4 @@
-/**
- * A small, process-local module that makes one promise at a time wait behind a
- * shared cap. Its interface deliberately hides queue bookkeeping from callers:
- * callers only supply work, and every completion path releases its slot.
- */
+/** FIFO concurrency limiter for work in one scheduler process. */
 export class ConcurrencyLimiter {
   private active = 0;
   private readonly waiting: Array<() => void> = [];

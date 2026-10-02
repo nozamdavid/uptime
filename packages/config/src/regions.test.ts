@@ -12,8 +12,13 @@ describe('regional configuration', () => {
     expect(regionById.asia.placementRegion).toBe('aws:ap-southeast-1');
   });
 
-  it('uses intervals that divide one UTC day exactly', () => {
-    expect(checkIntervalPresets.every((interval) => 86_400 % interval === 0)).toBe(true);
+  it('uses one-minute intervals through 15 minutes, then five-minute intervals through 60', () => {
+    expect(checkIntervalPresets.slice(0, 15)).toEqual(
+      Array.from({ length: 15 }, (_, index) => (index + 1) * 60),
+    );
+    expect(checkIntervalPresets.slice(15)).toEqual(
+      Array.from({ length: 9 }, (_, index) => (index + 4) * 300),
+    );
   });
 });
 
@@ -42,22 +47,33 @@ describe('environment configuration', () => {
     expect(() => apiEnvSchema.parse({ ...source, API_TRUST_PROXY_HOPS: 1.5 })).toThrow();
   });
 
-  it('requires one probe endpoint for every canonical region', () => {
-    const endpoints = Object.fromEntries(
-      regions.map(({ endpointEnvName, id }) => [
-        endpointEnvName,
-        `https://${id}.probe.example.com`,
-      ]),
-    );
+  it('builds every probe endpoint from one normalized Workers domain', () => {
     const source = {
       DATABASE_URL: 'postgresql://uptime:test@localhost:5432/uptime',
       PROBE_SIGNING_SECRET: 'a'.repeat(32),
       SCHEDULER_INSTANCE_ID: 'test',
-      ...endpoints,
+      WORKERS_URL_DOMAIN: 'ACCOUNT.WORKERS.DEV',
     };
-    expect(schedulerEnvSchema.parse(source)).toMatchObject(endpoints);
-    const missingOne: Record<string, unknown> = { ...source };
-    delete missingOne.PROBE_EU_NORTH_URL;
-    expect(() => schedulerEnvSchema.parse(missingOne)).toThrow();
+    expect(schedulerEnvSchema.parse(source).WORKERS_URL_DOMAIN).toBe('account.workers.dev');
+    expect(() =>
+      schedulerEnvSchema.parse({
+        ...source,
+        WORKERS_URL_DOMAIN: 'https://account.workers.dev/path',
+      }),
+    ).toThrow(/bare domain/);
+  });
+
+  it('parses REGIONS_LIST independently of the shared Workers domain', () => {
+    const source = {
+      DATABASE_URL: 'postgresql://uptime:test@localhost:5432/uptime',
+      REGIONS_LIST: 'asia-east, asia-south',
+      PROBE_SIGNING_SECRET: 'a'.repeat(32),
+      SCHEDULER_INSTANCE_ID: 'test',
+      WORKERS_URL_DOMAIN: 'account.workers.dev',
+    };
+    expect(schedulerEnvSchema.parse(source).REGIONS_LIST).toEqual(['asia-east', 'asia-south']);
+    expect(() => schedulerEnvSchema.parse({ ...source, REGIONS_LIST: 'asia-east,moon' })).toThrow(
+      /unknown regions: moon/,
+    );
   });
 });

@@ -1,7 +1,7 @@
 import { isIP } from 'node:net';
 import { lookup } from 'node:dns/promises';
 
-/** URL policy shared in spirit with probes; probe validation remains authoritative. */
+/** Apply the API's pre-save URL policy; Workers validate again at probe time. */
 export function assertPublicHttpUrl(value: string): URL {
   let url: URL;
   try {

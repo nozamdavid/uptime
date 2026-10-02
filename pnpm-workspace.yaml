@@ -3,11 +3,10 @@ packages:
   - packages/*
 
 allowBuilds:
-  argon2: true
+  argon2: set this to true or false
   esbuild: true
   workerd: true
 
 onlyBuiltDependencies:
-  - argon2
   - esbuild
   - workerd

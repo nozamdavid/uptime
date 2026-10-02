@@ -1,0 +1,27 @@
+{
+  "name": "@uptime/api-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./providers": "./src/providers.ts",
+    "./credentials": "./src/credentials.ts",
+    "./queries": "./src/queries.ts"
+  },
+  "scripts": {
+    "dev": "wrangler dev --config ../../deploy/cloudflare/api/wrangler.toml",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@uptime/cloudflare": "workspace:*",
+    "@uptime/contracts": "workspace:*",
+    "@uptime/regions": "workspace:*",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250829.0",
+    "wrangler": "^4.35.0"
+  }
+}

@@ -1,0 +1,25 @@
+name = "uptime-staging-api"
+main = "../../../../apps/api-worker/src/index.ts"
+compatibility_date = "2026-08-30"
+workers_dev = true
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "uptime-staging"
+database_id = "3900c94a-82a0-4422-a5f8-1a56b781cea7"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[vars]
+ENVIRONMENT = "staging"
+REGIONS_LIST = "us-east,us-west,canada-central,eu-west,eu-north,eu-south,asia,asia-east,asia-south"
+SESSION_TTL_SECONDS = "604800"
+SESSION_COOKIE_SECURE = "true"
+SESSION_COOKIE_SAMESITE = "lax"
+WEB_ORIGIN = "https://uptime-staging.pages.dev"
+ALLOWED_ORIGINS = "https://uptime.noz.am"
+
+# Set only on this Worker with `wrangler secret put --config ...`:
+# SESSION_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD_HASH, CREDENTIAL_ENCRYPTION_SECRET

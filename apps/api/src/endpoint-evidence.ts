@@ -1,15 +1,12 @@
 import type { EndpointEvidence } from '@uptime/contracts';
 import { endpointEvidenceSchema } from '@uptime/contracts';
+import { decodeStoredJson } from './stored-json.js';
 
 export interface EndpointEvidenceLog {
   warn: (bindings: Record<string, unknown>, message: string) => void;
 }
 
-/**
- * Adapts stored JSON to the contract at the database seam. Historical JSON is
- * untrusted: a bad legacy row is observable in logs but never prevents history
- * pages from loading.
- */
+/** Parse historical JSON without allowing malformed rows to break history pages. */
 export function parseStoredEndpointEvidence(
   value: unknown,
   observationId: string,
@@ -17,7 +14,7 @@ export function parseStoredEndpointEvidence(
   log: EndpointEvidenceLog,
 ): EndpointEvidence | null {
   if (value === null || value === undefined) return null;
-  const decoded = decodeJsonb(value);
+  const decoded = decodeStoredJson(value);
   if (!decoded.ok) {
     log.warn(
       { event: 'invalid_legacy_endpoint_evidence', observationId },
@@ -43,14 +40,5 @@ function hostnameMatchesFinalUrl(evidenceHostname: string, finalUrl: string | nu
     return new URL(finalUrl).hostname.toLowerCase() === evidenceHostname;
   } catch {
     return false;
-  }
-}
-
-function decodeJsonb(value: unknown): { ok: true; value: unknown } | { ok: false } {
-  if (typeof value !== 'string') return { ok: true, value };
-  try {
-    return { ok: true, value: JSON.parse(value) };
-  } catch {
-    return { ok: false };
   }
 }

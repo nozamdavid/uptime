@@ -1,0 +1,15 @@
+name = "uptime-staging"
+compatibility_date = "2026-08-30"
+pages_build_output_dir = "../../../../dist/staging/web"
+
+[[services]]
+binding = "API"
+service = "uptime-staging-api"
+
+[[services]]
+binding = "REPORTER"
+service = "uptime-staging-reporter"
+
+[[r2_buckets]]
+binding = "REPORTS"
+bucket_name = "uptime-staging-reports"

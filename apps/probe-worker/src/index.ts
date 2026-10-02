@@ -1,10 +1,17 @@
 import {
+  probeBatchRequestSchema,
   probeRequestSchema,
   type ObservationErrorCode,
+  type ProbeBatchRequest,
   type ProbeRequest,
   type ProbeResponse,
 } from '@uptime/contracts';
 import { isRegionId, type RegionId } from '@uptime/regions';
+import {
+  isForbiddenIpv6Literal,
+  isIntInForbiddenIpv4Cidrs,
+  ipv4StringToInt,
+} from '@uptime/contracts';
 
 import { collectEndpointEvidence } from './endpoint-evidence.js';
 import { collectDnsCandidates } from './dns-candidates.js';
@@ -20,6 +27,7 @@ interface Env {
 const maxRedirects = 5;
 const maxBodyBytes = 65_536;
 const signatureVersion = 'v1';
+const batchProbeConcurrency = 2;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -35,53 +43,15 @@ function errorResponse(code: string, status: number): Response {
 function isForbiddenIpv4(host: string): boolean {
   const parts = host.split('.');
   if (parts.length !== 4 || parts.some((part) => !/^\d+$/.test(part))) return false;
-  const octets = parts.map(Number);
-  if (octets.some((value) => value > 255)) return true;
-  const value = octets.reduce((result, part) => (result * 256 + part) >>> 0, 0);
-  return forbiddenIpv4Cidrs.some(([network, prefix]) => inIpv4Cidr(value, network, prefix));
-}
-
-const forbiddenIpv4Cidrs = [
-  ['0.0.0.0', 8],
-  ['10.0.0.0', 8],
-  ['100.64.0.0', 10],
-  ['127.0.0.0', 8],
-  ['169.254.0.0', 16],
-  ['172.16.0.0', 12],
-  ['192.0.0.0', 24],
-  ['192.0.2.0', 24],
-  ['192.168.0.0', 16],
-  ['198.18.0.0', 15],
-  ['198.51.100.0', 24],
-  ['203.0.113.0', 24],
-  ['224.0.0.0', 4],
-  ['240.0.0.0', 4],
-] as const;
-
-function inIpv4Cidr(value: number, network: string, prefix: number): boolean {
-  const networkValue = network
-    .split('.')
-    .map(Number)
-    .reduce((result, part) => (result * 256 + part) >>> 0, 0);
-  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
-  return (value & mask) === (networkValue & mask);
+  const parsed = ipv4StringToInt(host);
+  if (parsed === null) return true;
+  return isIntInForbiddenIpv4Cidrs(parsed);
 }
 
 function isForbiddenIpv6(host: string): boolean {
   const normalized = host.toLowerCase().replace(/^\[|\]$/g, '');
   if (!normalized.includes(':')) return false;
-  return (
-    normalized === '::' ||
-    normalized === '::1' ||
-    normalized.startsWith('fe80:') ||
-    normalized.startsWith('fc') ||
-    normalized.startsWith('fd') ||
-    normalized.startsWith('ff') ||
-    normalized.startsWith('2001:db8:') ||
-    normalized.startsWith('2001:2:') ||
-    normalized.startsWith('100:') ||
-    normalized.startsWith('::ffff:')
-  );
+  return isForbiddenIpv6Literal(normalized);
 }
 
 function validateTarget(raw: string): URL {
@@ -214,6 +184,45 @@ async function diagnosticFor(request: ProbeRequest, target: URL) {
   return collectDnsCandidates(target.hostname, request.dnsDiagnostic);
 }
 
+async function mapWithConcurrency<T, Result>(
+  values: readonly T[],
+  concurrency: number,
+  operation: (value: T) => Promise<Result>,
+): Promise<Result[]> {
+  const results = new Array<Result>(values.length);
+  let nextIndex = 0;
+  async function worker(): Promise<void> {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await operation(values[index]!);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, () => worker()));
+  return results;
+}
+
+async function probeBatch(
+  request: ProbeBatchRequest,
+  env: Env,
+  runtime: { readonly colo?: string | undefined; readonly placement?: string | undefined },
+) {
+  const results = await mapWithConcurrency(request.items, batchProbeConcurrency, async (item) => {
+    const response = await probe(
+      {
+        ...item,
+        requestId: request.requestId,
+        issuedAt: request.issuedAt,
+        regionId: request.regionId,
+      },
+      env,
+      runtime,
+    );
+    return { checkRunId: item.checkRunId, monitorId: item.monitorId, response };
+  });
+  return { requestId: request.requestId, regionId: request.regionId, results };
+}
+
 async function probe(
   request: ProbeRequest,
   env: Env,
@@ -242,7 +251,8 @@ async function probe(
       });
       responseMs = Date.now() - started;
       if (response.status >= 300 && response.status < 400 && response.headers.get('location')) {
-        if (redirects >= maxRedirects)
+        if (redirects >= maxRedirects) {
+          await response.body?.cancel().catch(() => undefined);
           return failure(request, 'redirect_limit', 'Maximum redirects exceeded', startedAt, env, {
             responseMs,
             totalMs: Date.now() - started,
@@ -253,8 +263,17 @@ async function probe(
             dnsDiagnostic: await diagnosticFor(request, target),
             redirectCount: redirects,
           });
+        }
         redirects += 1;
-        target = validateTarget(new URL(response.headers.get('location')!, target).toString());
+        let nextTarget: URL;
+        try {
+          nextTarget = validateTarget(
+            new URL(response.headers.get('location')!, target).toString(),
+          );
+        } finally {
+          await response.body?.cancel().catch(() => undefined);
+        }
+        target = nextTarget;
         continue;
       }
       const evidenceStarted = Date.now();
@@ -331,7 +350,7 @@ async function probe(
 }
 
 export default {
-  async fetch(request: Request, env: Env, context: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, _context: ExecutionContext): Promise<Response> {
     if (request.method !== 'POST') return errorResponse('method_not_allowed', 405);
     const length = Number(request.headers.get('content-length') ?? 0);
     const limit = Number(env.PROBE_MAX_REQUEST_BYTES || maxBodyBytes);
@@ -355,12 +374,30 @@ export default {
       return errorResponse('stale_request', 401);
     const expected = await expectedSignature(env.PROBE_SIGNING_SECRET, issuedAt, requestId, body);
     if (!constantTimeEqual(expected, signature)) return errorResponse('invalid_signature', 401);
-    let payload: ProbeRequest;
+    let decoded: unknown;
     try {
-      payload = probeRequestSchema.parse(JSON.parse(body));
+      decoded = JSON.parse(body);
     } catch {
       return errorResponse('invalid_payload', 400);
     }
+    const runtime = {
+      colo: (request.cf as unknown as { readonly colo?: string } | undefined)?.colo,
+      placement: request.headers.get('cf-placement') ?? undefined,
+    };
+    const batch = probeBatchRequestSchema.safeParse(decoded);
+    if (batch.success) {
+      if (
+        !isRegionId(env.PROBE_REGION) ||
+        batch.data.requestId !== requestId ||
+        batch.data.issuedAt !== issuedAt ||
+        batch.data.regionId !== env.PROBE_REGION
+      )
+        return errorResponse('region_or_identity_mismatch', 403);
+      return json(await probeBatch(batch.data, env, runtime));
+    }
+    const single = probeRequestSchema.safeParse(decoded);
+    if (!single.success) return errorResponse('invalid_payload', 400);
+    const payload = single.data;
     if (
       !isRegionId(env.PROBE_REGION) ||
       payload.requestId !== requestId ||
@@ -368,14 +405,8 @@ export default {
       payload.regionId !== env.PROBE_REGION
     )
       return errorResponse('region_or_identity_mismatch', 403);
-    const response = await probe(payload, env, {
-      colo: (request.cf as unknown as { readonly colo?: string } | undefined)?.colo,
-      placement: request.headers.get('cf-placement') ?? undefined,
-    });
-    context.waitUntil(Promise.resolve());
-    return json(response);
+    return json(await probe(payload, env, runtime));
   },
 } satisfies ExportedHandler<Env>;
 
-/* Workers cannot expose DNS lookup results or the socket destination. Literal IPs and every redirect are rejected locally;
- * hostname-to-private-IP rebinding must also be controlled through account egress/network policy and trusted targets. */
+// Workers cannot reveal the final socket address, so trusted public targets remain required.

@@ -1,4 +1,4 @@
-/** The daily policy is UTC-only, so host time zones cannot create duplicate snapshots. */
+/** Return the UTC day containing the supplied timestamp. */
 export function utcDayWindow(value: Date): Date {
   return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
 }

@@ -2,13 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import {
   continentIds,
-  endpointEnvNameByRegion,
   findRegion,
   isRegionId,
+  parseRegionList,
   regionById,
   regionIds,
   regions,
   regionsByContinent,
+  regionsFromList,
 } from './index.js';
 
 describe('canonical region registry', () => {
@@ -33,7 +34,6 @@ describe('canonical region registry', () => {
       'label',
       'placementRegion',
       'approximateAnchor',
-      'endpointEnvName',
       'workerName',
       'wranglerConfigBasename',
       'chartSeriesToken',
@@ -60,6 +60,22 @@ describe('canonical region registry', () => {
     expect(isRegionId('unknown')).toBe(false);
     expect(findRegion('asia-east')).toBe(regionById['asia-east']);
     expect(findRegion('unknown')).toBeUndefined();
-    expect(endpointEnvNameByRegion['canada-central']).toBe('PROBE_CANADA_CENTRAL_URL');
+  });
+});
+
+describe('REGIONS_LIST parsing', () => {
+  it('preserves configured order and defaults to every canonical region', () => {
+    expect(parseRegionList('asia-east, asia-south')).toEqual(['asia-east', 'asia-south']);
+    expect(parseRegionList(undefined)).toEqual(regionIds);
+    expect(regionsFromList('eu-west,us-east').map((region) => region.id)).toEqual([
+      'eu-west',
+      'us-east',
+    ]);
+  });
+
+  it('rejects unknown, duplicate, and empty entries', () => {
+    expect(() => parseRegionList('moon')).toThrow(/unknown regions: moon/);
+    expect(() => parseRegionList('us-east,us-east')).toThrow(/duplicate/);
+    expect(() => parseRegionList('us-east,,eu-west')).toThrow(/empty entries/);
   });
 });

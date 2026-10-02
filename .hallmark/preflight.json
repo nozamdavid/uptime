@@ -1,8 +1,0 @@
-{
-  "date": "2026-08-30",
-  "framework": "React + Vite",
-  "fontStack": "introduced Cobalt: Space Grotesk, Inter, JetBrains Mono",
-  "palette": "introduced Cobalt OKLCH tokens",
-  "motion": "motion-cut project; limited interaction transitions only",
-  "spacing": "introduced named 4pt scale"
-}

@@ -16,6 +16,7 @@
     "@uptime/config": "workspace:*",
     "@uptime/contracts": "workspace:*",
     "@uptime/database": "workspace:*",
+    "@uptime/notifications": "workspace:*",
     "argon2": "^0.43.0",
     "drizzle-orm": "^0.44.5",
     "fastify": "^5.2.1",

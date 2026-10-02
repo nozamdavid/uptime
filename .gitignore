@@ -5,6 +5,10 @@ coverage/
 .env.*
 !.env.example
 .wrangler/
+.dev.vars
+.dev.vars.*
+*.secrets.env
+.hallmark/
 playwright-report/
 test-results/
 .DS_Store

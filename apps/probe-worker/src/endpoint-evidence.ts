@@ -56,8 +56,7 @@ const continentByEdgePrefix: Readonly<Record<string, EndpointContinent>> = {
 };
 
 function sanitize(value: string): string | null {
-  // Header values are platform-bounded, but cap our own input work as well as
-  // the stored output. Every emitted character is one ASCII/UTF-8 byte.
+  // Bound both parsing work and stored output.
   let output = '';
   let pendingSpace = false;
   const inputLimit = Math.min(value.length, 2_048);
@@ -116,10 +115,7 @@ function parseProvider(signals: readonly EndpointSignal[]): ParsedCdnEvidence | 
   return candidates.length === 1 ? candidates[0]! : null;
 }
 
-/**
- * Collects bounded response-reported endpoint evidence without I/O.
- * It never throws; null means even the final hostname could not be represented.
- */
+/** Parse bounded endpoint evidence from response headers without throwing. */
 export function collectEndpointEvidence(
   finalUrl: string,
   headers: Headers,
