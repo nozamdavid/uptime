@@ -21,7 +21,11 @@ function renderToml(region: (typeof regions)[number]): string {
   return `name = "${region.workerName}"
 main = "../../apps/probe-worker/src/index.ts"
 compatibility_date = "${compatibilityDate}"
+compatibility_flags = ["global_fetch_strictly_public"]
 workers_dev = true
+
+[limits]
+cpu_ms = 50
 
 [observability]
 enabled = true

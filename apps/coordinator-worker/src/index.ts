@@ -1,9 +1,10 @@
-import { nowIso } from '@uptime/cloudflare';
+import { flushUsage, meterDatabase, nowIso, type D1Database } from '@uptime/cloudflare';
 
 import { runCoordinatorTick, type CoordinatorDependencies } from './coordinator.js';
 import { parseCoordinatorEnv, type CoordinatorEnv, type ReportConfig } from './env.js';
 import { ReportJobFailure, runReportJob } from './report-job.js';
 import { claimJob, reportLeaseSeconds, saveJobState } from './state.js';
+import { dispatchDueTenants, runTenantJob, type TenantJob } from './tenant-dispatch.js';
 
 export { reportLeaseSeconds } from './state.js';
 
@@ -51,6 +52,20 @@ export function coordinatorLeaseSeconds(config: {
  */
 export default {
   async scheduled(_event: ScheduledController, env: CoordinatorEnv): Promise<void> {
+    if (env.CONTROL_DB) {
+      const rawControl = env.CONTROL_DB;
+      const controlMeter = meterDatabase(rawControl);
+      try {
+        await dispatchDueTenants({ ...env, CONTROL_DB: controlMeter.db } as CoordinatorEnv & {
+          CONTROL_DB: D1Database;
+        });
+      } finally {
+        await flushUsage(rawControl, '__control__', controlMeter.usage).catch((error) => {
+          console.warn({ event: 'control_usage_flush_failed', error: String(error) });
+        });
+      }
+      return;
+    }
     const config = parseCoordinatorEnv(env);
     const results = await Promise.allSettled([
       runCoordinatorSchedule(config),
@@ -71,6 +86,48 @@ export default {
       status: 200,
       headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
     });
+  },
+
+  async queue(batch: MessageBatch<unknown>, env: CoordinatorEnv): Promise<void> {
+    if (!env.CONTROL_DB) return;
+    const rawControl = env.CONTROL_DB;
+    const controlMeter = meterDatabase(rawControl);
+    try {
+      for (const message of batch.messages) {
+        const job = message.body as TenantJob;
+        if (
+          !job ||
+          typeof job.workspaceId !== 'string' ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+            job.workspaceId,
+          ) ||
+          typeof job.scheduledAt !== 'string' ||
+          !Number.isFinite(Date.parse(job.scheduledAt))
+        ) {
+          console.warn({ event: 'tenant_job_invalid' });
+          message.ack();
+          continue;
+        }
+        try {
+          await runTenantJob(
+            { ...env, CONTROL_DB: controlMeter.db } as CoordinatorEnv & { CONTROL_DB: D1Database },
+            job,
+          );
+          message.ack();
+        } catch (error) {
+          console.error({
+            event: 'tenant_job_failed',
+            workspaceId: job.workspaceId,
+            error: String(error),
+          });
+          message.retry();
+        }
+      }
+    } finally {
+      await flushUsage(rawControl, '__control__', controlMeter.usage).catch((error) => {
+        console.warn({ event: 'control_usage_flush_failed', error: String(error) });
+      });
+    }
   },
 } satisfies ExportedHandler<CoordinatorEnv>;
 

@@ -1,0 +1,8 @@
+name = "uptime-hosted-pages"
+compatibility_date = "2026-08-30"
+compatibility_flags = ["global_fetch_strictly_public"]
+pages_build_output_dir = "../../../apps/web/dist"
+
+[[services]]
+binding = "API"
+service = "uptime-hosted-api"

@@ -111,7 +111,7 @@ export function corsHeaders(
     'access-control-allow-origin': origin,
     'access-control-allow-credentials': 'true',
     'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-    'access-control-allow-headers': 'content-type',
+    'access-control-allow-headers': 'content-type, x-uptime-workspace',
     'access-control-max-age': '600',
     vary: 'Origin',
   };

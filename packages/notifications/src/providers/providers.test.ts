@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { NotificationProviderKind } from '@uptime/contracts';
 import { createServer } from 'node:net';
 import {
   createNotificationProvider,
@@ -50,6 +51,12 @@ const configurations = [
 ] as const;
 
 describe('HTTP notification providers', () => {
+  it('rejects unsupported Bluesky delivery without attempting a send', () => {
+    expect(() =>
+      createNotificationProvider('bluesky' as NotificationProviderKind, {}, fetch),
+    ).toThrow('Unsupported notification provider: bluesky');
+  });
+
   it.each(configurations)('registers and sends $kind', async ({ kind, config, provider }) => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
     const instance = createNotificationProvider(kind, config, fetchMock);

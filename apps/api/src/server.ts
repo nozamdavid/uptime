@@ -43,6 +43,8 @@ import { assertValidAdminPasswordHash, verifyAdminPassword } from './auth.js';
 import { parseStoredEndpointEvidence, type EndpointEvidenceLog } from './endpoint-evidence.js';
 import { parseStoredDnsDiagnostic, type DnsDiagnosticLog } from './dns-diagnostics.js';
 
+type SupportedNotificationProviderKind = Exclude<NotificationProviderKind, 'bluesky'>;
+
 const sessionCookie = 'uptime_session';
 const ranges = {
   '1h': 3_600_000,
@@ -158,7 +160,7 @@ export async function buildApi(
       sql`
         select admins.id, admins.email
         from sessions join admins on admins.id = sessions.admin_id
-        where sessions.token_hash = ${hash} and sessions.expires_at > now()
+        where sessions.token_hash = ${hash} and sessions.expires_at > ${now().toISOString()}
         limit 1
       `,
     );
@@ -274,6 +276,7 @@ export async function buildApi(
   app.post('/api/notification-services', async (request, reply) => {
     requireAdmin(request);
     const input = notificationServiceCreateSchema.parse(request.body);
+    assertSupportedProvider(input.provider);
     const inserted = await rows<NotificationServiceRow>(
       database.db,
       sql`
@@ -294,6 +297,7 @@ export async function buildApi(
     const service = await database.db.transaction(async (tx) => {
       const current = await getNotificationServiceForUpdate(tx, id);
       if (!current) throw httpError(404, 'not_found', 'Notification service was not found');
+      assertSupportedProvider(current.provider);
       const config = mergeNotificationConfig(current.provider, current.config, input.config);
       const configurationChanged = !isDeepStrictEqual(config, current.config);
       const enabledChanged = current.enabled !== (input.enabled ?? current.enabled);
@@ -1525,6 +1529,12 @@ function serializeNotificationService(row: NotificationServiceRow): Notification
     case 'webhook':
       config = {};
       break;
+    default:
+      throw httpError(
+        500,
+        'unsupported_provider',
+        `Unsupported notification provider: ${row.provider}`,
+      );
   }
   return {
     id: row.id,
@@ -1604,10 +1614,16 @@ function mergeNotificationConfig(
           service: next.service ?? current.service,
         }),
       );
+    default:
+      throw httpError(
+        400,
+        'unsupported_provider',
+        `Unsupported notification provider: ${provider}`,
+      );
   }
 }
 
-const providerConfigKeys: Record<NotificationProviderKind, ReadonlySet<string>> = {
+const providerConfigKeys: Record<SupportedNotificationProviderKind, ReadonlySet<string>> = {
   telegram: new Set(['botToken', 'chatId']),
   discord: new Set(['webhookUrl']),
   resend: new Set(['apiKey', 'from', 'to', 'subject']),
@@ -1621,9 +1637,19 @@ function assertProviderConfigKeys(
   provider: NotificationProviderKind,
   config: Record<string, unknown>,
 ) {
-  const invalid = Object.keys(config).filter((key) => !providerConfigKeys[provider].has(key));
+  assertSupportedProvider(provider);
+  const supportedKeys = providerConfigKeys[provider];
+  const invalid = Object.keys(config).filter((key) => !supportedKeys.has(key));
   if (invalid.length > 0) {
     throw httpError(400, 'validation_error', 'Request configuration does not match provider');
+  }
+}
+
+function assertSupportedProvider(
+  provider: NotificationProviderKind,
+): asserts provider is SupportedNotificationProviderKind {
+  if (!(provider in providerConfigKeys)) {
+    throw httpError(400, 'unsupported_provider', `Unsupported notification provider: ${provider}`);
   }
 }
 

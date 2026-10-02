@@ -19,6 +19,8 @@ import {
   type MonitorUptimeData,
   type PublicMonitorDetailResponse,
 } from './api.js';
+import * as apiModule from './api.js';
+import { useProductSession } from './product-shell.js';
 import { EndpointEvidence, summarizeEndpointEvidence } from './endpoint-evidence.js';
 import { MonitorForm } from './monitor-form.js';
 import { MonitorBadge } from './monitor-badge.js';
@@ -60,6 +62,15 @@ export function aggregateLatencyBucketLabel(range: LatencyRange) {
 }
 export const monitorDetailRefreshIntervalMs = 60_000;
 
+function workspaceSearch(session: ReturnType<typeof useProductSession>) {
+  try {
+    const helper = apiModule.publicWorkspaceSearch;
+    return typeof helper === 'function' ? helper(window.location.search, session) : '';
+  } catch {
+    return '';
+  }
+}
+
 export function monitorHostname(value: string) {
   try {
     return new URL(value).hostname || value;
@@ -79,6 +90,12 @@ export function MonitorDetail({
   publicMode?: boolean;
   statusPageId?: string;
 }) {
+  const session = useProductSession();
+  const publicWorkspaceContext =
+    publicMode && new URLSearchParams(window.location.search).has('workspace');
+  const hostedFree =
+    Boolean(session?.user && session.workspace?.plan === 'free') || publicWorkspaceContext;
+  const canWrite = !session?.user || session.role === 'owner' || session.role === 'maintainer';
   const [range, setRange] = useState<LatencyRange>('24h');
   const [data, setData] = useState<MonitorDetailResponse | PublicMonitorDetailResponse | null>(
     null,
@@ -111,6 +128,7 @@ export function MonitorDetail({
   );
   const load = () => setReload((value) => value + 1);
   const useSnapshot = publicMode && publicReportsEnabled();
+  const visibleRanges = hostedFree ? (['1h', '24h'] as const) : ranges;
   useEffect(() => {
     let active = true;
     observationGeneration.current += 1;
@@ -309,7 +327,7 @@ export function MonitorDetail({
           >
             Auto-refresh {autoRefresh ? 'on' : 'off'}
           </button>
-          {!publicMode && (
+          {!publicMode && canWrite && (
             <>
               <button className="button button--quiet" onClick={() => setEdit(true)}>
                 Edit
@@ -345,7 +363,7 @@ export function MonitorDetail({
         <PublicShareLink monitorId={monitorId} publicSlug={monitor.publicSlug} />
       )}
       <div className="range-tabs" role="tablist" aria-label="Latency time range">
-        {ranges.map((item) => (
+        {visibleRanges.map((item) => (
           <button
             key={item}
             role="tab"
@@ -423,7 +441,7 @@ export function MonitorDetail({
           }}
         />
       )}
-      {showsPrivateMonitorData(publicMode) && (
+      {showsPrivateMonitorData(publicMode) && !hostedFree && (
         <DnsDiagnostics
           enabled={dnsDiagnosticsEnabled}
           monitorRegions={monitor.regionIds}
@@ -464,7 +482,7 @@ export function MonitorDetail({
           }}
         />
       )}
-      {showsPrivateMonitorData(publicMode) && deleteOpen && (
+      {showsPrivateMonitorData(publicMode) && canWrite && deleteOpen && (
         <DeleteDialog
           name={monitor.name ?? monitor.url}
           onCancel={() => setDeleteOpen(false)}
@@ -721,7 +739,8 @@ function PublicShareLink({
   monitorId: string;
   publicSlug: string | null;
 }) {
-  const url = `${window.location.origin}/monitors/public/${publicSlug ?? monitorId}`;
+  const session = useProductSession();
+  const url = `${window.location.origin}/monitors/public/${publicSlug ?? monitorId}${workspaceSearch(session)}`;
   const [copied, setCopied] = useState(false);
   return (
     <aside className="estimate estimate--secondary public-share" aria-label="Public share link">

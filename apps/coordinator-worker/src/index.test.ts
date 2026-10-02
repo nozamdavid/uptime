@@ -51,6 +51,67 @@ describe('coordinator runtime dependencies', () => {
   });
 
   afterEach(() => vi.useRealTimers());
+
+  it('acknowledges queued work for a suspended workspace without resolving a tenant database', async () => {
+    const { sqlite, db } = makeDatabase();
+    sqlite.exec(`CREATE TABLE workspaces (id TEXT PRIMARY KEY, state TEXT, execution_lease_token TEXT,
+      execution_lease_until TEXT, updated_at TEXT);
+      CREATE TABLE workspace_usage_daily (workspace_id TEXT, day TEXT, checks INTEGER, rows_read INTEGER,
+      rows_written INTEGER, storage_bytes INTEGER, updated_at TEXT, PRIMARY KEY(workspace_id, day));
+      INSERT INTO workspaces(id, state) VALUES ('00000000-0000-4000-8000-000000000001', 'suspended');`);
+    let acknowledged = false;
+    let retried = false;
+    await (
+      await import('./index.js')
+    ).default.queue(
+      {
+        messages: [
+          {
+            body: {
+              workspaceId: '00000000-0000-4000-8000-000000000001',
+              scheduledAt: '2026-09-20T10:00:00.000Z',
+            },
+            ack: () => (acknowledged = true),
+            retry: () => (retried = true),
+          },
+        ],
+      } as never,
+      { CONTROL_DB: db } as never,
+    );
+    expect(acknowledged).toBe(true);
+    expect(retried).toBe(false);
+  });
+
+  it('retries queued work when an active workspace has a live execution lease', async () => {
+    const { sqlite, db } = makeDatabase();
+    sqlite.exec(`CREATE TABLE workspaces (id TEXT PRIMARY KEY, state TEXT, execution_lease_token TEXT,
+      execution_lease_until TEXT, updated_at TEXT);
+      CREATE TABLE workspace_usage_daily (workspace_id TEXT, day TEXT, checks INTEGER, rows_read INTEGER,
+      rows_written INTEGER, storage_bytes INTEGER, updated_at TEXT, PRIMARY KEY(workspace_id, day));
+      INSERT INTO workspaces(id, state, execution_lease_token, execution_lease_until)
+      VALUES ('00000000-0000-4000-8000-000000000002', 'active', 'held', '2099-01-01T00:00:00.000Z');`);
+    let acknowledged = false;
+    let retried = false;
+    await (
+      await import('./index.js')
+    ).default.queue(
+      {
+        messages: [
+          {
+            body: {
+              workspaceId: '00000000-0000-4000-8000-000000000002',
+              scheduledAt: '2026-09-20T10:00:00.000Z',
+            },
+            ack: () => (acknowledged = true),
+            retry: () => (retried = true),
+          },
+        ],
+      } as never,
+      { CONTROL_DB: db } as never,
+    );
+    expect(acknowledged).toBe(false);
+    expect(retried).toBe(true);
+  });
   it('runs the separate reporter with only D1 and R2 bindings', async () => {
     const { db } = makeDatabase();
     const reports = new FakeR2();

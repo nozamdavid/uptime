@@ -16,6 +16,8 @@ import {
 } from '@uptime/contracts';
 
 import { api, type PublicStatusPage as PublicStatusPageData } from './api.js';
+import * as apiModule from './api.js';
+import { useProductSession } from './product-shell.js';
 import { publicReportsEnabled } from './config.js';
 import { monitorDisplayName } from './monitor-format.js';
 import { MonitorBadge } from './monitor-badge.js';
@@ -38,6 +40,14 @@ interface EditorGroup {
 }
 
 type SortableMonitor = Pick<MonitorSummary['monitor'], 'name' | 'url'>;
+function workspaceSearch(session: ReturnType<typeof useProductSession>) {
+  try {
+    const helper = apiModule.publicWorkspaceSearch;
+    return typeof helper === 'function' ? helper(window.location.search, session) : '';
+  } catch {
+    return '';
+  }
+}
 const monitorNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 export function sortMonitorIdsAlphabetically(
@@ -58,6 +68,8 @@ export function sortMonitorIdsAlphabetically(
 }
 
 export function StatusPagesIndex() {
+  const session = useProductSession();
+  const canWrite = !session?.user || session.role === 'owner' || session.role === 'maintainer';
   const [pages, setPages] = useState<Awaited<ReturnType<typeof api.statusPages>>['statusPages']>();
   const [error, setError] = useState('');
   useEffect(() => {
@@ -76,9 +88,11 @@ export function StatusPagesIndex() {
           <h1>Status pages</h1>
           <p>Group monitors into a public, ninety-day service history.</p>
         </div>
-        <a className="button button--primary" href="/status-pages/new">
-          Add status page
-        </a>
+        {canWrite && (
+          <a className="button button--primary" href="/status-pages/new">
+            Add status page
+          </a>
+        )}
       </div>
       {error ? (
         <p className="state state--error">{error}</p>
@@ -97,7 +111,7 @@ export function StatusPagesIndex() {
               </a>
               <a
                 className="status-page-list__external"
-                href={`/status/${page.publicSlug ?? page.id}`}
+                href={`/status/${page.publicSlug ?? page.id}${workspaceSearch(session)}`}
                 target="_blank"
                 rel="noreferrer"
                 aria-label={`Open ${page.title} public status page`}
@@ -117,6 +131,8 @@ export function StatusPagesIndex() {
 }
 
 export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
+  const session = useProductSession();
+  const canWrite = !session?.user || session.role === 'owner' || session.role === 'maintainer';
   const creating = statusPageId === 'new';
   const navigate = useNavigate();
   const [title, setTitle] = useState('');
@@ -315,18 +331,20 @@ export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
           {!creating && (
             <a
               className="button button--quiet"
-              href={`/status/${publicSlug ?? statusPageId}`}
+              href={`/status/${publicSlug ?? statusPageId}${workspaceSearch(session)}`}
               target="_blank"
             >
               Open public page
             </a>
           )}
-          <button
-            className="button button--primary"
-            disabled={busy || !title.trim() || Boolean(slugError)}
-          >
-            {busy ? 'Saving…' : 'Save page'}
-          </button>
+          {canWrite && (
+            <button
+              className="button button--primary"
+              disabled={busy || !title.trim() || Boolean(slugError)}
+            >
+              {busy ? 'Saving…' : 'Save page'}
+            </button>
+          )}
         </div>
       </div>
       {error && <p className="state state--error">{error}</p>}
@@ -335,6 +353,7 @@ export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
         <input
           value={title}
           onChange={(event) => setTitle(event.target.value)}
+          disabled={!canWrite || busy}
           maxLength={120}
           required
         />
@@ -348,7 +367,7 @@ export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
           <input
             value={publicSlug ?? ''}
             placeholder={creating ? 'service-status' : statusPageId}
-            disabled={busy}
+            disabled={!canWrite || busy}
             onBlur={() => {
               if (publicSlug) setPublicSlug(normalizePublicMonitorSlug(publicSlug));
             }}

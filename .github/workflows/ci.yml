@@ -20,6 +20,11 @@ jobs:
       - run: pnpm format:check
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm generate:wrangler -- --check
+      - run: node --test deploy/cloudflare/hosted/gateway.test.mjs
+      - run: pnpm --filter @uptime/web build
+      - run: pnpm --filter @uptime/api-worker exec wrangler deploy --config ../../deploy/cloudflare/hosted/api.wrangler.toml --dry-run
+      - run: pnpm --filter @uptime/coordinator-worker exec wrangler deploy --config ../../deploy/cloudflare/hosted/coordinator.wrangler.toml --dry-run
       - run: scripts/tests/deploy-workers.sh
       - run: scripts/tests/reset-admin.sh
       - name: Validate Docker Compose

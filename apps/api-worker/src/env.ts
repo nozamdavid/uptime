@@ -64,7 +64,9 @@ function parseOrigins(source: {
 }
 
 export function parseApiEnv(source: CloudflareEnv): ApiConfig {
-  const env = envSchema.parse(source);
+  const env = source.CONTROL_DB
+    ? envSchema.omit({ ADMIN_EMAIL: true, ADMIN_PASSWORD_HASH: true }).parse(source)
+    : envSchema.parse(source);
   const enabledRegionIds = parseRegionsList(env.REGIONS_LIST);
   const environment = env.ENVIRONMENT;
   const sessionCookieSecure = env.SESSION_COOKIE_SECURE ?? environment === 'production';
@@ -77,8 +79,11 @@ export function parseApiEnv(source: CloudflareEnv): ApiConfig {
     throw new Error('SESSION_COOKIE_SAMESITE=none requires SESSION_COOKIE_SECURE=true');
   }
   return {
-    adminEmail: env.ADMIN_EMAIL,
-    adminPasswordHash: env.ADMIN_PASSWORD_HASH,
+    adminEmail: 'ADMIN_EMAIL' in env && typeof env.ADMIN_EMAIL === 'string' ? env.ADMIN_EMAIL : '',
+    adminPasswordHash:
+      'ADMIN_PASSWORD_HASH' in env && typeof env.ADMIN_PASSWORD_HASH === 'string'
+        ? env.ADMIN_PASSWORD_HASH
+        : '',
     sessionSecret: env.SESSION_SECRET,
     sessionTtlSeconds: sessionTtlSeconds(
       env.SESSION_TTL_SECONDS === undefined ? {} : { SESSION_TTL_SECONDS: env.SESSION_TTL_SECONDS },

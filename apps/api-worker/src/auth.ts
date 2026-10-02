@@ -13,7 +13,7 @@ import { isSupportedPasswordHash } from './password-hash.js';
 
 export interface SessionAdmin {
   id: string;
-  email: string;
+  email?: string;
 }
 
 interface AdminRow {
