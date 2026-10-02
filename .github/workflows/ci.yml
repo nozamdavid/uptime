@@ -27,6 +27,9 @@ jobs:
       - run: pnpm --filter @uptime/coordinator-worker exec wrangler deploy --config ../../deploy/cloudflare/hosted/coordinator.wrangler.toml --dry-run
       - run: scripts/tests/deploy-workers.sh
       - run: scripts/tests/deploy-app-workers.sh
+      - run: scripts/tests/provision-tenant-pool.sh
+      - run: scripts/tests/deploy-hosted-workers.sh
+      - run: scripts/tests/bootstrap-operator-workspace.sh
       - run: node --test deploy/cloudflare/staging/pages/gateway.test.mjs
       - run: scripts/tests/reset-admin.sh
       - name: Validate Docker Compose

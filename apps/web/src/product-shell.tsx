@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api } from './api.js';
 import type { ProductSession } from './api.js';
+import { SlotAssignment } from './slot-assignment.js';
 
 export const ProductSessionContext = createContext<ProductSession | null>(null);
 export function useProductSession() {
@@ -600,7 +601,8 @@ export function OperatorPage() {
             </p>
             <p className="operator-budget__coverage">
               {slots.configuredSlots} configured Cloudflare database slots. This controls the
-              configured pool; new physical databases still require deployment configuration.
+              configured pool; deployment precreates and migrates its databases. The last available
+              database stays reserved for testing.
             </p>
             <form
               className="operator-controls"
@@ -621,12 +623,12 @@ export function OperatorPage() {
               }}
             >
               <label>
-                Workspace limit
+                Public workspace limit
                 <input
                   name="maxWorkspaces"
                   type="number"
                   min="1"
-                  max={Math.min(10, slots.configuredSlots)}
+                  max="10"
                   defaultValue={slots.maxWorkspaces}
                   disabled={savingControls}
                 />
@@ -672,6 +674,22 @@ export function OperatorPage() {
                     >
                       {slot.admissionEnabled ? 'Hold' : 'Make available'}
                     </button>
+                  )}
+                  {slot.status === 'available' && slot.workspaceId === null && (
+                    <SlotAssignment
+                      bindingName={slot.bindingName}
+                      signups={interest.signups.filter(
+                        (signup) => signup.did !== session?.user?.did,
+                      )}
+                      onAssigned={async () => {
+                        const [inventory, workspaces] = await Promise.all([
+                          api.operatorSlots(),
+                          api.operatorWorkspaces(),
+                        ]);
+                        setSlots(inventory);
+                        setData(workspaces);
+                      }}
+                    />
                   )}
                 </div>
               ))}

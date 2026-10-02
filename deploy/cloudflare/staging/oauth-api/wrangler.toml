@@ -4,11 +4,10 @@
 # `deploy/cloudflare/staging/pages/_worker.js`:
 #
 #   - `uptime-staging-api` serves the monitoring app and its imported history.
-#   - this Worker serves the OAuth and interest-signup routes only.
+#   - this Worker serves OAuth, interest signup, and dedicated test workspaces.
 #
 # Splitting them keeps the staging gateway's R2 and reporter bindings intact.
-# Do not add TENANT_DB_* bindings here: staging has no workspaces, so a signed-in
-# non-operator is stopped by INTEREST_CHECK_ONLY before a tenant is needed.
+# Tenant bindings are provisioned before deployment. Interest signup allocates none.
 name = "uptime-staging-oauth-api"
 main = "../../../../apps/api-worker/src/index.ts"
 compatibility_date = "2026-08-30"
@@ -27,6 +26,10 @@ database_name = "uptime-staging-control"
 database_id = "cabb1e81-0934-4940-a7d6-7129fe15d649"
 migrations_dir = "../../../../packages/cloudflare/src/control-migrations"
 
+[[r2_buckets]]
+binding = "REPORTS"
+bucket_name = "uptime-staging-reports"
+
 [vars]
 INTEREST_CHECK_ONLY = "true"
 ENVIRONMENT = "staging"
@@ -35,8 +38,87 @@ WEB_ORIGIN = "https://uptime-staging.pages.dev"
 OPERATOR_DIDS = "did:plc:lmkzmvv6sdxntwtyxpg7fqqq"
 REGIONS_LIST = "eu-west,us-east,asia"
 SESSION_TTL_SECONDS = "604800"
+MIN_AVAILABLE_SLOTS = "1"
 
 # Set with `wrangler secret put --config <this file>`. Never commit values.
 # SESSION_SECRET
 # CREDENTIAL_ENCRYPTION_SECRET
 # OAUTH_STORAGE_SECRET
+
+[[d1_databases]]
+binding = "TENANT_DB_000"
+database_name = "uptime-staging-tenant-000"
+database_id = "ab22dbad-9f26-4194-8502-c4cb7d6d8148"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[d1_databases]]
+binding = "TENANT_DB_001"
+database_name = "uptime-staging-tenant-001"
+database_id = "c3afb3be-6f21-4191-a949-a40dc2589b38"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[d1_databases]]
+binding = "TENANT_DB_002"
+database_name = "uptime-staging-tenant-002"
+database_id = "4b7efb7e-71c4-44be-9f98-350895e59c5a"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[d1_databases]]
+binding = "TENANT_DB_003"
+database_name = "uptime-staging-tenant-003"
+database_id = "5c7dee4d-319c-42b6-b6e5-7aef3acabb66"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[d1_databases]]
+binding = "TENANT_DB_004"
+database_name = "uptime-staging-tenant-004"
+database_id = "fcf7d44d-ce64-4c24-936d-4e1c4c71f28b"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[d1_databases]]
+binding = "TENANT_DB_005"
+database_name = "uptime-staging-tenant-005"
+database_id = "df3e3d61-85f2-4cbd-bb96-4ecdb9f48c6a"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[d1_databases]]
+binding = "TENANT_DB_006"
+database_name = "uptime-staging-tenant-006"
+database_id = "bcde5aad-2185-4cbc-bd6d-4f5fc04e0f3b"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[d1_databases]]
+binding = "TENANT_DB_007"
+database_name = "uptime-staging-tenant-007"
+database_id = "41309d7e-2c58-4627-a0aa-7bb77c75dba3"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[d1_databases]]
+binding = "TENANT_DB_008"
+database_name = "uptime-staging-tenant-008"
+database_id = "9dc3938e-84fb-47b5-af6e-6e565ae14a89"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[d1_databases]]
+binding = "TENANT_DB_009"
+database_name = "uptime-staging-tenant-009"
+database_id = "48b0a14e-9101-49e1-bfa2-c0e15ad4854b"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[d1_databases]]
+binding = "STAGING_OPERATOR_DB"
+database_name = "uptime-staging-operator"
+database_id = "2d4169f6-df50-41f5-8729-99c475e3966c"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[d1_databases]]
+binding = "STAGING_TEST_DB_001"
+database_name = "uptime-staging-test-001"
+database_id = "646b4afc-d0c0-44ee-9827-4f5b613ee757"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[d1_databases]]
+binding = "STAGING_TEST_DB_002"
+database_name = "uptime-staging-test-002"
+database_id = "9ea6db7e-b40c-4a9e-a4dc-8e2a83d037b8"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
