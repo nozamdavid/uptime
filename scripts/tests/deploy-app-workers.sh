@@ -16,6 +16,14 @@ pnpm() {
   fi
 }
 export -f pnpm
+git() {
+  case "$*" in
+    *symbolic-ref*) printf '%s\n' "$DEPLOY_TEST_BRANCH" ;;
+    *) command git "$@" ;;
+  esac
+}
+export -f git
+export DEPLOY_TEST_BRANCH=main
 export DEPLOY_APP_WORKERS_TEST_LOG="$log_file"
 
 # Missing secrets file is rejected.
@@ -67,5 +75,32 @@ set +e
 status=$?
 set -e
 [[ "$status" -eq 1 ]]
+
+# The release branch defaults to staging, including migration targets.
+: > "$log_file"
+DEPLOY_TEST_BRANCH=codex/product-release-plan "$root/scripts/deploy-app-workers.sh" >/dev/null
+[[ "$(sed -n '1p' "$log_file")" == *"d1 migrations apply uptime-staging --remote --config $root/deploy/cloudflare/staging/api/wrangler.toml"* ]]
+[[ "$(sed -n '2p' "$log_file")" == *"--config $root/deploy/cloudflare/staging/api/wrangler.toml"* ]]
+[[ "$(sed -n '3p' "$log_file")" == *"--config $root/deploy/cloudflare/staging/coordinator/wrangler.toml"* ]]
+
+# CLI targeting takes precedence over the environment variable.
+: > "$log_file"
+DEPLOY_ENVIRONMENT=production "$root/scripts/deploy-app-workers.sh" --environment=staging --dry-run >/dev/null
+[[ "$(sed -n '1p' "$log_file")" == *"/staging/api/wrangler.toml"* ]]
+
+# Production is rejected before migrations or deployments on the release branch.
+for requested in cli variable; do
+  : > "$log_file"
+  set +e
+  if [[ "$requested" == cli ]]; then
+    DEPLOY_TEST_BRANCH=codex/product-release-plan "$root/scripts/deploy-app-workers.sh" --environment production >/dev/null 2>&1
+  else
+    DEPLOY_TEST_BRANCH=codex/product-release-plan DEPLOY_ENVIRONMENT=production "$root/scripts/deploy-app-workers.sh" >/dev/null 2>&1
+  fi
+  status=$?
+  set -e
+  [[ "$status" -eq 1 ]]
+  [[ ! -s "$log_file" ]]
+done
 
 echo "deploy-app-workers shell tests passed"

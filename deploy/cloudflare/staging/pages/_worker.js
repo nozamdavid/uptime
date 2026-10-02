@@ -69,9 +69,28 @@ async function liveMonitorReport(request, env) {
   });
 }
 
+// AT Protocol OAuth and interest-signup routes live on a separate Worker so
+// this gateway can keep serving the imported monitoring history from R2.
+// Checked before the `/api/` prefix because the OAuth callback lives under it.
+function oauthRoute(pathname, request) {
+  if (pathname === '/oauth' || pathname.startsWith('/oauth/')) return true;
+  if (pathname === '/api/auth/atproto' || pathname.startsWith('/api/auth/atproto/')) return true;
+  if (pathname === '/api/interest' || pathname.startsWith('/api/interest/')) return true;
+  if (pathname === '/api/operator' || pathname.startsWith('/api/operator/')) return true;
+  if (pathname === '/api/auth/identity') return true;
+  return (
+    pathname === '/api/auth/logout' &&
+    /(?:^|;\s*)uptime_atproto_session=/.test(request.headers.get('cookie') ?? '')
+  );
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    if (oauthRoute(url.pathname, request)) {
+      return env.OAUTH.fetch(request);
+    }
 
     if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
       return env.API.fetch(request);

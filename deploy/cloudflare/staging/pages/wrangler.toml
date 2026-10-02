@@ -6,6 +6,11 @@ pages_build_output_dir = "../../../../dist/staging/web"
 binding = "API"
 service = "uptime-staging-api"
 
+# AT Protocol OAuth and interest signup. See ../oauth-api/wrangler.toml.
+[[services]]
+binding = "OAUTH"
+service = "uptime-staging-oauth-api"
+
 [[services]]
 binding = "REPORTER"
 service = "uptime-staging-reporter"

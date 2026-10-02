@@ -1,0 +1,42 @@
+# AT Protocol OAuth Worker for staging.
+#
+# Staging runs two API backends behind the Pages gateway in
+# `deploy/cloudflare/staging/pages/_worker.js`:
+#
+#   - `uptime-staging-api` serves the monitoring app and its imported history.
+#   - this Worker serves the OAuth and interest-signup routes only.
+#
+# Splitting them keeps the staging gateway's R2 and reporter bindings intact.
+# Do not add TENANT_DB_* bindings here: staging has no workspaces, so a signed-in
+# non-operator is stopped by INTEREST_CHECK_ONLY before a tenant is needed.
+name = "uptime-staging-oauth-api"
+main = "../../../../apps/api-worker/src/index.ts"
+compatibility_date = "2026-08-30"
+compatibility_flags = ["global_fetch_strictly_public"]
+workers_dev = true
+
+[limits]
+cpu_ms = 100
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "CONTROL_DB"
+database_name = "uptime-staging-control"
+database_id = "cabb1e81-0934-4940-a7d6-7129fe15d649"
+migrations_dir = "../../../../packages/cloudflare/src/control-migrations"
+
+[vars]
+INTEREST_CHECK_ONLY = "true"
+ENVIRONMENT = "staging"
+PUBLIC_ORIGIN = "https://uptime-staging.pages.dev"
+WEB_ORIGIN = "https://uptime-staging.pages.dev"
+OPERATOR_DIDS = "did:plc:lmkzmvv6sdxntwtyxpg7fqqq"
+REGIONS_LIST = "eu-west,us-east,asia"
+SESSION_TTL_SECONDS = "604800"
+
+# Set with `wrangler secret put --config <this file>`. Never commit values.
+# SESSION_SECRET
+# CREDENTIAL_ENCRYPTION_SECRET
+# OAUTH_STORAGE_SECRET
