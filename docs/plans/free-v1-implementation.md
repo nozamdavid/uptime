@@ -1,6 +1,12 @@
 # Free first version
 
-The implementation on `codex/product-release-plan` uses AT Protocol OAuth, dedicated D1 databases per owned workspace, and a $20 monthly operating budget. Customers see a single free plan. This document records the implemented scope and supersedes the earlier plan's authentication, budget, and initial feature choices.
+The product implementation on `codex/product-release-plan` uses AT Protocol OAuth, dedicated D1 databases per owned workspace, and a $20 monthly operating budget. The public landing currently collects interest ahead of the free release. This document records the implemented scope and supersedes the earlier plan's authentication, budget, and initial feature choices.
+
+## Temporary interest check
+
+Until release, `/` and `/signup` collect interest through a single AT Protocol handle field. OAuth requests only the identity scope `atproto`. The verified callback stores one `interest_signups` row per DID with the handle, first signup timestamp, and latest signup timestamp. Repeated signup updates the handle and preserves the first signup date. It performs no AT repository writes and allocates no workspace database.
+
+The operator page shows the total and latest 500 signups. `/api/interest/session` confirms only the signed-in user's record; the full collection is restricted to allowlisted operators. New visitors cannot create monitoring workspaces while `INTEREST_CHECK_ONLY=true`, which is the default in the hosted API and local configurations. Existing test members and operators retain product access. At release, set that variable to `false` and replace the interest form with the product signup entry point; the collected list remains available.
 
 ## Product contract
 
@@ -18,6 +24,10 @@ The implementation on `codex/product-release-plan` uses AT Protocol OAuth, dedic
 `CONTROL_DB` holds identity, membership, invitations, lifecycle, a trusted database-slot inventory, budget controls, daily usage, the dispatch outbox, and encrypted OAuth state/session records. Each workspace has its own statically bound D1 database with an identity marker. Client-supplied workspace IDs require membership; client input cannot choose database bindings.
 
 The initial deployment binds ten empty tenant databases to the API and coordinator. Registration reserves a slot atomically and becomes active only after verifying the database identity. Interrupted provisioning retries its existing reservation. Capacity exhaustion gives a waiting state. Broader shard routing remains later work.
+
+New users are active by default after provisioning. Waiting for capacity is distinct from operator suspension. The operator can Activate a waiting workspace once a slot is available and the forecast is below the ceiling, at most $20, even while automatic admission is closed. Resume restores a suspended workspace. Local development also provides ten database slots.
+
+The operator's slot panel shows availability and assignment, limits admissions to 1 through the smaller of ten or the registered bound pool, and holds or reopens unused slots. Lowering the limit does not evict existing workspaces. Assigned slots remain tied to their workspace and deleted slots remain quarantined. New physical databases require deployment configuration and trusted registration.
 
 Cron records durable tenant dispatches before enqueueing. Queue consumers recheck lifecycle and budget, acquire a fenced execution lease, and use existing idempotent check keys. R2 keys are prefixed with the workspace ID. The public gateway calls the API, which checks current publication and workspace state before serving data.
 

@@ -18,6 +18,18 @@ afterEach(() => {
 });
 
 describe('AT Protocol OAuth authentication', () => {
+  it('returns failed interest authorization to its retry page', async () => {
+    const fake = fakeClient();
+    fake.client.callback = async () => {
+      throw new Error('Authorization denied');
+    };
+    const auth = createAuth(fake.client, { successPath: '/app', failurePath: '/' });
+    const response = await auth.callback(
+      new Request('https://api.example.com/api/auth/atproto/callback'),
+    );
+    expect(response.headers.get('location')).toBe('/?auth_error=atproto');
+  });
+
   it('publishes official SDK metadata for the Worker callback', async () => {
     const metadata = (await createSdkAuth().metadata().json()) as {
       client_id: string;

@@ -2,6 +2,12 @@
 
 This deployment uses one control D1 database, up to ten statically bound tenant D1 databases, one queue, one R2 bucket, an API Worker, a coordinator Worker, and a Pages gateway. It does not deploy or provision resources automatically.
 
+## Interest check before release
+
+The hosted API and local configs default to `INTEREST_CHECK_ONLY=true`. The landing and signup pages collect verified AT Protocol handles through OAuth with only the `atproto` identity scope. The callback records DID, handle, and timestamps in `CONTROL_DB.interest_signups`. Joining does not allocate a tenant slot. The operator page displays the total and latest 500 signups; the full collection can also be queried from the control database. No AT Protocol posts, follows, messages, or repository writes are made.
+
+Apply all control migrations, including `0002_slot_controls.sql` and `0003_interest_signups.sql`, before deploying the updated API. Existing operators and test members retain product access, while new interest-only visitors cannot create monitoring workspaces. To release monitoring signup, set `INTEREST_CHECK_ONLY=false` and replace the temporary public interest form with the product signup entry point. Keep the interest collection for the release follow-up.
+
 ## Provisioning
 
 1. Create the control database, ten empty tenant databases, the `uptime-tenant-jobs` queue and dead-letter queue, the `uptime-reports` bucket, and a Pages project.
@@ -20,6 +26,10 @@ VALUES('TENANT_DB_000','THE_ACTUAL_DATABASE_ID',13,'available');
 ```
 
 Register only databases that are empty, fully migrated, and bound identically to both Workers. First login automatically reserves an unused slot, writes its tenant identity, and marks the workspace active. Registration remains `waiting_for_capacity` when admission is closed, the forecast reaches $15, or all ten slots are assigned. Never manually mark a workspace active before the identity marker is written. A deleted slot remains quarantined; create a fresh database rather than automatically reusing it.
+
+The operator's Capacity pool shows available, assigned, held, and quarantined slots. Set the workspace limit between 1 and the smaller of ten or the number of registered, bound slots. Lowering the limit stops additional allocations without removing existing workspaces. Hold and Make available apply only to unused slots; held slots are excluded from allocation. Assigned and quarantined slots cannot be reopened or reassigned through these controls. Adding a physical database still requires provisioning, migrations, identical Worker bindings, and trusted registration as above.
+
+Activate provisions a waiting workspace through the same identity checks as signup. This explicit operator action may admit an individual while automatic admission is closed or the forecast has reached $15, provided a ready slot and room under the workspace limit exist and the forecast remains below the configured ceiling, at most $20. Resume restores a workspace that the operator suspended. Both actions are audited, and neither changes the automatic admission switch.
 
 ## Reports and public access
 
@@ -53,16 +63,22 @@ Run these from the repository root:
 
 ```sh
 pnpm --filter @uptime/api-worker exec wrangler d1 migrations apply CONTROL_DB --local --config ../../deploy/cloudflare/hosted/local.wrangler.toml --persist-to ../../.wrangler/hosted-local
-pnpm --filter @uptime/api-worker exec wrangler d1 migrations apply TENANT_DB_000 --local --config ../../deploy/cloudflare/hosted/local.wrangler.toml --persist-to ../../.wrangler/hosted-local
-pnpm --filter @uptime/api-worker exec wrangler d1 execute CONTROL_DB --local --config ../../deploy/cloudflare/hosted/local.wrangler.toml --persist-to ../../.wrangler/hosted-local --command "INSERT INTO tenant_slots(binding_name,database_id,schema_version,status) VALUES('TENANT_DB_000','00000000-0000-4000-8000-000000000001',13,'available') ON CONFLICT(binding_name) DO NOTHING"
+for slot_number in {0..9}; do
+  slot_label=$(printf '%03d' "$slot_number")
+  database_suffix=$(printf '%012d' "$((slot_number + 1))")
+  pnpm --filter @uptime/api-worker exec wrangler d1 migrations apply "TENANT_DB_${slot_label}" --local --config ../../deploy/cloudflare/hosted/local.wrangler.toml --persist-to ../../.wrangler/hosted-local
+  pnpm --filter @uptime/api-worker exec wrangler d1 execute CONTROL_DB --local --config ../../deploy/cloudflare/hosted/local.wrangler.toml --persist-to ../../.wrangler/hosted-local --command "INSERT INTO tenant_slots(binding_name,database_id,schema_version,status) VALUES('TENANT_DB_${slot_label}','00000000-0000-4000-8000-${database_suffix}',13,'available') ON CONFLICT(binding_name) DO NOTHING"
+done
 pnpm --filter @uptime/api-worker exec wrangler dev --config ../../deploy/cloudflare/hosted/local.wrangler.toml --persist-to ../../.wrangler/hosted-local --ip 127.0.0.1 --port 8787
 ```
 
 Start `pnpm --filter @uptime/web dev --host 127.0.0.1` in a second terminal. Open `http://127.0.0.1:5176/signup`. Vite forwards `/api`, `/oauth`, and `/reports` to the local Worker. Use the IP address consistently so the callback cookie stays on the same host.
 
+Local development includes ten dedicated database slots, matching the initial cohort limit. New signups become active automatically when a slot and admission budget are available. If capacity is exhausted, the workspace shows waiting rather than suspended. After adding capacity, the operator can use Activate or the owner can reload to retry automatic provisioning. Suspended workspaces require the operator's Resume action.
+
 Local OAuth uses the official virtual `http://localhost/` client ID with an encoded loopback callback and `atproto` scope. Production uses HTTPS metadata at the public origin. No tunnel or password proxy is required. See [the AT Protocol localhost specification](https://atproto.com/specs/oauth#localhost-client-development).
 
-The local smoke test on 2026-10-02 completed provider login, identity-only consent, the callback, automatic tenant allocation, workspace settings, and operator access. The session also survived a Worker restart. The password was entered only on the authorization server and was not saved in repository files. This test does not replace the production-domain smoke checks above.
+Local smoke tests on 2026-10-02 completed provider login, identity-only consent, callbacks, workspace provisioning, operator access, and session persistence after a Worker restart. The interest-check flow returned to its confirmation page and showed the verified handle in the operator's collection without allocating another tenant slot. Operator activation of a waiting test workspace and holding/reopening an unused slot also passed. The password was entered only on the authorization server and was not saved in repository files. These tests do not replace the production-domain smoke checks above.
 
 ## Billing and rollback
 

@@ -10,6 +10,7 @@ import {
   purgeWorkspaceData,
   type CloudflareEnv,
   type D1Database,
+  toBoolean,
 } from '@uptime/cloudflare';
 import { z } from 'zod';
 import { createApiRouter, type LogSink } from './app.js';
@@ -34,6 +35,7 @@ import {
 } from './queries.js';
 import { assertPublicHttpUrl, UrlPolicyError } from './security.js';
 import { meterDatabase, flushUsage, type MeteredDatabase } from './usage-meter.js';
+import { interestList, interestReturnPath, interestSignup, recordInterest } from './interest.js';
 
 export const hostedLimits = {
   monitors: 3,
@@ -101,6 +103,9 @@ export async function hostedFetch(
       const auth = createAtprotoAuth({
         db: control,
         log,
+        onLogin: async (principal, returnTo) => {
+          if (returnTo === interestReturnPath) await recordInterest(control, principal);
+        },
         config: {
           publicOrigin,
           sessionSecret: config.sessionSecret,
@@ -109,6 +114,7 @@ export async function hostedFetch(
           cookieSecure: new URL(publicOrigin).protocol === 'https:',
           allowLocalHttp: config.environment === 'development',
           successPath: '/app',
+          failurePath: toBoolean(env.INTEREST_CHECK_ONLY) ? '/' : '/app',
         },
       });
       const url = new URL(request.url);
@@ -129,7 +135,14 @@ export async function hostedFetch(
         context.waitUntil(auth.prune().catch(() => undefined));
       } else if (path === '/api/auth/logout' && request.method === 'POST')
         response = await auth.logout(request);
-      else if (
+      else if (path === '/api/interest/session' && request.method === 'GET') {
+        await consumeBudget(control, `interest:${clientAddress(request)}`, 60, 60);
+        await consumeBudget(control, 'public:global', 20_000, 86_400);
+        const principal = await auth.principal(request);
+        response = json({
+          signup: principal ? await interestSignup(control, principal.did) : null,
+        });
+      } else if (
         /^\/api\/(monitors|status-pages)\/public\//.test(path) ||
         path.startsWith('/reports/public/')
       ) {
@@ -155,6 +168,20 @@ export async function hostedFetch(
         );
         if (user && user.state !== 'active')
           throw new HttpErrorLike(403, 'account_suspended', 'Account is suspended');
+        const isOperator = operatorDids(env).includes(principal.did);
+        if (toBoolean(env.INTEREST_CHECK_ONLY) && !isOperator) {
+          const membership = await first(
+            control,
+            'SELECT workspace_id FROM memberships WHERE did=? LIMIT 1',
+            [principal.did],
+          );
+          if (!membership)
+            throw new HttpErrorLike(
+              403,
+              'product_not_released',
+              'Monitoring access has not launched yet. Join the interest list on the home page.',
+            );
+        }
         const workspace = await ensureWorkspace(env, principal);
         const selectedId = request.headers.get('x-uptime-workspace');
         const selected =
@@ -166,7 +193,6 @@ export async function hostedFetch(
           'UPDATE workspaces SET last_seen_at = ? WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)',
           [new Date().toISOString(), selected.id, new Date(Date.now() - 15 * 60_000).toISOString()],
         );
-        const isOperator = operatorDids(env).includes(principal.did);
         if (path === '/api/auth/session' && request.method === 'GET') {
           response = json({
             user: principal,
@@ -416,13 +442,29 @@ export async function ensureWorkspace(
     `INSERT INTO memberships(workspace_id,did,role,created_at) VALUES(?,?,'owner',?) ON CONFLICT(workspace_id,did) DO NOTHING`,
     [workspace.id, principal.did, timestamp],
   );
+  return provisionWorkspace(env, workspace);
+}
+
+async function provisionWorkspace(
+  env: CloudflareEnv,
+  workspace: Workspace,
+  operatorActivation = false,
+): Promise<Workspace> {
+  const control = env.CONTROL_DB as D1Database;
+  const timestamp = new Date().toISOString();
   if (workspace.state === 'waiting_for_capacity') {
     const budget = await budgetSummary(control);
-    if (budget.admissionOpen && budget.forecastUsd < 15) {
+    if (
+      (operatorActivation || budget.admissionOpen) &&
+      budget.forecastUsd < (operatorActivation ? budget.ceilingUsd : 15)
+    ) {
       await run(
         control,
         `UPDATE tenant_slots SET workspace_id = ?, status = 'assigned'
-        WHERE binding_name = (SELECT binding_name FROM tenant_slots WHERE status = 'available' AND workspace_id IS NULL ORDER BY binding_name LIMIT 1)
+        WHERE binding_name = (SELECT s.binding_name FROM tenant_slots s
+          WHERE s.status = 'available' AND s.workspace_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM tenant_slot_controls c WHERE c.binding_name = s.binding_name AND c.admission_enabled = 0)
+          ORDER BY s.binding_name LIMIT 1)
         AND NOT EXISTS (SELECT 1 FROM tenant_slots WHERE workspace_id = ?)
         AND (SELECT count(*) FROM tenant_slots WHERE status = 'assigned') < (SELECT max_workspaces FROM service_controls WHERE id = 1)`,
         [workspace.id, workspace.id],
@@ -551,9 +593,94 @@ async function workspaceUsage(env: CloudflareEnv, workspace: Workspace) {
   );
 }
 
+async function slotInventory(env: CloudflareEnv) {
+  const control = env.CONTROL_DB as D1Database;
+  const rows = await all<{
+    binding_name: string;
+    database_id: string;
+    status: 'available' | 'assigned' | 'deleting';
+    workspace_id: string | null;
+    owner_handle: string | null;
+    admission_enabled: number;
+  }>(
+    control,
+    `SELECT s.*, u.handle AS owner_handle, COALESCE(c.admission_enabled,1) AS admission_enabled
+    FROM tenant_slots s LEFT JOIN tenant_slot_controls c ON c.binding_name=s.binding_name
+    LEFT JOIN workspaces w ON w.id=s.workspace_id LEFT JOIN users u ON u.did=w.owner_did
+    ORDER BY s.binding_name`,
+  );
+  const configured = rows.filter((slot) => {
+    const binding = env[slot.binding_name] as D1Database | undefined;
+    return binding && typeof binding.prepare === 'function';
+  });
+  const settings = await first<{ max_workspaces: number }>(
+    control,
+    'SELECT max_workspaces FROM service_controls WHERE id=1',
+  );
+  return {
+    maxWorkspaces: settings?.max_workspaces ?? 10,
+    configuredSlots: configured.length,
+    assignedSlots: rows.filter((slot) => slot.status === 'assigned').length,
+    availableSlots: configured.filter(
+      (slot) => slot.status === 'available' && !slot.workspace_id && slot.admission_enabled === 1,
+    ).length,
+    heldSlots: rows.filter((slot) => slot.status === 'available' && slot.admission_enabled === 0)
+      .length,
+    quarantinedSlots: rows.filter((slot) => slot.status === 'deleting').length,
+    slots: rows.map((slot) => ({
+      bindingName: slot.binding_name,
+      databaseId: slot.database_id,
+      status: slot.status,
+      admissionEnabled: slot.admission_enabled === 1,
+      workspaceId: slot.workspace_id,
+      ownerHandle: slot.owner_handle,
+    })),
+  };
+}
+
 async function operatorRequest(request: Request, env: CloudflareEnv, principal: AtprotoPrincipal) {
   const control = env.CONTROL_DB as D1Database;
   const path = new URL(request.url).pathname;
+  if (path === '/api/operator/interest' && request.method === 'GET')
+    return json(await interestList(control));
+  if (path === '/api/operator/slots' && request.method === 'GET')
+    return json(await slotInventory(env));
+  if (path === '/api/operator/slots' && request.method === 'PATCH') {
+    const inventory = await slotInventory(env);
+    const input = z
+      .object({
+        maxWorkspaces: z.number().int().min(1).max(Math.min(10, inventory.configuredSlots)),
+      })
+      .parse(await readJson(request));
+    await run(control, 'UPDATE service_controls SET max_workspaces=? WHERE id=1', [
+      input.maxWorkspaces,
+    ]);
+    await audit(control, null, principal.did, 'workspace_capacity', input);
+    return json(await slotInventory(env));
+  }
+  const slotAdmission = path.match(/^\/api\/operator\/slots\/([A-Z][A-Z0-9_]{0,63})\/admission$/);
+  if (slotAdmission && request.method === 'POST') {
+    const bindingName = slotAdmission[1]!;
+    const input = z.object({ enabled: z.boolean() }).parse(await readJson(request));
+    const binding = env[bindingName] as D1Database | undefined;
+    if (!binding || typeof binding.prepare !== 'function')
+      throw new HttpErrorLike(409, 'slot_unavailable', 'Slot is not bound to this deployment');
+    const updated = await first(
+      control,
+      `INSERT INTO tenant_slot_controls(binding_name,admission_enabled)
+      SELECT binding_name, ? FROM tenant_slots WHERE binding_name=? AND status='available' AND workspace_id IS NULL
+      ON CONFLICT(binding_name) DO UPDATE SET admission_enabled=excluded.admission_enabled RETURNING binding_name`,
+      [input.enabled ? 1 : 0, bindingName],
+    );
+    if (!updated)
+      throw new HttpErrorLike(
+        409,
+        'slot_in_use',
+        'Only unused database slots can be held or reopened',
+      );
+    await audit(control, null, principal.did, 'slot_admission', { bindingName, ...input });
+    return json(await slotInventory(env));
+  }
   if (path === '/api/operator/workspaces' && request.method === 'GET') {
     const rows = await all<
       Workspace & {
@@ -592,6 +719,20 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
     const input = z
       .object({ state: z.enum(['active', 'suspended']), reason: z.string().trim().min(1).max(500) })
       .parse(await readJson(request));
+    const workspace = await first<Workspace>(control, 'SELECT * FROM workspaces WHERE id = ?', [
+      id,
+    ]);
+    if (workspace?.state === 'waiting_for_capacity' && input.state === 'active') {
+      const provisioned = await provisionWorkspace(env, workspace, true);
+      if (provisioned.state !== 'active')
+        throw new HttpErrorLike(
+          409,
+          'capacity_unavailable',
+          'Activation needs an available database slot, space under the workspace limit, and a forecast below the budget ceiling',
+        );
+      await audit(control, id, principal.did, 'workspace_state', input);
+      return json({ id, state: provisioned.state });
+    }
     const updated = await first(
       control,
       "UPDATE workspaces SET state = ?, updated_at = ? WHERE id = ? AND state IN ('active','suspended') RETURNING id",
