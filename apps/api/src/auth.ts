@@ -11,11 +11,7 @@ export class InvalidAdminPasswordHashError extends Error {
   }
 }
 
-/**
- * Validates the exact PHC parser used by argon2. A `false` verification result
- * means the hash was parsed successfully and simply does not match this fixed
- * validation password.
- */
+/** Validate hashes with argon2's PHC parser. */
 export async function assertValidAdminPasswordHash(hash: string): Promise<void> {
   if (!canonicalArgon2idPhc.test(hash)) throw new InvalidAdminPasswordHashError();
   try {

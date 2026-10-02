@@ -1,0 +1,29 @@
+name = "uptime-staging-reporter"
+main = "../../../../apps/coordinator-worker/src/reporter.ts"
+compatibility_date = "2026-08-30"
+workers_dev = true
+
+[observability]
+enabled = true
+
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "uptime-staging"
+database_id = "3900c94a-82a0-4422-a5f8-1a56b781cea7"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[r2_buckets]]
+binding = "REPORTS"
+bucket_name = "uptime-staging-reports"
+
+[[workflows]]
+name = "uptime-staging-monitor-refresh"
+binding = "MONITOR_REFRESH"
+class_name = "MonitorRefreshWorkflow"
+
+[vars]
+REPORT_INTERVAL_SECONDS = "60"
+MONITOR_SNAPSHOT_FRESH_SECONDS = "120"

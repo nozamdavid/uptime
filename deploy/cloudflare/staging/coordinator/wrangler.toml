@@ -1,0 +1,38 @@
+name = "uptime-staging-coordinator"
+main = "../../../../apps/coordinator-worker/src/index.ts"
+compatibility_date = "2026-08-30"
+compatibility_flags = ["global_fetch_strictly_public"]
+workers_dev = true
+
+[observability]
+enabled = true
+
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "uptime-staging"
+database_id = "3900c94a-82a0-4422-a5f8-1a56b781cea7"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
+[[r2_buckets]]
+binding = "REPORTS"
+bucket_name = "uptime-staging-reports"
+
+[vars]
+ENVIRONMENT = "staging"
+REGIONS_LIST = "us-east,us-west,canada-central,eu-west,eu-north,eu-south,asia,asia-east,asia-south"
+WORKERS_URL_DOMAIN = "david-8af.workers.dev"
+PROBE_WORKER_NAME_PREFIX = "uptime-staging-probe-"
+DETAILED_RESULTS_RETENTION_DAYS = "30"
+# Daily aggregates are preserved permanently.
+DNS_DIAGNOSTICS_RETENTION_DAYS = "30"
+PROBE_REQUEST_MAX_SKEW_SECONDS = "60"
+REPORT_INTERVAL_SECONDS = "60"
+REPORT_SCHEDULE_DISABLED = "true"
+NOTIFICATION_MAX_ATTEMPTS = "8"
+COORDINATOR_MONITOR_BATCH = "50"
+COORDINATOR_PROBE_CONCURRENCY = "32"
+
+# Set only on this Worker: PROBE_SIGNING_SECRET, CREDENTIAL_ENCRYPTION_SECRET

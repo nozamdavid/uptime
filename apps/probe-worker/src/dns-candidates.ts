@@ -3,6 +3,7 @@ import type {
   DnsDiagnosticInstruction,
   DnsDiagnosticResult,
 } from '@uptime/contracts';
+import { forbiddenIpv4Cidrs } from '@uptime/contracts';
 
 const answerCap = 8;
 const maxTtlSeconds = 604_800;
@@ -16,7 +17,7 @@ export interface ResolverAnswer {
   readonly ttl: number;
 }
 
-/** Internal seam used by the Cloudflare DoH adapter and deterministic tests. */
+/** Cloudflare DoH adapter used directly by tests. */
 export interface DnsResolverAdapter {
   resolve(
     hostname: string,
@@ -168,24 +169,12 @@ function inIpv4Cidr(value: number, network: string, prefix: number): boolean {
 }
 
 const specialIpv4Cidrs = [
-  ['0.0.0.0', 8],
-  ['10.0.0.0', 8],
-  ['100.64.0.0', 10],
-  ['127.0.0.0', 8],
-  ['169.254.0.0', 16],
-  ['172.16.0.0', 12],
-  ['192.0.0.0', 24],
-  ['192.0.2.0', 24],
+  ...forbiddenIpv4Cidrs,
+  // Additional special-use ranges filtered from DNS answers only.
   ['192.31.196.0', 24],
   ['192.52.193.0', 24],
   ['192.88.99.0', 24],
-  ['192.168.0.0', 16],
   ['192.175.48.0', 24],
-  ['198.18.0.0', 15],
-  ['198.51.100.0', 24],
-  ['203.0.113.0', 24],
-  ['224.0.0.0', 4],
-  ['240.0.0.0', 4],
 ] as const;
 
 function classifyIpv4(value: string): 'public' | 'special' | 'invalid' {
@@ -223,8 +212,7 @@ const specialIpv6Cidrs = [
   ['::ffff:0:0', 96],
   ['64:ff9b:1::', 48],
   ['100::', 64],
-  // IETF protocol assignments, 6to4, and documentation ranges are not
-  // useful public origin candidates. Reject the entire blocks conservatively.
+  // Reject protocol-assignment and documentation ranges.
   ['2001::', 23],
   ['2001:2::', 48],
   ['2001:db8::', 32],
@@ -253,10 +241,7 @@ function boundedTtl(value: number): number | null {
   return Math.min(Math.trunc(value), maxTtlSeconds);
 }
 
-/**
- * Collects a bounded snapshot of DNS candidates for the already-validated final
- * HTTP hostname. It is non-throwing and never claims a candidate was connected.
- */
+/** Collect bounded DNS candidates for an already validated hostname. */
 export async function collectDnsCandidates(
   finalHostname: string,
   instruction: DnsDiagnosticInstruction,

@@ -5,13 +5,16 @@ import { deriveAggregateStatus, percentile } from './status.js';
 describe('aggregate monitor status', () => {
   const regions = ['us-east', 'eu-west', 'asia'] as const;
 
-  it('distinguishes missing evidence from target failures', () => {
+  it('treats a Worker-reported timeout as down while excluding missing regions', () => {
     expect(deriveAggregateStatus(regions, [])).toBe('unknown');
     expect(
       deriveAggregateStatus(regions, [
         { regionId: 'us-east', success: false, status: 'network_failure' },
       ]),
-    ).toBe('unknown');
+    ).toBe('down');
+    expect(
+      deriveAggregateStatus(regions, [{ regionId: 'us-east', success: true, status: 'success' }]),
+    ).toBe('up');
     expect(
       deriveAggregateStatus(regions, [
         { regionId: 'us-east', success: true, status: 'success' },
@@ -42,13 +45,13 @@ describe('aggregate monitor status', () => {
     ).toBe('down');
   });
 
-  it('keeps strict-majority and missing-result semantics at larger region counts', () => {
+  it('uses only returned Worker evidence at larger region counts', () => {
     expect(
       deriveAggregateStatus(
         ['us-east', 'us-west'],
         [{ regionId: 'us-east', success: false, status: 'http_failure' }],
       ),
-    ).toBe('unknown');
+    ).toBe('down');
     expect(
       deriveAggregateStatus(
         ['us-east', 'us-west', 'canada-central', 'eu-west'],
@@ -59,7 +62,7 @@ describe('aggregate monitor status', () => {
           { regionId: 'eu-west', success: true, status: 'success' },
         ],
       ),
-    ).toBe('down');
+    ).toBe('degraded');
     expect(
       deriveAggregateStatus(
         ['us-east', 'us-west', 'canada-central', 'eu-west', 'eu-north', 'eu-south'],
@@ -98,7 +101,7 @@ describe('aggregate monitor status', () => {
           { regionId: 'asia-south', success: true, status: 'success' },
         ],
       ),
-    ).toBe('down');
+    ).toBe('degraded');
   });
 });
 

@@ -85,6 +85,82 @@ describe('probe worker request guard', () => {
     },
   );
 
+  it('treats a fast HTTP 521 response as unreachable', async () => {
+    const issuedAt = new Date().toISOString();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response('Web server is down', { status: 521 })),
+    );
+
+    const response = await worker.fetch(
+      signedRequest({
+        checkRunId: 'ec1e26af-4a95-47a1-9400-3ea1caf03000',
+        monitorId: '0ceba4d4-dde0-4e7e-99d7-062517cfa3cf',
+        windowStartedAt: issuedAt,
+        regionId: 'us-east',
+        url: 'https://example.com/health',
+        timeoutMs: 1_000,
+        method: 'GET',
+        maxRedirects: 5,
+        maxBodyBytes: 65_536,
+        requestId: 'b46f9f80-7ea6-43c7-a674-4b9a57ac6745',
+        issuedAt,
+      }),
+      env,
+      context,
+    );
+
+    await expect(response.json()).resolves.toMatchObject({
+      status: 'http_failure',
+      success: false,
+      httpStatus: 521,
+      errorDetail: 'HTTP 521',
+    });
+  });
+
+  it('executes five same-region probes in one bounded batch', async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const fetchMock = vi.fn(async () => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await Promise.resolve();
+      active -= 1;
+      return new Response('ok', { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const issuedAt = new Date().toISOString();
+    const requestId = crypto.randomUUID();
+    const items = Array.from({ length: 5 }, (_, index) => ({
+      checkRunId: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+      monitorId: `00000000-0000-4000-8001-${String(index + 1).padStart(12, '0')}`,
+      windowStartedAt: issuedAt,
+      url: `https://example.com/${index}`,
+      timeoutMs: 1_000,
+      method: 'GET',
+      maxRedirects: 5,
+      maxBodyBytes: 65_536,
+    }));
+
+    const response = await worker.fetch(
+      signedRequest({ requestId, issuedAt, regionId: 'us-east', items }),
+      env,
+      context,
+    );
+    const payload = (await response.json()) as {
+      requestId: string;
+      regionId: string;
+      results: { checkRunId: string; monitorId: string; response: { success: boolean } }[];
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload).toMatchObject({ requestId, regionId: 'us-east' });
+    expect(payload.results).toHaveLength(5);
+    expect(payload.results.every((result) => result.response.success)).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(maximumActive).toBe(2);
+  });
+
   it('returns final-response CDN evidence for a signed synthetic request', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response('ok', {
@@ -214,5 +290,43 @@ describe('probe worker request guard', () => {
     expect(dnsUrls.every((url) => new URL(url).searchParams.get('name') === 'final.example')).toBe(
       true,
     );
+  });
+
+  it('cancels redirect bodies before following the next hop', async () => {
+    const cancel = vi.fn();
+    const redirectBody = new ReadableStream<Uint8Array>({ cancel });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(redirectBody, {
+          status: 302,
+          headers: { location: 'https://example.com/final' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const issuedAt = new Date().toISOString();
+
+    const response = await worker.fetch(
+      signedRequest({
+        checkRunId: 'ec1e26af-4a95-47a1-9400-3ea1caf03000',
+        monitorId: '0ceba4d4-dde0-4e7e-99d7-062517cfa3cf',
+        windowStartedAt: issuedAt,
+        regionId: 'us-east',
+        url: 'https://example.com/start',
+        timeoutMs: 1_000,
+        method: 'GET',
+        maxRedirects: 5,
+        maxBodyBytes: 65_536,
+        requestId: 'b46f9f80-7ea6-43c7-a674-4b9a57ac6745',
+        issuedAt,
+      }),
+      env,
+      context,
+    );
+
+    expect(response.status).toBe(200);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

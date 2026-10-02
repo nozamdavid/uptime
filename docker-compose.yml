@@ -17,12 +17,13 @@ services:
     platform: linux/amd64
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in .env}
+      REGIONS_LIST: ${REGIONS_LIST:-us-east,us-west,canada-central,eu-west,eu-north,eu-south,asia,asia-east,asia-south}
       API_HOST: ${API_HOST:-0.0.0.0}
       API_PORT: 3000
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
-      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
-      SESSION_SECRET: ${SESSION_SECRET:-}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:?ADMIN_PASSWORD_HASH must be set in .env}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set in .env}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}
     depends_on:
       migrate:
@@ -54,17 +55,10 @@ services:
     platform: linux/amd64
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in .env}
-      PROBE_SIGNING_SECRET: ${PROBE_SIGNING_SECRET:-}
+      REGIONS_LIST: ${REGIONS_LIST:-us-east,us-west,canada-central,eu-west,eu-north,eu-south,asia,asia-east,asia-south}
+      WORKERS_URL_DOMAIN: ${WORKERS_URL_DOMAIN:?WORKERS_URL_DOMAIN must be set in .env}
+      PROBE_SIGNING_SECRET: ${PROBE_SIGNING_SECRET:?PROBE_SIGNING_SECRET must be set in .env}
       PROBE_REQUEST_MAX_SKEW_SECONDS: ${PROBE_REQUEST_MAX_SKEW_SECONDS:-60}
-      PROBE_US_EAST_URL: ${PROBE_US_EAST_URL:-https://probe-us-east.example.com}
-      PROBE_US_WEST_URL: ${PROBE_US_WEST_URL:-https://probe-us-west.example.com}
-      PROBE_CANADA_CENTRAL_URL: ${PROBE_CANADA_CENTRAL_URL:-https://probe-canada-central.example.com}
-      PROBE_EU_WEST_URL: ${PROBE_EU_WEST_URL:-https://probe-eu-west.example.com}
-      PROBE_EU_NORTH_URL: ${PROBE_EU_NORTH_URL:-https://probe-eu-north.example.com}
-      PROBE_EU_SOUTH_URL: ${PROBE_EU_SOUTH_URL:-https://probe-eu-south.example.com}
-      PROBE_ASIA_URL: ${PROBE_ASIA_URL:-https://probe-asia.example.com}
-      PROBE_ASIA_EAST_URL: ${PROBE_ASIA_EAST_URL:-https://probe-asia-east.example.com}
-      PROBE_ASIA_SOUTH_URL: ${PROBE_ASIA_SOUTH_URL:-https://probe-asia-south.example.com}
       SCHEDULER_POLL_INTERVAL_MS: ${SCHEDULER_POLL_INTERVAL_MS:-1000}
       SCHEDULER_MAX_CONCURRENT_PROBES: ${SCHEDULER_MAX_CONCURRENT_PROBES:-32}
       SCHEDULER_INSTANCE_ID: ${SCHEDULER_INSTANCE_ID:-compose-scheduler-1}

@@ -1,5 +1,15 @@
 import { z } from 'zod';
 import { regionIds } from '@uptime/regions';
+import { monitorNotificationFields } from './notifications.js';
+
+export * from './notifications.js';
+export * from './notification-config.js';
+export * from './notification-history.js';
+export * from './monitor-summary.js';
+export * from './uptime.js';
+export * from './notification-state.js';
+export * from './ip-policy.js';
+export * from './report-types.js';
 
 export { regionIds, type RegionId } from '@uptime/regions';
 
@@ -7,17 +17,20 @@ export { calculateTargetChecksPerDay } from './estimate.js';
 
 export const regionIdSchema = z.enum(regionIds);
 
-export const intervalSecondsValues = [60, 300, 900, 1800, 3600] as const;
-export const intervalSecondsSchema = z.union(
-  intervalSecondsValues.map((value) => z.literal(value)) as [
-    z.ZodLiteral<60>,
-    z.ZodLiteral<300>,
-    z.ZodLiteral<900>,
-    z.ZodLiteral<1800>,
-    z.ZodLiteral<3600>,
-  ],
+export const intervalSecondsValues = [
+  60, 120, 180, 240, 300, 360, 420, 480, 540, 600, 660, 720, 780, 840, 900, 1_200, 1_500, 1_800,
+  2_100, 2_400, 2_700, 3_000, 3_300, 3_600,
+] as const;
+export type IntervalSeconds = (typeof intervalSecondsValues)[number];
+
+/** Slider presets shared by the monitor editor; the source of truth for allowed intervals. */
+export const checkIntervalPresets: readonly IntervalSeconds[] = intervalSecondsValues;
+/** Bounds shared by the monitor editor and the timeout schema below. */
+export const timeoutConstraints = Object.freeze({ minimumMs: 1_000, maximumMs: 30_000 });
+export const intervalSecondsSchema = z.custom<IntervalSeconds>(
+  (value) => typeof value === 'number' && intervalSecondsValues.includes(value as IntervalSeconds),
+  'Check frequency must be 1–15 minutes or a 5-minute increment up to 60 minutes',
 );
-export type IntervalSeconds = z.infer<typeof intervalSecondsSchema>;
 
 export const timeoutMsSchema = z.number().int().min(1_000).max(30_000);
 export const httpUrlSchema = z
@@ -27,6 +40,59 @@ export const httpUrlSchema = z
     'URL must use HTTP or HTTPS',
   );
 
+export function normalizeMonitorUrl(value: string) {
+  const trimmed = value.trim();
+  return /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
+const monitorInputUrlSchema = z.string().transform(normalizeMonitorUrl).pipe(httpUrlSchema);
+
+export const badgeSchema = z.object({
+  id: z.uuid(),
+  name: z.string().trim().min(1).max(40),
+  color: z.string().regex(/^#[0-9a-f]{6}$/i),
+});
+export type Badge = z.infer<typeof badgeSchema>;
+export const badgeCreateSchema = badgeSchema.pick({ name: true });
+export type BadgeCreate = z.infer<typeof badgeCreateSchema>;
+
+export const uptimeThresholdsSchema = z
+  .object({
+    green: z.number().min(0).max(100).default(99.5),
+    lightGreen: z.number().min(0).max(100).default(99),
+    orange: z.number().min(0).max(100).default(90),
+  })
+  .refine(
+    ({ green, lightGreen, orange }) => orange <= lightGreen && lightGreen <= green,
+    'Uptime thresholds must descend from green to orange',
+  );
+export type UptimeThresholds = z.infer<typeof uptimeThresholdsSchema>;
+export const defaultUptimeThresholds: UptimeThresholds = {
+  green: 99.5,
+  lightGreen: 99,
+  orange: 90,
+};
+
+export function normalizePublicMonitorSlug(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, '-');
+}
+
+export const publicMonitorSlugSchema = z
+  .string()
+  .transform(normalizePublicMonitorSlug)
+  .pipe(
+    z
+      .string()
+      .min(3, 'Public slug must be at least 3 characters')
+      .max(64, 'Public slug must be at most 64 characters')
+      .regex(
+        /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/,
+        'Public slug can contain lowercase letters, numbers, dots, and single hyphens',
+      ),
+  )
+  .refine((value) => !z.uuid().safeParse(value).success, 'Public slug cannot be a UUID');
+export const publicStatusPageSlugSchema = publicMonitorSlugSchema;
+
 export const regionSelectionSchema = z
   .array(regionIdSchema)
   .min(1)
@@ -34,14 +100,18 @@ export const regionSelectionSchema = z
   .refine((values) => new Set(values).size === values.length, 'Regions must be unique');
 
 const monitorFieldsSchema = z.object({
+  ...monitorNotificationFields,
   name: z.string().trim().min(1).max(120).nullable().optional(),
-  url: httpUrlSchema,
+  url: monitorInputUrlSchema,
   regionIds: regionSelectionSchema,
   intervalSeconds: intervalSecondsSchema,
   timeoutMs: timeoutMsSchema,
   enabled: z.boolean().default(true),
   dnsDiagnosticsEnabled: z.boolean().default(false),
   isPublic: z.boolean().default(false),
+  publicSlug: z.union([publicMonitorSlugSchema, z.null()]).optional(),
+  badgeId: z.union([z.uuid(), z.null()]).optional(),
+  uptimeThresholds: uptimeThresholdsSchema.optional(),
 });
 
 export const monitorCreateSchema = monitorFieldsSchema.superRefine((value, context) => {
@@ -59,6 +129,42 @@ export const monitorUpdateSchema = monitorFieldsSchema
   .partial()
   .refine((value) => Object.keys(value).length > 0, 'At least one field is required');
 export type MonitorUpdate = z.infer<typeof monitorUpdateSchema>;
+
+export const monitorBulkFrequencyUpdateSchema = z.object({
+  monitorIds: z.array(z.uuid()).min(1).max(100),
+  intervalSeconds: intervalSecondsSchema,
+});
+export type MonitorBulkFrequencyUpdate = z.infer<typeof monitorBulkFrequencyUpdateSchema>;
+
+export const monitorBulkBadgeUpdateSchema = z.object({
+  monitorIds: z.array(z.uuid()).min(1).max(100),
+  badgeId: z.union([z.uuid(), z.null()]),
+});
+export type MonitorBulkBadgeUpdate = z.infer<typeof monitorBulkBadgeUpdateSchema>;
+
+export const statusPageGroupInputSchema = z.object({
+  title: z.string().trim().min(1).max(120),
+  monitorIds: z.array(z.uuid()),
+  width: z.enum(['full', 'half']).default('full'),
+  showBadges: z.boolean().default(true),
+});
+export const statusPageSaveSchema = z
+  .object({
+    title: z.string().trim().min(1).max(120),
+    publicSlug: z.union([publicStatusPageSlugSchema, z.null()]).optional(),
+    groups: z.array(statusPageGroupInputSchema).max(20),
+  })
+  .superRefine((value, context) => {
+    const monitorIds = value.groups.flatMap((group) => group.monitorIds);
+    if (new Set(monitorIds).size !== monitorIds.length) {
+      context.addIssue({
+        code: 'custom',
+        path: ['groups'],
+        message: 'A monitor can appear only once on a status page',
+      });
+    }
+  });
+export type StatusPageSave = z.infer<typeof statusPageSaveSchema>;
 
 export const estimateRequestSchema = z.object({
   regionIds: regionSelectionSchema,
@@ -166,6 +272,7 @@ export const endpointEvidenceSchema = z.object({
 export type EndpointEvidence = z.infer<typeof endpointEvidenceSchema>;
 
 export const monitorSchema = z.object({
+  ...monitorNotificationFields,
   id: z.uuid(),
   name: z.string().nullable(),
   url: httpUrlSchema,
@@ -175,6 +282,9 @@ export const monitorSchema = z.object({
   enabled: z.boolean(),
   dnsDiagnosticsEnabled: z.boolean().default(false),
   isPublic: z.boolean().default(false),
+  publicSlug: publicMonitorSlugSchema.nullable().default(null),
+  badge: badgeSchema.nullable().optional(),
+  uptimeThresholds: uptimeThresholdsSchema.optional(),
   createdAt: z.iso.datetime({ offset: true }),
   updatedAt: z.iso.datetime({ offset: true }),
 });
@@ -250,10 +360,7 @@ export const monitorSummarySchema = z.object({
 });
 export type MonitorSummary = z.infer<typeof monitorSummarySchema>;
 
-/**
- * The intentionally narrow monitor result used by unauthenticated share links.
- * It excludes request-level evidence and diagnostic data, which remain admin-only.
- */
+/** Public monitor data; request evidence and diagnostics remain admin-only. */
 export const publicLatestObservationSchema = z.object({
   regionId: regionIdSchema,
   status: observationStatusSchema,
@@ -267,7 +374,13 @@ export const publicLatestObservationSchema = z.object({
 });
 export type PublicLatestObservation = z.infer<typeof publicLatestObservationSchema>;
 
-export const publicMonitorSchema = monitorSchema.omit({ dnsDiagnosticsEnabled: true });
+export const publicMonitorSchema = monitorSchema.omit({
+  dnsDiagnosticsEnabled: true,
+  notificationServiceIds: true,
+  outageThreshold: true,
+  recoveryThreshold: true,
+  repeatNotificationMinutes: true,
+});
 export type PublicMonitor = z.infer<typeof publicMonitorSchema>;
 
 export const publicMonitorSummarySchema = z.object({
@@ -293,13 +406,12 @@ export const latencyStatsSchema = z.object({
   p99Ms: z.number().nonnegative().nullable(),
 });
 
-export const probeRequestSchema = z.object({
-  requestId: z.uuid(),
+export const probeBatchSize = 5;
+
+export const probeItemSchema = z.object({
   checkRunId: z.uuid(),
   monitorId: z.uuid(),
   windowStartedAt: z.iso.datetime({ offset: true }),
-  issuedAt: z.iso.datetime({ offset: true }),
-  regionId: regionIdSchema,
   url: httpUrlSchema,
   timeoutMs: timeoutMsSchema,
   method: z.literal('GET'),
@@ -307,7 +419,22 @@ export const probeRequestSchema = z.object({
   maxBodyBytes: z.literal(65_536),
   dnsDiagnostic: dnsDiagnosticInstructionSchema.nullable().optional(),
 });
+export type ProbeItem = z.infer<typeof probeItemSchema>;
+
+export const probeRequestSchema = probeItemSchema.extend({
+  requestId: z.uuid(),
+  issuedAt: z.iso.datetime({ offset: true }),
+  regionId: regionIdSchema,
+});
 export type ProbeRequest = z.infer<typeof probeRequestSchema>;
+
+export const probeBatchRequestSchema = z.object({
+  requestId: z.uuid(),
+  issuedAt: z.iso.datetime({ offset: true }),
+  regionId: regionIdSchema,
+  items: z.array(probeItemSchema).min(1).max(probeBatchSize),
+});
+export type ProbeBatchRequest = z.infer<typeof probeBatchRequestSchema>;
 
 export const probeResponseSchema = observationSchema
   .omit({ id: true, checkRunId: true, monitorId: true, completedAt: true })
@@ -318,7 +445,7 @@ export const probeResponseSchema = observationSchema
       try {
         finalHostname = new URL(response.finalUrl).hostname.toLowerCase();
       } catch {
-        // finalUrl has already been checked by httpUrlSchema; keep this guard local.
+        // `finalUrl` was already checked by `httpUrlSchema`.
       }
     }
     if (response.endpointEvidence && finalHostname !== response.endpointEvidence.finalHostname) {
@@ -337,6 +464,21 @@ export const probeResponseSchema = observationSchema
     }
   });
 export type ProbeResponse = z.infer<typeof probeResponseSchema>;
+
+export const probeBatchResponseSchema = z.object({
+  requestId: z.uuid(),
+  regionId: regionIdSchema,
+  results: z
+    .array(
+      z.object({
+        checkRunId: z.uuid(),
+        monitorId: z.uuid(),
+        response: z.unknown(),
+      }),
+    )
+    .max(probeBatchSize),
+});
+export type ProbeBatchResponse = z.infer<typeof probeBatchResponseSchema>;
 
 export const apiErrorSchema = z.object({
   error: z.object({

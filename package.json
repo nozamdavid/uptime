@@ -1,5 +1,6 @@
 {
   "name": "multi-region-uptime",
+  "description": "Uptime monitoring on Cloudflare Workers, D1, R2, and Pages",
   "version": "0.1.0",
   "private": true,
   "packageManager": "pnpm@11.24.0",
@@ -11,8 +12,9 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "format:check": "prettier --check .",
-    "db:generate": "pnpm --filter @uptime/database generate",
-    "db:migrate": "pnpm --filter @uptime/database migrate"
+    "generate:wrangler": "node scripts/generate-wrangler-configs.ts",
+    "db:migrate:local": "pnpm --filter @uptime/api-worker exec wrangler d1 migrations apply uptime --local --config ../../deploy/cloudflare/api/wrangler.toml",
+    "hash:admin": "node scripts/hash-admin-password.ts"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

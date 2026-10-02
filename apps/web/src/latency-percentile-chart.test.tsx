@@ -6,8 +6,8 @@ import type { MonitorDetailResponse } from './api.js';
 
 document.body.innerHTML = '<div id="root"></div>';
 (window as unknown as { scrollTo: () => void }).scrollTo = () => undefined;
-const { LatencyPercentileChart, toPercentileChart } = await import('./monitor-detail.js');
-
+const { LatencyPercentileChart, LatencySampleNote, toPercentileChart } =
+  await import('./monitor-detail.js');
 const data = {
   latency: {
     points: [],
@@ -72,9 +72,43 @@ describe('latency percentile chart data', () => {
     expect(markup).toContain('P99');
     expect(markup).toContain('Text alternative for the regional latency percentiles bar chart');
     expect(markup).toContain('Europe West (Ireland)');
-    expect(markup).toContain('120 ms');
-    expect(markup).toContain('250 ms');
-    expect(markup).toContain('350 ms');
+    expect(markup).toContain('120ms');
+    expect(markup).toContain('250ms');
+    expect(markup).toContain('350ms');
     expect(markup).toContain('US East (N. Virginia)</td><td>—</td>');
+  });
+
+  it('describes the observation limit consistently alongside computed age', () => {
+    const markup = renderToStaticMarkup(
+      createElement(LatencySampleNote, {
+        data: {
+          sampled: true,
+          sampleLimit: 5_000,
+          computedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+        },
+      }),
+    );
+
+    expect(markup).toContain(
+      'Percentiles and chart points use up to the most recent 5,000 observations.',
+    );
+    expect(markup).toContain('Computed 10m ago.');
+
+    const belowLimit = renderToStaticMarkup(
+      createElement(LatencySampleNote, {
+        data: {
+          sampled: false,
+          sampleLimit: 5_000,
+          computedAt: new Date(Date.now() - 82 * 1000).toISOString(),
+        },
+      }),
+    );
+    expect(belowLimit).toContain(
+      'Percentiles and chart points use up to the most recent 5,000 observations.',
+    );
+    expect(belowLimit).toContain('Computed 82s ago.');
+
+    const exact = renderToStaticMarkup(createElement(LatencySampleNote, { data: {} }));
+    expect(exact).toBe('');
   });
 });

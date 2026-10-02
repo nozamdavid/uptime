@@ -13,6 +13,7 @@
     "@uptime/config": "workspace:*",
     "@uptime/contracts": "workspace:*",
     "@uptime/database": "workspace:*",
+    "@uptime/notifications": "workspace:*",
     "drizzle-orm": "^0.44.5",
     "tsx": "^4.20.5"
   }

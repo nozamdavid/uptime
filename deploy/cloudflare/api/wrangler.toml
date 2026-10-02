@@ -1,0 +1,46 @@
+# API Worker (authentication, configuration, private queries).
+#
+# Deploy with:
+#   wrangler deploy --config deploy/cloudflare/api/wrangler.toml
+#
+# The API Worker owns the admin session cookie, all private history queries and
+# the cross-origin CORS contract for the Pages frontend. It never serves public
+# snapshot JSON (that is R2) and must not be scheduled.
+
+name = "uptime-api"
+main = "../../../apps/api-worker/src/index.ts"
+compatibility_date = "2026-08-30"
+workers_dev = true
+
+[observability]
+enabled = true
+
+# D1 is authoritative. Replace the id with the value printed by
+# `wrangler d1 create uptime`.
+[[d1_databases]]
+binding = "DB"
+database_name = "uptime"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "../../../packages/cloudflare/src/migrations"
+
+# Optional R2 binding for private archives. Public reports are written by the
+# coordinator and resolved through the Pages gateway, not through this Worker.
+# [[r2_buckets]]
+# binding = "REPORTS"
+# bucket_name = "uptime-reports"
+
+[vars]
+ENVIRONMENT = "production"
+REGIONS_LIST = "us-east,us-west,canada-central,eu-west,eu-north,eu-south,asia,asia-east,asia-south"
+SESSION_TTL_SECONDS = "604800"
+# Exact origin allowed to send credentialed requests. Must match the Pages
+# origin (or custom admin domain); browsers reject credentialed CORS with a
+# wildcard. Add more comma-separated origins via ALLOWED_ORIGINS.
+WEB_ORIGIN = "https://uptime.pages.dev"
+
+# Secrets, set with `wrangler secret put` and never committed:
+#   SESSION_SECRET               >= 32 chars, HMAC key for session token hashes
+#   ADMIN_EMAIL                  bootstrap admin email
+#   ADMIN_PASSWORD_HASH          pbkdf2-sha256$<iterations>$<salt>$<hash>
+#                                (Argon2 cannot be verified in Workers)
+#   CREDENTIAL_ENCRYPTION_SECRET >= 32 chars, AES-GCM key for provider credentials

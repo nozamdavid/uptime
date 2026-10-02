@@ -1,0 +1,15 @@
+{
+  "name": "@uptime/cloudflare",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./migrations": "./src/migrations/0001_initial.sql",
+    "./testing": "./src/testing/sqlite.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  }
+}

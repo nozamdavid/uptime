@@ -1,27 +1,108 @@
 # Multi-region uptime monitor
 
-A self-hosted control plane for HTTP uptime and latency monitoring with nine Cloudflare Worker probes: US East, US West, Canada Central; Europe West, North, and South; and Asia Southeast, East, and South.
+Uptime monitoring on Cloudflare Workers, D1, R2, and Pages, with checks from up
+to nine regions. Includes latency charts, request history, optional DNS
+diagnostics, notification destinations, public monitor views, and grouped
+status pages.
 
-The control plane, scheduler, PostgreSQL history, and admin UI are self-hosted. Probe compute is deployed to Cloudflare Workers, so this is a hybrid self-hosted system and a single-provider probe fleet. Placement is regional affinity near a configured cloud region, not a guarantee of an exact city or Cloudflare PoP.
+## Architecture
 
-## Requirements
+- The API Worker handles authentication, configuration, and private history.
+- The coordinator claims due checks, sends signed regional probe batches, and
+  stores observations in D1. Notification delivery and retention are bounded.
+- A separately leased report job publishes status-page snapshots to R2. Public
+  monitor snapshots are built on demand by the reporter and cached in R2;
+  Workflow startup runs in the background after the initial snapshot is saved.
+  Status-page publication also starts a refresh cycle for monitors currently
+  down or recovering; active cycles are reused.
+- Regional Workers perform the target requests; Pages serves the React UI.
+- D1 migrations and triggers maintain daily uptime after detailed results expire.
 
-- Node.js 24+
-- pnpm 11+
-- Docker with Compose
+The retired PostgreSQL API, scheduler, schema, exporters, and Docker packaging
+are no longer part of this checkout. Historical migration and audit documents
+remain as records; use the current Cloudflare guides for operations.
 
-## Foundation commands
+## Development and verification
 
-```bash
-cp .env.example .env
-# Set ADMIN_PASSWORD_HASH, SESSION_SECRET, PROBE_SIGNING_SECRET, and all nine
-# PROBE_*_URL values in .env before starting production services.
-docker compose pull
-docker compose up
+Requires Node.js 24+, pnpm 11.24.0, and a Cloudflare account for deployment.
+
+```sh
+pnpm install --frozen-lockfile
+pnpm db:migrate:local
+pnpm hash:admin
 ```
 
-This uses `DATABASE_URL` from `.env` to migrate an existing PostgreSQL database, then starts the API, scheduler, and Vite web UI. Open <http://localhost:5176>. The API is available on `127.0.0.1` at the `API_PORT` configured in `.env`. Set `SESSION_COOKIE_SECURE=true` when serving the app over HTTPS. See [the deployment runbook](docs/operations/deployment-runbook.md) for secret generation and operational checks.
+Copy the required API values from `.env.example` into an ignored
+`deploy/cloudflare/api/.dev.vars` file and fill in local secrets. The password
+helper prints a Workers-compatible PBKDF2 hash. Start the API and UI in separate
+terminals:
 
-Deploy the complete regional fleet with `scripts/deploy-workers.sh` after configuring the shared probe secret. Each Worker needs its own public URL in the scheduler environment (`PROBE_*_URL`); see [the deployment runbook](docs/operations/deployment-runbook.md). At one-minute frequency, a monitor using all nine regions makes 12,960 target checks per day. Cloudflare placement is regional affinity near the configured cloud region, not a guarantee of a specific city or PoP.
+```sh
+pnpm --filter @uptime/api-worker dev
+pnpm --filter @uptime/web dev
+```
 
-See [the architecture](docs/architecture/mvp.md), [the nine-region placement plan](docs/research/nine-region-placement-plan.md), and [the Cloudflare research note](docs/research/cloudflare-workers-multi-region-uptime-monitor.md).
+Vite serves the UI on port 5176 and proxies `/api` to the local API Worker on
+port 8787. Set `UPTIME_API_PROXY_TARGET` if using another port. Background checks
+also require coordinator bindings, secrets, and reachable regional probes; see
+the [deployment runbook](docs/operations/deployment-runbook.md).
+
+```sh
+pnpm typecheck
+pnpm test
+pnpm build
+bash scripts/tests/run-cloudflare-tooling.sh
+scripts/tests/deploy-workers.sh
+pnpm generate:wrangler -- --check
+node --test deploy/cloudflare/staging/pages/gateway.test.mjs
+```
+
+## Deployment
+
+Follow the [Cloudflare deployment guide](deploy/cloudflare/README.md). Production
+and staging use separate checked-in Wrangler configurations; the
+[staging guide](deploy/cloudflare/staging/README.md) documents the existing
+isolated environment. Validate bundles without deploying:
+
+```sh
+scripts/deploy-app-workers.sh --dry-run
+scripts/deploy-workers.sh --dry-run
+```
+
+The app deployment script applies pending D1 migrations before deploying the
+API or coordinator. Secrets and existing data are not stored in the repository.
+
+## Operational behavior
+
+- Region placement hints express affinity, not a guaranteed city or source IP.
+- Requests require an HMAC signature and a current timestamp.
+- Detailed observations default to seven days of retention; daily aggregates
+  remain available. DNS diagnostics default to 30 days.
+- Public monitor reports include the available retained observation history.
+  The Pages gateway routes monitor requests to the reporter, which builds an
+  initial snapshot when needed, considers it fresh for 120 seconds, and starts
+  up to four one-minute refreshes. Workflow creation does not delay the initial
+  response. Closed latency history uses persisted hourly aggregates; the
+  rolling 24-hour window (up to 25 hours from the floored hour) and partial
+  oldest hours at the 7-day and 30-day boundaries use raw observations. Each
+  aggregate keeps exact latency-value frequencies and 15-minute summaries, so
+  percentiles and chart detail remain available. Until a monitor's backfill
+  coverage is ready, reports use the raw-history path. Migration `0010` adds
+  these aggregates; existing monitors are populated with
+  `scripts/backfill-hourly-latency.mts` (see the [Cloudflare guide](deploy/cloudflare/README.md)).
+  Background maintenance repairs up to four closed monitor-hours per minute;
+  observation inserts, corrections, and deletions mark hours for repair.
+  Latency history still follows raw-observation retention: seven days by
+  default in production and 30 days in staging. Reports expose freshness
+  metadata; private history remains available through the API.
+- Uptime charts use cached daily bars for closed days and aggregate the current
+  day's observations separately.
+- HTTP notification providers are supported; SMTP delivery is unsupported in
+  this application’s Worker implementation. See the
+  [notification guide](docs/operations/notifications.md).
+- Monitor intentionally public targets. Literal-address and redirect checks
+  do not provide DNS-to-socket pinning or replace origin access controls.
+
+See [architecture](docs/architecture/mvp.md) for the runtime responsibilities
+and [operations](docs/operations/deployment-runbook.md) for configuration and
+troubleshooting.

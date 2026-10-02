@@ -1,0 +1,8 @@
+# Cloudflare Pages SPA fallback.
+#
+# The React admin app and the public monitor/status routes are client-rendered,
+# so every unknown path must return index.html with a 200 (Cloudflare serves it
+# as the SPA fallback). API and report hosts are cross-origin and are therefore
+# not proxied here.
+/*
+  /index.html  200

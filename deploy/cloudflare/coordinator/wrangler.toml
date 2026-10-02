@@ -1,0 +1,52 @@
+# Coordinator Worker (minute scheduling, report publication, notifications,
+# retention). One Worker hosts all background responsibilities; separate
+# functions share persisted job state so a failure in one does not block the
+# other.
+#
+# Deploy with:
+#   wrangler deploy --config deploy/cloudflare/coordinator/wrangler.toml
+
+name = "uptime-coordinator"
+main = "../../../apps/coordinator-worker/src/index.ts"
+compatibility_date = "2026-08-30"
+workers_dev = true
+
+[observability]
+enabled = true
+
+# Every minute. Cloudflare cron triggers are UTC and do not provide exact
+# wall-clock execution; scheduling uses persisted windows rather than relying on
+# precise invocation timing.
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "uptime"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "../../../packages/cloudflare/src/migrations"
+
+# Public report snapshots written by the publisher.
+[[r2_buckets]]
+binding = "REPORTS"
+bucket_name = "uptime-reports"
+
+[vars]
+ENVIRONMENT = "production"
+REGIONS_LIST = "us-east,us-west,canada-central,eu-west,eu-north,eu-south,asia,asia-east,asia-south"
+WORKERS_URL_DOMAIN = "REPLACE_WITH_ACCOUNT_SUBDOMAIN.workers.dev"
+# Provisional. Measure representative row/index sizes and the required request
+# history window before raising it. plan.md requires a bounded detailed-results
+# window; seven days keeps 100 monitors x 3 regions x 1/min within D1 10 GB.
+DETAILED_RESULTS_RETENTION_DAYS = "7"
+DNS_DIAGNOSTICS_RETENTION_DAYS = "30"
+PROBE_REQUEST_MAX_SKEW_SECONDS = "60"
+REPORT_INTERVAL_SECONDS = "60"
+NOTIFICATION_MAX_ATTEMPTS = "8"
+# Bound per-invocation work; add fan-out only when measured scale requires it.
+COORDINATOR_MONITOR_BATCH = "50"
+COORDINATOR_PROBE_CONCURRENCY = "32"
+
+# Secrets, set with `wrangler secret put` and never committed:
+#   PROBE_SIGNING_SECRET          >= 32 chars, shared with every probe Worker
+#   CREDENTIAL_ENCRYPTION_SECRET  >= 32 chars, AES-GCM key for provider credentials

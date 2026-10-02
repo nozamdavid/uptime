@@ -3,6 +3,9 @@ main = "../../apps/probe-worker/src/index.ts"
 compatibility_date = "2026-08-30"
 workers_dev = true
 
+[observability]
+enabled = true
+
 [placement]
 region = "aws:ap-northeast-1"
 

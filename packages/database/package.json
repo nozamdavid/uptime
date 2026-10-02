@@ -8,10 +8,12 @@
     "./schema": "./src/schema.ts"
   },
   "scripts": {
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "generate": "drizzle-kit generate",
     "migrate": "drizzle-kit migrate",
-    "check": "drizzle-kit check"
+    "check": "drizzle-kit check",
+    "import:bsky-status": "tsx scripts/import-bsky-status.ts"
   },
   "dependencies": {
     "@uptime/contracts": "workspace:*",

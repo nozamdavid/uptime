@@ -1,11 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import {
+  checkFrequencySliderIndex,
   expectedChecksPerDay,
   expectedDnsSnapshotsPerDay,
+  intervalSecondsForSliderIndex,
   isValidTimeout,
 } from './monitor-form.logic.js';
 
 describe('monitor form calculations', () => {
+  it('moves by one minute through 15 minutes, then by five minutes through 60', () => {
+    expect(intervalSecondsForSliderIndex(0)).toBe(60);
+    expect(intervalSecondsForSliderIndex(13)).toBe(840);
+    expect(intervalSecondsForSliderIndex(14)).toBe(900);
+    expect(intervalSecondsForSliderIndex(15)).toBe(1_200);
+    expect(intervalSecondsForSliderIndex(23)).toBe(3_600);
+    expect(checkFrequencySliderIndex(1_800)).toBe(17);
+  });
+
   it('counts every selected regional target check', () => {
     expect(expectedChecksPerDay(['us-east', 'eu-west', 'asia'], 300)).toBe(864);
     expect(

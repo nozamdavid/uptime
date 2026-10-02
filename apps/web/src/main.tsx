@@ -1,4 +1,3 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   createRootRoute,
   createRoute,
@@ -12,12 +11,15 @@ import { createRoot } from 'react-dom/client';
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent } from 'react';
 import type { MonitorSummary } from '@uptime/contracts';
-import { api, RequestError } from './api.js';
+import { api } from './api.js';
 import { MonitorDetail } from './monitor-detail.js';
 import { MonitorForm } from './monitor-form.js';
+import { monitorDisplayName } from './monitor-format.js';
+import { MonitorList } from './monitor-list.js';
+import { NotificationsPage } from './notifications.js';
+import { PublicStatusPage, StatusPageEditor, StatusPagesIndex } from './status-pages.js';
 import './styles.css';
 
-const queryClient = new QueryClient();
 const rootRoute = createRootRoute({ component: AppShell });
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: Overview });
 const detailRoute = createRoute({
@@ -30,8 +32,36 @@ const publicDetailRoute = createRoute({
   path: '/monitors/public/$monitorId',
   component: PublicDetailRoute,
 });
-const routeTree = rootRoute.addChildren([indexRoute, detailRoute, publicDetailRoute]);
-const router = createRouter({ routeTree, context: { queryClient } });
+const statusPagesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/status-pages',
+  component: StatusPagesIndex,
+});
+const notificationsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/notifications',
+  component: NotificationsPage,
+});
+const statusPageEditorRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/status-pages/$statusPageId',
+  component: StatusPageEditorRoute,
+});
+const publicStatusPageRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/status/$statusPageId',
+  component: PublicStatusPageRoute,
+});
+const routeTree = rootRoute.addChildren([
+  indexRoute,
+  detailRoute,
+  publicDetailRoute,
+  statusPagesRoute,
+  notificationsRoute,
+  statusPageEditorRoute,
+  publicStatusPageRoute,
+]);
+const router = createRouter({ routeTree });
 declare module '@tanstack/react-router' {
   interface Register {
     router: typeof router;
@@ -39,13 +69,13 @@ declare module '@tanstack/react-router' {
 }
 
 export function isPublicMonitorPath(pathname: string) {
-  return pathname.startsWith('/monitors/public/');
+  return pathname.startsWith('/monitors/public/') || pathname.startsWith('/status/');
 }
 
 function AppShell() {
-  const isPublicRoute = useRouterState({
-    select: (state) => isPublicMonitorPath(state.location.pathname),
-  });
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const isPublicRoute = isPublicMonitorPath(pathname);
+  const isPublicStatusPage = pathname.startsWith('/status/');
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   useEffect(() => {
     if (isPublicRoute) return;
@@ -56,7 +86,9 @@ function AppShell() {
   }, [isPublicRoute]);
   if (isPublicRoute)
     return (
-      <main className="workspace public-workspace">
+      <main
+        className={`workspace public-workspace${isPublicStatusPage ? ' public-status-workspace' : ''}`}
+      >
         <Outlet />
       </main>
     );
@@ -164,9 +196,19 @@ function Workspace({ children, onSignOut }: { children: React.ReactNode; onSignO
     <>
       <header className="topbar">
         <div className="topbar__inner">
-          <a className="brand" href="/">
-            uptime
-          </a>
+          <nav className="topbar__nav" aria-label="Admin sections">
+            <a className="brand" href="/">
+              Monitors
+            </a>
+            <span className="topbar__divider" aria-hidden="true" />
+            <a className="brand" href="/status-pages">
+              Status pages
+            </a>
+            <span className="topbar__divider" aria-hidden="true" />
+            <a className="brand" href="/notifications">
+              Notifications
+            </a>
+          </nav>
           <button
             ref={trigger}
             className="search-pill"
@@ -179,9 +221,6 @@ function Workspace({ children, onSignOut }: { children: React.ReactNode; onSignO
             <kbd>⌘ K</kbd>
           </button>
           <div className="topbar__actions">
-            <a href="/" className="nav-link">
-              Monitors
-            </a>
             <button
               className="button button--quiet"
               onClick={() => void api.signOut().finally(onSignOut)}
@@ -194,8 +233,6 @@ function Workspace({ children, onSignOut }: { children: React.ReactNode; onSignO
       <main className="workspace">{children}</main>
       <footer className="footer-line">
         <span>Personal monitor</span>
-        <span>·</span>
-        <span>API connection checked on request</span>
       </footer>
       {open && (
         <div
@@ -277,7 +314,7 @@ function Workspace({ children, onSignOut }: { children: React.ReactNode; onSignO
                     onMouseEnter={() => setSelected(index)}
                     onClick={() => openResult(item)}
                   >
-                    <strong>{item.monitor.name ?? new URL(item.monitor.url).hostname}</strong>
+                    <strong>{monitorDisplayName(item.monitor)}</strong>
                     <small>{item.monitor.url}</small>
                   </button>
                 ))
@@ -329,8 +366,15 @@ function Overview() {
         <section className="overview">
           <div className="page-head">
             <div>
-              <h1>Checks by region, not averages.</h1>
-              <p>Each configured location records its own request result and latency history.</p>
+              <h1>Monitors</h1>
+              {items && (
+                <p className="tnum">
+                  {items
+                    .reduce((total, item) => total + item.targetChecksPerDay, 0)
+                    .toLocaleString()}{' '}
+                  total requests/day
+                </p>
+              )}
             </div>
             {items && items.length > 0 && (
               <button className="button button--primary" onClick={() => setFormOpen(true)}>
@@ -356,7 +400,7 @@ function Overview() {
               action={() => setFormOpen(true)}
             />
           ) : (
-            <MonitorList items={items} />
+            <MonitorList items={items} onChanged={() => setReload((value) => value + 1)} />
           )}
         </section>
       )}
@@ -370,35 +414,18 @@ function DetailRoute() {
 }
 function PublicDetailRoute() {
   const { monitorId } = publicDetailRoute.useParams();
-  return <MonitorDetail monitorId={monitorId} publicMode />;
-}
-function MonitorList({ items }: { items: Awaited<ReturnType<typeof api.monitors>>['monitors'] }) {
-  const shown = items;
+  const statusPageId = new URLSearchParams(window.location.search).get('statusPage') ?? undefined;
   return (
-    <div className="monitor-list" aria-live="polite">
-      {shown.map((item) => (
-        <a className="monitor-row" key={item.monitor.id} href={`/monitors/${item.monitor.id}`}>
-          <span
-            className={`status-dot status-dot--${item.status}`}
-            role="img"
-            aria-label={item.status}
-          />
-          <span className="monitor-row__identity">
-            <strong>{item.monitor.name ?? new URL(item.monitor.url).hostname}</strong>
-            <small>{item.monitor.url}</small>
-          </span>
-          <span className="monitor-row__schedule">
-            {formatInterval(item.monitor.intervalSeconds)} · {item.monitor.timeoutMs / 1000}s
-            timeout
-          </span>
-          <span className="monitor-row__regions">
-            {item.monitor.regionIds.length} region{item.monitor.regionIds.length === 1 ? '' : 's'}
-          </span>
-          <span className="tnum">{item.targetChecksPerDay.toLocaleString()} / day</span>
-        </a>
-      ))}
-    </div>
+    <MonitorDetail monitorId={monitorId} publicMode {...(statusPageId ? { statusPageId } : {})} />
   );
+}
+function StatusPageEditorRoute() {
+  const { statusPageId } = statusPageEditorRoute.useParams();
+  return <StatusPageEditor statusPageId={statusPageId} />;
+}
+function PublicStatusPageRoute() {
+  const { statusPageId } = publicStatusPageRoute.useParams();
+  return <PublicStatusPage statusPageId={statusPageId} />;
 }
 function Field({
   label,
@@ -445,11 +472,4 @@ function State({
     </div>
   );
 }
-export function formatInterval(seconds: number) {
-  return seconds < 60 ? `${seconds}s` : `${seconds / 60} min`;
-}
-createRoot(document.getElementById('root')!).render(
-  <QueryClientProvider client={queryClient}>
-    <RouterProvider router={router} />
-  </QueryClientProvider>,
-);
+createRoot(document.getElementById('root')!).render(<RouterProvider router={router} />);

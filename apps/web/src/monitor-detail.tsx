@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode, useEffect, useRef, useState } from 'react';
+import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -9,17 +9,31 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import type { Observation } from '@uptime/contracts';
+import type { Observation, UptimeThresholds } from '@uptime/contracts';
 import { findRegion, regionIds, type RegionId } from '@uptime/regions';
 import {
   api,
   type DnsDiagnosticRecord,
   type MonitorDetailResponse,
   type MonitorLatencyData,
+  type MonitorUptimeData,
   type PublicMonitorDetailResponse,
 } from './api.js';
 import { EndpointEvidence, summarizeEndpointEvidence } from './endpoint-evidence.js';
 import { MonitorForm } from './monitor-form.js';
+import { MonitorBadge } from './monitor-badge.js';
+import { monitorDisplayName } from './monitor-format.js';
+import { publicReportsEnabled } from './config.js';
+import {
+  assessLatencySampling,
+  formatAge,
+  loadMonitorReport,
+  monitorSnapshotToDetail,
+  type MonitorReportSnapshot,
+} from './reports.js';
+import { formatLatency, formatPercentage } from './status-page-format.js';
+import { ReportFreshness } from './report-freshness.js';
+import { UptimeStrip, uptimeSeverity } from './uptime-strip.js';
 
 const ranges = ['1h', '24h', '7d', '30d'] as const;
 export type LatencyRange = (typeof ranges)[number];
@@ -31,9 +45,27 @@ const latencyBucketLabels: Record<LatencyRange, string> = {
   '7d': '1 hour',
   '30d': '6 hours',
 };
+const aggregateLatencyBucketLabels: Record<LatencyRange, string> = {
+  '1h': '1 minute',
+  '24h': '5 minutes',
+  '7d': '15 minutes',
+  '30d': '1 hour',
+};
 
 export function latencyBucketLabel(range: LatencyRange) {
   return latencyBucketLabels[range];
+}
+export function aggregateLatencyBucketLabel(range: LatencyRange) {
+  return aggregateLatencyBucketLabels[range];
+}
+export const monitorDetailRefreshIntervalMs = 60_000;
+
+export function monitorHostname(value: string) {
+  try {
+    return new URL(value).hostname || value;
+  } catch {
+    return value;
+  }
 }
 export function showsPrivateMonitorData(publicMode: boolean) {
   return !publicMode;
@@ -41,14 +73,17 @@ export function showsPrivateMonitorData(publicMode: boolean) {
 export function MonitorDetail({
   monitorId,
   publicMode = false,
+  statusPageId,
 }: {
   monitorId: string;
   publicMode?: boolean;
+  statusPageId?: string;
 }) {
   const [range, setRange] = useState<LatencyRange>('24h');
   const [data, setData] = useState<MonitorDetailResponse | PublicMonitorDetailResponse | null>(
     null,
   );
+  const [snapshot, setSnapshot] = useState<MonitorReportSnapshot | null>(null);
   const [observations, setObservations] = useState<Observation[] | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -61,6 +96,12 @@ export function MonitorDetail({
   const [dnsError, setDnsError] = useState('');
   const [dnsReload, setDnsReload] = useState(0);
   const [error, setError] = useState('');
+  const [reload, setReload] = useState(0);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const inFlightRefresh = useRef<Promise<void> | null>(null);
+  const displayedRequestKey = useRef<string | null>(null);
+  const observationGeneration = useRef(0);
+  const dnsGeneration = useRef(0);
   const [edit, setEdit] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const monitorDnsDiagnosticsEnabled = Boolean(
@@ -68,29 +109,89 @@ export function MonitorDetail({
     'dnsDiagnosticsEnabled' in data.summary.monitor &&
     data.summary.monitor.dnsDiagnosticsEnabled,
   );
-  const load = () => {
-    setData(null);
-    setObservations(publicMode ? [] : null);
-    setDnsDiagnostics(null);
-    setDnsNextCursor(null);
-    setDnsError('');
+  const load = () => setReload((value) => value + 1);
+  const useSnapshot = publicMode && publicReportsEnabled();
+  useEffect(() => {
+    let active = true;
+    observationGeneration.current += 1;
+    const rangeOverride = range;
+    const requestKey = `${monitorId}:${publicMode ? 'public' : 'private'}:${useSnapshot ? 'snapshot' : rangeOverride}`;
+    if (displayedRequestKey.current !== requestKey) {
+      displayedRequestKey.current = requestKey;
+      setData(null);
+      setSnapshot(null);
+      setObservations(publicMode ? [] : null);
+      setDnsDiagnostics(null);
+      setDnsNextCursor(null);
+      setDnsError('');
+    }
     setError('');
-    const detail = publicMode ? api.publicMonitor(monitorId, range) : api.monitor(monitorId, range);
+    const detail: Promise<MonitorDetailResponse | PublicMonitorDetailResponse> = useSnapshot
+      ? loadMonitorReport(monitorId).then((loaded) => {
+          if (active) {
+            setSnapshot(loaded);
+            if (new URLSearchParams(window.location.search).has('generation')) {
+              const url = new URL(window.location.href);
+              url.searchParams.delete('generation');
+              window.history.replaceState(
+                window.history.state,
+                '',
+                `${url.pathname}${url.search}${url.hash}`,
+              );
+            }
+          }
+          return monitorSnapshotToDetail(loaded, rangeOverride);
+        })
+      : publicMode
+        ? api.publicMonitor(monitorId, rangeOverride)
+        : api.monitor(monitorId, rangeOverride);
     const history = publicMode
       ? Promise.resolve({ items: [] as Observation[], nextCursor: null })
-      : api.observations(monitorId, range);
-    Promise.all([detail, history])
+      : api.observations(monitorId, rangeOverride);
+    const request = Promise.all([detail, history])
       .then(([detail, history]) => {
+        if (!active) return;
         setData(detail);
         setObservations(history.items);
         setNextCursor(history.nextCursor);
       })
-      .catch((reason) =>
-        setError(reason instanceof Error ? reason.message : 'Could not load monitor details.'),
-      );
-  };
-  useEffect(load, [monitorId, publicMode, range]);
+      .catch((reason) => {
+        if (active)
+          setError(reason instanceof Error ? reason.message : 'Could not load monitor details.');
+      })
+      .finally(() => {
+        if (inFlightRefresh.current === request) inFlightRefresh.current = null;
+      });
+    inFlightRefresh.current = request;
+    return () => {
+      active = false;
+    };
+    // Snapshots carry all published ranges, so only reload them when the monitor
+    // or mode changes; switching range re-projects the already-loaded snapshot.
+    // The API path still refetches per range.
+  }, [monitorId, publicMode, reload, useSnapshot ? '' : range]);
   useEffect(() => {
+    if (!autoRefresh) return;
+    let active = true;
+    const timer = window.setTimeout(async () => {
+      await inFlightRefresh.current;
+      if (active) load();
+    }, monitorDetailRefreshIntervalMs);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [autoRefresh, monitorId, publicMode, range, reload]);
+  useEffect(() => {
+    if (!snapshot) return;
+    try {
+      setData(monitorSnapshotToDetail(snapshot, range));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not read the monitor snapshot.');
+    }
+  }, [snapshot, range]);
+  useEffect(() => {
+    dnsGeneration.current += 1;
     if (!showsPrivateMonitorData(publicMode)) return;
     const enabled = monitorDnsDiagnosticsEnabled;
     if (!enabled) {
@@ -132,9 +233,10 @@ export function MonitorDetail({
           setEdit(false);
           load();
         }}
+        onHistoryDeleted={load}
       />
     );
-  if (error)
+  if (error && !data)
     return (
       <div className="state state--error" role="alert">
         <p>{error}</p>
@@ -150,7 +252,9 @@ export function MonitorDetail({
       </div>
     );
   if (!data || !observations)
-    return (
+    return publicMode ? (
+      <MonitorDetailLoadingSkeleton />
+    ) : (
       <div className="state state--loading" role="status">
         <p>Loading monitor history…</p>
       </div>
@@ -168,35 +272,78 @@ export function MonitorDetail({
     monitor.regionIds,
     data.summary.latestByRegion,
   );
+  const lastUpdatedAt = findLatestMonitorUpdate(
+    Object.values(data.summary.latestByRegion),
+    data.latency.points,
+  );
   return (
     <section className="detail">
       <div className="page-head">
         <div>
-          {!publicMode && (
+          {publicMode && statusPageId ? (
+            <a href={`/status/${encodeURIComponent(statusPageId)}`} className="back-link">
+              ← Back to status page
+            </a>
+          ) : !publicMode ? (
             <a href="/" className="back-link">
               ← Monitors
             </a>
-          )}
-          <p className="mono-label">{status.toUpperCase()}</p>
-          <h1>{monitor.name ?? new URL(monitor.url).hostname}</h1>
+          ) : null}
+          <p className="mono-label">
+            {status === 'unknown' ? 'AWAITING CURRENT RESULT' : status.toUpperCase()}
+          </p>
+          <h1>{monitorDisplayName(monitor)}</h1>
+          <MonitorBadge badge={monitor.badge} />
           <p>
             <a href={monitor.url} target="_blank" rel="noreferrer">
-              {monitor.url}
+              {monitorHostname(monitor.url)}
             </a>
           </p>
         </div>
-        {!publicMode && (
-          <div className="page-head__actions">
-            <button className="button button--quiet" onClick={() => setEdit(true)}>
-              Edit
-            </button>
-            <button className="button button--danger" onClick={() => setDeleteOpen(true)}>
-              Delete
-            </button>
-          </div>
-        )}
+        <div className="page-head__actions">
+          <button
+            type="button"
+            className="button button--quiet monitor-detail__refresh-toggle"
+            aria-pressed={autoRefresh}
+            onClick={() => setAutoRefresh((enabled) => !enabled)}
+          >
+            Auto-refresh {autoRefresh ? 'on' : 'off'}
+          </button>
+          {!publicMode && (
+            <>
+              <button className="button button--quiet" onClick={() => setEdit(true)}>
+                Edit
+              </button>
+              <button className="button button--danger" onClick={() => setDeleteOpen(true)}>
+                Delete
+              </button>
+            </>
+          )}
+        </div>
       </div>
-      {!publicMode && monitor.isPublic && <PublicShareLink monitorId={monitorId} />}
+      {error && (
+        <p className="field-error" role="status">
+          Latest refresh failed: {error}
+        </p>
+      )}
+      {publicMode && (
+        <ReportFreshness
+          snapshot={snapshot}
+          monitorName={monitorDisplayName(monitor)}
+          observationDate="medium"
+        />
+      )}
+      <MonitorUptimeOverview
+        uptime={data.uptime}
+        monitorName={monitorDisplayName(monitor)}
+        lastUpdatedAt={lastUpdatedAt}
+        intervalSeconds={monitor.intervalSeconds}
+        enabled={monitor.enabled}
+        thresholds={monitor.uptimeThresholds}
+      />
+      {!publicMode && monitor.isPublic && (
+        <PublicShareLink monitorId={monitorId} publicSlug={monitor.publicSlug} />
+      )}
       <div className="range-tabs" role="tablist" aria-label="Latency time range">
         {ranges.map((item) => (
           <button
@@ -210,30 +357,7 @@ export function MonitorDetail({
           </button>
         ))}
       </div>
-      <section className="stat-strip">
-        {data.latency.stats.map((stat) => (
-          <div key={stat.regionId}>
-            <span>{regionName(stat.regionId)}</span>
-            <dl className="region-stats tnum">
-              <div>
-                <dt>p50</dt>
-                <dd>{formatMs(stat.p50Ms)}</dd>
-              </div>
-              <div>
-                <dt>p95</dt>
-                <dd>{formatMs(stat.p95Ms)}</dd>
-              </div>
-              <div>
-                <dt>p99</dt>
-                <dd>{formatMs(stat.p99Ms)}</dd>
-              </div>
-            </dl>
-            <small>
-              {stat.successCount}/{stat.sampleCount} successful requests
-            </small>
-          </div>
-        ))}
-      </section>
+      {!data.latency.pending && <LatencySampleNote data={data.latency} />}
       {latestResultState.kind === 'partial' && (
         <p className="gap-note" role="status">
           Missing latest result: {latestResultState.missing.map(regionName).join(', ')}. This is
@@ -245,8 +369,37 @@ export function MonitorDetail({
           Awaiting first current result.
         </p>
       )}
-      <ResponseLatencyChart data={data} chartRegions={chartRegions} range={range} />
-      <LatencyPercentileChart data={data} chartRegions={chartRegions} />
+      {data.latency.pending ? (
+        <LatencyLoadingSkeleton />
+      ) : (
+        <>
+          <ResponseLatencyChart data={data} chartRegions={chartRegions} range={range} />
+          <section className="stat-strip">
+            {data.latency.stats.map((stat) => (
+              <div key={stat.regionId}>
+                <span>{regionName(stat.regionId)}</span>
+                <dl className="region-stats tnum">
+                  <div>
+                    <dt>p50</dt>
+                    <dd>{formatLatency(stat.p50Ms)}</dd>
+                  </div>
+                  <div>
+                    <dt>p95</dt>
+                    <dd>{formatLatency(stat.p95Ms)}</dd>
+                  </div>
+                  <div>
+                    <dt>p99</dt>
+                    <dd>{formatLatency(stat.p99Ms)}</dd>
+                  </div>
+                </dl>
+                <small>
+                  {stat.successCount}/{stat.sampleCount} successful requests
+                </small>
+              </div>
+            ))}
+          </section>
+        </>
+      )}
       {showsPrivateMonitorData(publicMode) && (
         <RequestTable
           items={observations}
@@ -254,15 +407,18 @@ export function MonitorDetail({
           loadingMore={loadingMore}
           onLoadMore={async () => {
             if (!nextCursor) return;
+            const generation = observationGeneration.current;
             setLoadingMore(true);
             try {
               const page = await api.observations(monitorId, range, nextCursor);
+              if (generation !== observationGeneration.current) return;
               setObservations((current) => [...(current ?? []), ...page.items]);
               setNextCursor(page.nextCursor);
             } catch (reason) {
+              if (generation !== observationGeneration.current) return;
               setError(reason instanceof Error ? reason.message : 'Could not load more requests.');
             } finally {
-              setLoadingMore(false);
+              if (generation === observationGeneration.current) setLoadingMore(false);
             }
           }}
         />
@@ -285,6 +441,7 @@ export function MonitorDetail({
           }}
           onLoadMore={async () => {
             if (!dnsNextCursor) return;
+            const generation = dnsGeneration.current;
             setDnsLoadingMore(true);
             try {
               const page = await api.dnsDiagnostics(
@@ -293,14 +450,16 @@ export function MonitorDetail({
                 dnsRegion === 'all' ? undefined : dnsRegion,
                 dnsNextCursor,
               );
+              if (generation !== dnsGeneration.current) return;
               setDnsDiagnostics((current) => [...(current ?? []), ...page.items]);
               setDnsNextCursor(page.nextCursor);
             } catch (reason) {
+              if (generation !== dnsGeneration.current) return;
               setDnsError(
                 reason instanceof Error ? reason.message : 'Could not load more DNS diagnostics.',
               );
             } finally {
-              setDnsLoadingMore(false);
+              if (generation === dnsGeneration.current) setDnsLoadingMore(false);
             }
           }}
         />
@@ -319,8 +478,250 @@ export function MonitorDetail({
   );
 }
 
-function PublicShareLink({ monitorId }: { monitorId: string }) {
-  const url = `${window.location.origin}/monitors/public/${monitorId}`;
+export function MonitorUptimeOverview({
+  uptime,
+  monitorName,
+  lastUpdatedAt,
+  intervalSeconds,
+  enabled,
+  thresholds,
+}: {
+  uptime: MonitorUptimeData;
+  monitorName: string;
+  lastUpdatedAt: string | null;
+  intervalSeconds: number;
+  enabled: boolean;
+  thresholds?: UptimeThresholds | undefined;
+}) {
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = window.setInterval(() => setCurrentTime(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [enabled]);
+  const firstDay = uptime.days.at(0)?.date;
+  const lastDay = uptime.days.at(-1)?.date;
+  const nextUpdate = enabled
+    ? `Next update in ${formatUpdateCountdown(millisecondsUntilNextUpdate(currentTime, intervalSeconds))}`
+    : 'Next update paused';
+  const displayStatus = uptime.recoveryStatus ?? uptime.status;
+  const percentageSeverity = uptimeSeverity(uptime.uptimePercentage, thresholds);
+  return (
+    <section className="monitor-uptime" aria-labelledby="monitor-uptime-title">
+      <div className="monitor-uptime__summary">
+        <div>
+          <p className="mono-label" id="monitor-uptime-title">
+            90-day uptime
+          </p>
+          <strong className={`monitor-uptime__value monitor-uptime__value--${percentageSeverity}`}>
+            {formatPercentage(uptime.uptimePercentage)}
+          </strong>
+        </div>
+        <span className={`monitor-uptime__state monitor-uptime__state--${displayStatus}`}>
+          <span className={`status-dot status-dot--${displayStatus}`} />
+          {displayStatus === 'up'
+            ? 'Operational'
+            : displayStatus === 'recovering'
+              ? 'Recovering'
+              : displayStatus === 'down'
+                ? 'Issues'
+                : 'No data'}
+        </span>
+      </div>
+      <div className="monitor-uptime__timing tnum" aria-live="off">
+        <span>
+          Last updated{' '}
+          {lastUpdatedAt ? (
+            <time dateTime={lastUpdatedAt}>{formatLastUpdate(lastUpdatedAt)}</time>
+          ) : (
+            '—'
+          )}
+        </span>
+        <span>{nextUpdate}</span>
+      </div>
+      <UptimeStrip
+        days={uptime.days}
+        label={`${monitorName} daily uptime history`}
+        thresholds={thresholds}
+      />
+      <div className="monitor-uptime__range" aria-hidden="true">
+        <span>{firstDay ? formatUptimeDate(firstDay) : '90 days ago'}</span>
+        <span>{lastDay ? formatUptimeDate(lastDay) : 'Today'}</span>
+      </div>
+    </section>
+  );
+}
+
+export function findLatestMonitorUpdate(
+  latestByRegion: ReadonlyArray<{
+    startedAt: string;
+    completedAt: string | null;
+  } | null>,
+  latencyPoints: ReadonlyArray<{ observedAt: string }>,
+): string | null {
+  const candidates = [
+    ...latestByRegion.flatMap((observation) =>
+      observation ? [observation.completedAt ?? observation.startedAt] : [],
+    ),
+    ...latencyPoints.map((point) => point.observedAt),
+  ];
+  let latest = Number.NEGATIVE_INFINITY;
+  for (const candidate of candidates) {
+    const timestamp = new Date(candidate).getTime();
+    if (Number.isFinite(timestamp)) latest = Math.max(latest, timestamp);
+  }
+  return Number.isFinite(latest) ? new Date(latest).toISOString() : null;
+}
+
+export function millisecondsUntilNextUpdate(currentTime: number, intervalSeconds: number) {
+  const intervalMilliseconds = intervalSeconds * 1_000;
+  const elapsed =
+    ((currentTime % intervalMilliseconds) + intervalMilliseconds) % intervalMilliseconds;
+  return elapsed === 0 ? intervalMilliseconds : intervalMilliseconds - elapsed;
+}
+
+function MonitorDetailLoadingSkeleton() {
+  return (
+    <section className="detail monitor-detail-skeleton" aria-busy="true">
+      <span className="sr-only" role="status">
+        Loading monitor status and charts.
+      </span>
+      <div className="monitor-skeleton__head" aria-hidden="true">
+        <i className="monitor-skeleton__block monitor-skeleton__line monitor-skeleton__line--short" />
+        <i className="monitor-skeleton__block monitor-skeleton__title" />
+        <i className="monitor-skeleton__block monitor-skeleton__line monitor-skeleton__line--medium" />
+      </div>
+      <div className="monitor-skeleton__uptime" aria-hidden="true">
+        <i className="monitor-skeleton__block monitor-skeleton__uptime-value" />
+        <div className="monitor-skeleton__uptime-days">
+          {Array.from({ length: 45 }, (_, index) => (
+            <i className="monitor-skeleton__block" key={index} />
+          ))}
+        </div>
+      </div>
+      <div className="monitor-skeleton__ranges" aria-hidden="true">
+        {ranges.map((item) => (
+          <i className="monitor-skeleton__block" key={item} />
+        ))}
+      </div>
+      <LatencyLoadingSkeleton announce={false} />
+    </section>
+  );
+}
+
+function LatencyLoadingSkeleton({ announce = true }: { announce?: boolean }) {
+  return (
+    <div
+      className="monitor-latency-skeleton"
+      aria-busy="true"
+      {...(announce ? { role: 'status' as const } : {})}
+    >
+      {announce && <span className="sr-only">Loading latency charts.</span>}
+      <section className="chart-section" aria-hidden="true">
+        <div className="monitor-skeleton__heading">
+          <i className="monitor-skeleton__block monitor-skeleton__line monitor-skeleton__line--medium" />
+          <i className="monitor-skeleton__block monitor-skeleton__line monitor-skeleton__line--wide" />
+        </div>
+        <div className="monitor-skeleton__plot">
+          <i className="monitor-skeleton__block monitor-skeleton__plot-line" />
+          <i className="monitor-skeleton__block monitor-skeleton__axis" />
+        </div>
+        <div className="monitor-skeleton__metrics">
+          {Array.from({ length: 3 }, (_, index) => (
+            <i className="monitor-skeleton__block" key={index} />
+          ))}
+        </div>
+      </section>
+      <section className="chart-section" aria-hidden="true">
+        <div className="monitor-skeleton__heading">
+          <i className="monitor-skeleton__block monitor-skeleton__line monitor-skeleton__line--medium" />
+          <i className="monitor-skeleton__block monitor-skeleton__line monitor-skeleton__line--wide" />
+        </div>
+        <div className="monitor-skeleton__percentiles">
+          {Array.from({ length: 3 }, (_, index) => (
+            <i className="monitor-skeleton__block" key={index} />
+          ))}
+        </div>
+      </section>
+      <div className="monitor-skeleton__regions" aria-hidden="true">
+        {Array.from({ length: 3 }, (_, index) => (
+          <i className="monitor-skeleton__block" key={index} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function formatUpdateCountdown(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1_000));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function formatLastUpdate(value: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'medium',
+  }).format(new Date(value));
+}
+
+function formatUptimeDate(date: string) {
+  return new Date(`${date}T12:00:00Z`).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+export function LatencySampleNote({
+  data,
+}: {
+  data: Pick<MonitorLatencyData['latency'], 'sampled' | 'sampleLimit' | 'computedAt' | 'pending'>;
+}) {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    if (data.pending || !data.computedAt) return;
+    const timer = window.setInterval(() => setNow(new Date()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [data.computedAt, data.pending]);
+  const sampling = assessLatencySampling(data, now);
+  if (data.pending) {
+    return (
+      <p className="latency-sample-note" role="status">
+        Latency graph is being prepared.
+      </p>
+    );
+  }
+  if (!sampling.sampled && sampling.computedAt === null) return null;
+  return (
+    <p className="latency-sample-note" role="status">
+      {sampling.sampleLimit === null
+        ? sampling.sampled
+          ? 'Percentiles and chart points use a bounded recent sample.'
+          : null
+        : `Percentiles and chart points use up to the most recent ${sampling.sampleLimit.toLocaleString()} observations.`}
+      {(sampling.sampled || sampling.sampleLimit !== null) && sampling.computedAgeSeconds !== null
+        ? ' '
+        : null}
+      {sampling.computedAgeSeconds !== null
+        ? `Computed ${formatAge(sampling.computedAgeSeconds)} ago.`
+        : null}
+    </p>
+  );
+}
+
+function PublicShareLink({
+  monitorId,
+  publicSlug,
+}: {
+  monitorId: string;
+  publicSlug: string | null;
+}) {
+  const url = `${window.location.origin}/monitors/public/${publicSlug ?? monitorId}`;
   const [copied, setCopied] = useState(false);
   return (
     <aside className="estimate estimate--secondary public-share" aria-label="Public share link">
@@ -355,112 +756,213 @@ export function ResponseLatencyChart({
   chartRegions: readonly RegionId[];
   range?: LatencyRange;
 }) {
+  const [chartView, setChartView] = useState<'all' | 'regions'>('all');
   const [hiddenChartRegions, setHiddenChartRegions] = useState<ReadonlySet<RegionId>>(new Set());
-  const chart = toChart(data);
-  const bucketLabel = latencyBucketLabel(range);
+  const regionalChart = useMemo(() => toChart(data), [data.latency]);
+  const aggregateChart = useMemo(
+    () =>
+      (data.latency.aggregatePoints ?? []).map((point) => ({
+        time: point.observedAt,
+        responseMs: point.responseMs,
+      })),
+    [data.latency],
+  );
+  const regionalBucketLabel = latencyBucketLabel(range);
+  const aggregateBucketLabel = aggregateLatencyBucketLabel(range);
+  const aggregateStats = data.latency.aggregateStats ?? {
+    averageResponseMs: null,
+    maximumResponseMs: null,
+    maximumResponseRegionId: null,
+    minimumResponseMs: null,
+  };
+  const showingAggregate = chartView === 'all';
+  const sampling = assessLatencySampling(data.latency);
+  const rangeScope = sampling.sampled
+    ? sampling.sampleLimit === null
+      ? 'in a bounded recent sample'
+      : `in the most recent ${sampling.sampleLimit.toLocaleString()} observations`
+    : 'in the selected range';
   return (
-    <section className="chart-section">
-      <div>
-        <h2>Response latency</h2>
-        <p>
-          Each point is the average response-to-headers latency for a region, grouped every{' '}
-          {bucketLabel} in the selected range. Missing buckets are not interpolated.
-        </p>
-      </div>
-      <div className="chart" role="img" aria-label="Regional response latency chart">
-        <ResponsiveContainer width="100%" height={280}>
-          <LineChart data={chart} margin={{ top: 8, right: 16, left: 0, bottom: 16 }}>
-            <XAxis
-              dataKey="time"
-              stroke="var(--color-rule-strong)"
-              tick={{ fill: 'var(--color-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
-              tickFormatter={formatChartDate}
-              angle={-40}
-              textAnchor="end"
-              height={62}
-              minTickGap={24}
-              interval="preserveStartEnd"
-            />
-            <YAxis
-              unit=" ms"
-              stroke="var(--color-rule-strong)"
-              tick={{ fill: 'var(--color-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
-            />
-            <Tooltip
-              contentStyle={{
-                backgroundColor: 'var(--color-paper)',
-                borderColor: 'var(--color-rule-strong)',
-                color: 'var(--color-ink)',
-              }}
-              cursor={{ stroke: 'var(--color-rule-strong)' }}
-              labelFormatter={formatChartTooltipDate}
-              formatter={formatResponseLatencyTooltip}
-            />
-            {chartRegions.map((region) => (
-              <Line
-                key={region}
-                type="monotone"
-                dataKey={region}
-                name={regionName(region)}
-                stroke={regionColour(region)}
-                strokeWidth={1.5}
-                dot={false}
-                connectNulls={false}
-                hide={hiddenChartRegions.has(region)}
+    <Fragment>
+      <section className="chart-section">
+        <div className="chart-section__intro">
+          <div className="chart-section__title-row">
+            <h2>Response latency</h2>
+            <div className="chart-view-toggle" role="tablist" aria-label="Latency chart view">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={showingAggregate}
+                className={showingAggregate ? 'is-active' : ''}
+                onClick={() => setChartView('all')}
+              >
+                All regions
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={!showingAggregate}
+                className={!showingAggregate ? 'is-active' : ''}
+                onClick={() => setChartView('regions')}
+              >
+                Per-region
+              </button>
+            </div>
+          </div>
+          <p>
+            {showingAggregate
+              ? `Each point averages response-to-headers latency equally across regions, grouped every ${aggregateBucketLabel} ${rangeScope}.`
+              : `Each point is the average response-to-headers latency for a region, grouped every ${regionalBucketLabel} ${rangeScope}.`}{' '}
+            Missing buckets are not interpolated.
+          </p>
+        </div>
+        <div
+          className="chart"
+          role="img"
+          aria-label={
+            showingAggregate
+              ? 'All-region average response latency chart'
+              : 'Regional response latency chart'
+          }
+        >
+          <ResponsiveContainer width="100%" height={280}>
+            <LineChart
+              data={showingAggregate ? aggregateChart : regionalChart}
+              margin={{ top: 8, right: 16, left: 0, bottom: 16 }}
+            >
+              <XAxis
+                dataKey="time"
+                stroke="var(--color-rule-strong)"
+                tick={{ fill: 'var(--color-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
+                tickFormatter={formatChartDate}
+                angle={-40}
+                textAnchor="end"
+                height={62}
+                minTickGap={24}
+                interval="preserveStartEnd"
               />
-            ))}
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-      <div className="sr-only">
-        <table>
-          <caption>
-            Text alternative for the regional response latency chart. Each row is a per-region
-            average, grouped every {bucketLabel} in the selected range.
-          </caption>
-          <thead>
-            <tr>
-              <th>Bucket</th>
-              <th>Region</th>
-              <th>Average response latency</th>
-              <th>Result</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.latency.points.map((point) => (
-              <tr key={`${point.observedAt}-${point.regionId}`}>
-                <td>{new Date(point.observedAt).toLocaleString()}</td>
-                <td>{regionName(point.regionId)}</td>
-                <td>{formatMs(point.responseMs)}</td>
-                <td>{point.success ? 'Successful' : 'Failed'}</td>
+              <YAxis
+                unit=" ms"
+                stroke="var(--color-rule-strong)"
+                tick={{ fill: 'var(--color-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
+              />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: 'var(--color-paper)',
+                  borderColor: 'var(--color-rule-strong)',
+                  color: 'var(--color-ink)',
+                }}
+                cursor={{ stroke: 'var(--color-rule-strong)' }}
+                labelFormatter={formatChartTooltipDate}
+                formatter={formatResponseLatencyTooltip}
+              />
+              {showingAggregate ? (
+                <Line
+                  type="monotone"
+                  dataKey="responseMs"
+                  name="All regions average"
+                  stroke="var(--color-success)"
+                  strokeWidth={1.75}
+                  dot={false}
+                  connectNulls={false}
+                />
+              ) : (
+                chartRegions.map((region) => (
+                  <Line
+                    key={region}
+                    type="monotone"
+                    dataKey={region}
+                    name={regionName(region)}
+                    stroke={regionColour(region)}
+                    strokeWidth={1.5}
+                    dot={false}
+                    connectNulls={false}
+                    hide={hiddenChartRegions.has(region)}
+                  />
+                ))
+              )}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+        {showingAggregate && (
+          <dl className="latency-summary tnum" aria-label="All-region response time summary">
+            <div>
+              <dd>{formatLatency(aggregateStats.averageResponseMs)}</dd>
+              <dt>Avg. response time</dt>
+            </div>
+            <div>
+              <dd>{formatLatency(aggregateStats.maximumResponseMs)}</dd>
+              <dt>
+                Max. response time
+                {aggregateStats.maximumResponseRegionId
+                  ? ` (${aggregateStats.maximumResponseRegionId})`
+                  : ''}
+              </dt>
+            </div>
+            <div>
+              <dd>{formatLatency(aggregateStats.minimumResponseMs)}</dd>
+              <dt>Min. response time</dt>
+            </div>
+          </dl>
+        )}
+        <div className="sr-only">
+          <table>
+            <caption>
+              {showingAggregate
+                ? `Text alternative for the all-region average response latency chart. Each row is an equal-weight regional average, grouped every ${aggregateBucketLabel} in the selected range.`
+                : `Text alternative for the regional response latency chart. Each row is a per-region average, grouped every ${regionalBucketLabel} in the selected range.`}
+            </caption>
+            <thead>
+              <tr>
+                <th>Bucket</th>
+                {!showingAggregate && <th>Region</th>}
+                <th>Average response latency</th>
+                <th>Result</th>
               </tr>
+            </thead>
+            <tbody>
+              {(showingAggregate ? (data.latency.aggregatePoints ?? []) : data.latency.points).map(
+                (point) => (
+                  <tr key={`${point.observedAt}-${'regionId' in point ? point.regionId : 'all'}`}>
+                    <td>{new Date(point.observedAt).toLocaleString()}</td>
+                    {!showingAggregate &&
+                      'regionId' in point &&
+                      typeof point.regionId === 'string' && <td>{regionName(point.regionId)}</td>}
+                    <td>{formatLatency(point.responseMs)}</td>
+                    <td>{point.success ? 'Successful' : 'Failed'}</td>
+                  </tr>
+                ),
+              )}
+            </tbody>
+          </table>
+        </div>
+        {!showingAggregate && (
+          <div className="chart-legend">
+            {chartRegions.map((region) => (
+              <button
+                key={region}
+                type="button"
+                className={hiddenChartRegions.has(region) ? 'is-hidden' : ''}
+                aria-pressed={!hiddenChartRegions.has(region)}
+                aria-label={`${regionName(region)} response latency line`}
+                onClick={() =>
+                  setHiddenChartRegions((current) => {
+                    const next = new Set(current);
+                    if (next.has(region)) next.delete(region);
+                    else next.add(region);
+                    return next;
+                  })
+                }
+              >
+                <i aria-hidden="true" style={{ background: regionColour(region) }} />
+                {regionName(region)}
+              </button>
             ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="chart-legend">
-        {chartRegions.map((region) => (
-          <button
-            key={region}
-            type="button"
-            className={hiddenChartRegions.has(region) ? 'is-hidden' : ''}
-            aria-pressed={!hiddenChartRegions.has(region)}
-            aria-label={`${regionName(region)} response latency line`}
-            onClick={() =>
-              setHiddenChartRegions((current) => {
-                const next = new Set(current);
-                if (next.has(region)) next.delete(region);
-                else next.add(region);
-                return next;
-              })
-            }
-          >
-            <i aria-hidden="true" style={{ background: regionColour(region) }} />
-            {regionName(region)}
-          </button>
-        ))}
-      </div>
-    </section>
+          </div>
+        )}
+      </section>
+      {!showingAggregate && <LatencyPercentileChart data={data} chartRegions={chartRegions} />}
+    </Fragment>
   );
 }
 
@@ -473,6 +975,12 @@ export function LatencyPercentileChart({
 }) {
   const percentileChart = toPercentileChart(data, chartRegions);
   const percentileChartHeight = Math.max(280, percentileChart.length * 52 + 32);
+  const sampling = assessLatencySampling(data.latency);
+  const percentileScope = sampling.sampled
+    ? sampling.sampleLimit === null
+      ? 'in a bounded recent sample, not the complete selected range'
+      : `in the most recent ${sampling.sampleLimit.toLocaleString()} observations, not the complete selected range`
+    : 'in this range';
   return (
     <section
       className="chart-section percentile-chart-section"
@@ -482,7 +990,7 @@ export function LatencyPercentileChart({
         <h2 id="latency-percentiles-title">Latency percentiles</h2>
         <p>
           Typical response latency by region. P50 is the midpoint; P95 and P99 show the slower end
-          of successful requests in this range.
+          of successful requests {percentileScope}.
         </p>
       </div>
       <div className="chart" role="img" aria-label="Regional latency percentiles bar chart">
@@ -513,7 +1021,7 @@ export function LatencyPercentileChart({
                 color: 'var(--color-ink)',
               }}
               cursor={{ fill: 'var(--color-paper-muted)' }}
-              formatter={(value) => (typeof value === 'number' ? formatMs(value) : '—')}
+              formatter={(value) => (typeof value === 'number' ? formatLatency(value) : '—')}
             />
             <Bar dataKey="p50Ms" name="P50 (median)" fill="var(--region-series-1)" />
             <Bar dataKey="p95Ms" name="P95" fill="var(--region-series-2)" />
@@ -536,9 +1044,9 @@ export function LatencyPercentileChart({
             {percentileChart.map((region) => (
               <tr key={region.regionId}>
                 <td>{region.region}</td>
-                <td>{formatMs(region.p50Ms)}</td>
-                <td>{formatMs(region.p95Ms)}</td>
-                <td>{formatMs(region.p99Ms)}</td>
+                <td>{formatLatency(region.p50Ms)}</td>
+                <td>{formatLatency(region.p95Ms)}</td>
+                <td>{formatLatency(region.p99Ms)}</td>
               </tr>
             ))}
           </tbody>
@@ -785,20 +1293,36 @@ export function formatChartDate(value: string | number) {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return 'Unknown';
   return new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'UTC',
     day: '2-digit',
     month: '2-digit',
     year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
   }).format(parsed);
 }
-function formatChartTooltipDate(value: ReactNode) {
-  if (typeof value === 'string') return formatUtc(value);
+export function formatChartTooltipDate(value: ReactNode) {
+  if (typeof value === 'string') {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return 'Unknown';
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const localDate = new Intl.DateTimeFormat('en-GB', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    }).format(parsed);
+    return `${localDate} (${timeZone})`;
+  }
   if (typeof value === 'number') return String(value);
   return '';
 }
 export function formatResponseLatencyTooltip(value: unknown) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
-  return `${Number(value.toFixed(2))}ms`;
+  return formatLatency(value);
 }
 export type LatestResultState =
   { kind: 'complete' | 'disabled' | 'awaiting' } | { kind: 'partial'; missing: RegionId[] };
@@ -889,10 +1413,10 @@ export function RequestTable({
                         </span>
                       </td>
                       <td data-label="Response" className="tnum">
-                        {formatMs(item.responseMs)}
+                        {formatLatency(item.responseMs)}
                       </td>
                       <td data-label="Total" className="tnum">
-                        {formatMs(item.totalMs)}
+                        {formatLatency(item.totalMs)}
                       </td>
                       <td data-label="HTTP">{item.httpStatus ?? '—'}</td>
                       <td data-label="Error">
@@ -980,9 +1504,6 @@ function DeleteDialog({
       </form>
     </dialog>
   );
-}
-function formatMs(value: number | null) {
-  return value === null ? '—' : `${Math.round(value)} ms`;
 }
 function orderedRegions(ids: readonly RegionId[]) {
   const selected = new Set(ids);

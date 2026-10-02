@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, createElement, type ReactNode } from 'react';
-import { createRoot } from 'react-dom/client';
+import { createTestRoot } from './testing/react-root.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PublicMonitorDetailResponse } from './api.js';
 
@@ -51,6 +51,7 @@ const detail = {
       timeoutMs: 10_000,
       enabled: true,
       isPublic: true,
+      publicSlug: null,
       createdAt: '2026-08-30T09:00:00.000Z',
       updatedAt: '2026-08-30T09:00:00.000Z',
     },
@@ -81,6 +82,15 @@ const detail = {
       { regionId: 'us-east', sampleCount: 1, successCount: 1, p50Ms: 120, p95Ms: 120, p99Ms: 120 },
     ],
   },
+  uptime: {
+    uptimePercentage: 99.5,
+    status: 'up',
+    recoveryStatus: 'recovering',
+    days: [
+      { date: '2026-08-29', uptimePercentage: 99, averageResponseMs: 120 },
+      { date: '2026-08-30', uptimePercentage: 100, averageResponseMs: 118.25 },
+    ],
+  },
 } satisfies PublicMonitorDetailResponse;
 
 afterEach(() => {
@@ -91,15 +101,15 @@ afterEach(() => {
 describe('public monitor detail', () => {
   it('loads only public aggregate data and omits private/admin UI', async () => {
     apiMock.publicMonitor.mockResolvedValue(detail);
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const reactEnvironment = globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean };
-    const previousActEnvironment = reactEnvironment.IS_REACT_ACT_ENVIRONMENT;
-    reactEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
+    const { container, root, cleanup } = createTestRoot();
 
     await act(async () => {
       root.render(
-        createElement(MonitorDetail, { monitorId: detail.summary.monitor.id, publicMode: true }),
+        createElement(MonitorDetail, {
+          monitorId: detail.summary.monitor.id,
+          publicMode: true,
+          statusPageId: 'page-1',
+        }),
       );
       await Promise.resolve();
       await Promise.resolve();
@@ -110,12 +120,33 @@ describe('public monitor detail', () => {
     expect(apiMock.observations).not.toHaveBeenCalled();
     expect(apiMock.dnsDiagnostics).not.toHaveBeenCalled();
     expect(container.textContent).toContain('Response latency');
-    expect(container.textContent).toContain('Latency percentiles');
+    expect(container.textContent).not.toContain('Latency percentiles');
+    expect(container.textContent).toContain('90-day uptime');
+    expect(container.textContent).toContain('99.5%');
+    expect(container.textContent).toContain('Recovering');
+    expect(container.querySelector('.monitor-uptime__state--recovering')).not.toBeNull();
+    expect(container.textContent).toContain('Last updated');
+    expect(container.textContent).toContain('Next update in');
+    expect(container.querySelectorAll('.uptime-day')).toHaveLength(2);
     expect(container.textContent).not.toContain('Exact requests');
     expect(container.textContent).not.toContain('DNS diagnostics');
     expect(container.textContent).not.toContain('Edit');
     expect(container.textContent).not.toContain('Delete');
     expect(container.textContent).not.toContain('← Monitors');
+    expect(container.querySelector('.back-link')?.textContent).toBe('← Back to status page');
+    expect(container.querySelector('.back-link')?.getAttribute('href')).toBe('/status/page-1');
+    const targetLink = container.querySelector<HTMLAnchorElement>(
+      `a[href="${detail.summary.monitor.url}"]`,
+    );
+    expect(targetLink?.textContent).toBe('status.example.test');
+    expect(targetLink?.target).toBe('_blank');
+    const latencyChart = container.querySelector('.chart-section');
+    const percentileStats = container.querySelector('.stat-strip');
+    expect(
+      latencyChart && percentileStats
+        ? latencyChart.compareDocumentPosition(percentileStats) & Node.DOCUMENT_POSITION_FOLLOWING
+        : 0,
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
 
     const sevenDayRange = [...container.querySelectorAll('button')].find(
       (button) => button.textContent === '7d',
@@ -126,10 +157,8 @@ describe('public monitor detail', () => {
       await Promise.resolve();
     });
     expect(apiMock.publicMonitor).toHaveBeenLastCalledWith(detail.summary.monitor.id, '7d');
-    expect(container.textContent).toContain('grouped every 1 hour in the selected range');
+    expect(container.textContent).toContain('grouped every 15 minutes in the selected range');
 
-    await act(async () => root.unmount());
-    if (previousActEnvironment === undefined) delete reactEnvironment.IS_REACT_ACT_ENVIRONMENT;
-    else reactEnvironment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    await cleanup();
   });
 });

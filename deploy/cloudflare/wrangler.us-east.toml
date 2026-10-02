@@ -3,6 +3,9 @@ main = "../../apps/probe-worker/src/index.ts"
 compatibility_date = "2026-08-30"
 workers_dev = true
 
+[observability]
+enabled = true
+
 [placement]
 region = "aws:us-east-1"
 
@@ -12,5 +15,4 @@ PROBE_REQUEST_MAX_SKEW_SECONDS = "60"
 PROBE_MAX_REQUEST_BYTES = "65536"
 PROBE_VERSION = "0.1.0"
 
-# Add a verified custom domain route in your Cloudflare account before production.
-# PROBE_SIGNING_SECRET is a secret: `wrangler secret put PROBE_SIGNING_SECRET --config ...`
+# PROBE_SIGNING_SECRET is set with `wrangler secret put`, never in this repository.

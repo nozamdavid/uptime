@@ -7,6 +7,10 @@ node_modules
 **/dist
 **/coverage
 .wrangler
+.dev.vars
+.dev.vars.*
+*.secrets.env
+.hallmark
 playwright-report
 test-results
 .DS_Store

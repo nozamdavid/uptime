@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import {
   boolean,
   check,
+  date,
   doublePrecision,
   foreignKey,
   index,
@@ -87,21 +88,79 @@ export const monitors = pgTable(
     intervalSeconds: integer('interval_seconds').notNull(),
     timeoutMs: integer('timeout_ms').notNull(),
     enabled: boolean('enabled').notNull().default(true),
+    outageThreshold: integer('outage_threshold').notNull().default(3),
+    recoveryThreshold: integer('recovery_threshold').notNull().default(2),
+    repeatNotificationMinutes: integer('repeat_notification_minutes'),
     dnsDiagnosticsEnabled: boolean('dns_diagnostics_enabled').notNull().default(false),
     isPublic: boolean('is_public').notNull().default(false),
+    publicSlug: text('public_slug'),
     nextCheckAt: timestamp('next_check_at', { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     check('monitors_http_url', sql`${table.url} ~ '^https?://'`),
-    check('monitors_interval_preset', sql`${table.intervalSeconds} in (60, 300, 900, 1800, 3600)`),
+    check('monitors_outage_threshold_check', sql`${table.outageThreshold} between 1 and 100`),
+    check('monitors_recovery_threshold_check', sql`${table.recoveryThreshold} between 1 and 100`),
+    check(
+      'monitors_repeat_notification_minutes_check',
+      sql`${table.repeatNotificationMinutes} between 1 and 10080`,
+    ),
+    check(
+      'monitors_public_slug_format',
+      sql`${table.publicSlug} is null or (length(${table.publicSlug}) between 3 and 64 and ${table.publicSlug} ~ '^[a-z0-9]+([.-][a-z0-9]+)*$')`,
+    ),
+    unique('monitors_public_slug_unique').on(table.publicSlug),
+    check(
+      'monitors_interval_preset',
+      sql`${table.intervalSeconds} in (60, 120, 180, 240, 300, 360, 420, 480, 540, 600, 660, 720, 780, 840, 900, 1200, 1500, 1800, 2100, 2400, 2700, 3000, 3300, 3600)`,
+    ),
     check('monitors_timeout_range', sql`${table.timeoutMs} between 1000 and 30000`),
     check(
       'monitors_timeout_before_interval',
       sql`${table.timeoutMs} < ${table.intervalSeconds} * 1000`,
     ),
     index('monitors_due_idx').on(table.enabled, table.nextCheckAt),
+  ],
+);
+
+/**
+ * Finalized UTC-day availability. Imported history can set a dataset-specific
+ * source and omit raw counts while retaining an explicit weighting.
+ */
+export const monitorDailyUptime = pgTable(
+  'monitor_daily_uptime',
+  {
+    monitorId: uuid('monitor_id')
+      .notNull()
+      .references(() => monitors.id, { onDelete: 'cascade' }),
+    day: date('day', { mode: 'date' }).notNull(),
+    uptimePercentage: doublePrecision('uptime_percentage').notNull(),
+    averageResponseMs: doublePrecision('average_response_ms'),
+    weight: doublePrecision('weight').notNull().default(1),
+    receivedCount: integer('received_count'),
+    successCount: integer('success_count'),
+    source: text('source').notNull().default('calculated'),
+    finalizedAt: timestamp('finalized_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.monitorId, table.day] }),
+    check(
+      'monitor_daily_uptime_percentage_range',
+      sql`${table.uptimePercentage} between 0 and 100`,
+    ),
+    check(
+      'monitor_daily_uptime_average_response_nonnegative',
+      sql`${table.averageResponseMs} is null or ${table.averageResponseMs} >= 0`,
+    ),
+    check('monitor_daily_uptime_weight_positive', sql`${table.weight} > 0`),
+    check(
+      'monitor_daily_uptime_counts_consistent',
+      sql`(${table.receivedCount} is null and ${table.successCount} is null) or (${table.receivedCount} > 0 and ${table.successCount} between 0 and ${table.receivedCount})`,
+    ),
+    index('monitor_daily_uptime_day_idx').on(table.day, table.monitorId),
   ],
 );
 
@@ -117,6 +176,70 @@ export const monitorRegions = pgTable(
   (table) => [
     primaryKey({ columns: [table.monitorId, table.regionId] }),
     index('monitor_regions_region_idx').on(table.regionId, table.monitorId),
+  ],
+);
+
+export const statusPages = pgTable(
+  'status_pages',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    title: text('title').notNull(),
+    publicSlug: text('public_slug'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check(
+      'status_pages_public_slug_format',
+      sql`${table.publicSlug} is null or (length(${table.publicSlug}) between 3 and 64 and ${table.publicSlug} ~ '^[a-z0-9]+([.-][a-z0-9]+)*$')`,
+    ),
+    unique('status_pages_public_slug_unique').on(table.publicSlug),
+  ],
+);
+
+export const statusPageGroups = pgTable(
+  'status_page_groups',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    statusPageId: uuid('status_page_id')
+      .notNull()
+      .references(() => statusPages.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    position: integer('position').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    unique('status_page_groups_id_page_unique').on(table.id, table.statusPageId),
+    unique('status_page_groups_page_position_unique').on(table.statusPageId, table.position),
+    check('status_page_groups_position_nonnegative', sql`${table.position} >= 0`),
+  ],
+);
+
+export const statusPageMonitors = pgTable(
+  'status_page_monitors',
+  {
+    statusPageId: uuid('status_page_id')
+      .notNull()
+      .references(() => statusPages.id, { onDelete: 'cascade' }),
+    groupId: uuid('group_id')
+      .notNull()
+      .references(() => statusPageGroups.id, { onDelete: 'cascade' }),
+    monitorId: uuid('monitor_id')
+      .notNull()
+      .references(() => monitors.id, { onDelete: 'cascade' }),
+    position: integer('position').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.statusPageId, table.monitorId] }),
+    unique('status_page_monitors_group_position_unique').on(table.groupId, table.position),
+    foreignKey({
+      columns: [table.groupId, table.statusPageId],
+      foreignColumns: [statusPageGroups.id, statusPageGroups.statusPageId],
+      name: 'status_page_monitors_group_page_fk',
+    }).onDelete('cascade'),
+    check('status_page_monitors_position_nonnegative', sql`${table.position} >= 0`),
+    index('status_page_monitors_monitor_idx').on(table.monitorId),
   ],
 );
 
@@ -269,5 +392,100 @@ export const networkDiagnostics = pgTable(
     ),
     index('network_diagnostics_lifecycle_time_idx').on(table.lifecycle, table.requestedAt),
     index('network_diagnostics_created_at_idx').on(table.createdAt),
+  ],
+);
+
+export const notificationServices = pgTable(
+  'notification_services',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    name: text('name').notNull(),
+    provider: text('provider').notNull(),
+    enabled: boolean('enabled').notNull().default(true),
+    config: jsonb('config').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check(
+      'notification_services_provider_check',
+      sql`${table.provider} in ('telegram', 'discord', 'resend', 'gotify', 'webhook', 'smtp', 'home-assistant')`,
+    ),
+  ],
+);
+
+export const monitorNotificationServices = pgTable(
+  'monitor_notification_services',
+  {
+    monitorId: uuid('monitor_id')
+      .notNull()
+      .references(() => monitors.id, { onDelete: 'cascade' }),
+    notificationServiceId: uuid('notification_service_id')
+      .notNull()
+      .references(() => notificationServices.id, { onDelete: 'cascade' }),
+  },
+  (table) => [
+    primaryKey({ columns: [table.monitorId, table.notificationServiceId] }),
+    index('monitor_notification_services_service_idx').on(table.notificationServiceId),
+  ],
+);
+
+export const monitorNotificationState = pgTable(
+  'monitor_notification_state',
+  {
+    monitorId: uuid('monitor_id')
+      .primaryKey()
+      .references(() => monitors.id, { onDelete: 'cascade' }),
+    configFingerprint: text('config_fingerprint').notNull(),
+    lastWindowStartedAt: timestamp('last_window_started_at', { withTimezone: true }).notNull(),
+    status: text('status').notNull().default('healthy'),
+    failureStreak: integer('failure_streak').notNull().default(0),
+    successStreak: integer('success_streak').notNull().default(0),
+    outageStartedAt: timestamp('outage_started_at', { withTimezone: true }),
+    lastReminderAt: timestamp('last_reminder_at', { withTimezone: true }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check('monitor_notification_state_status_check', sql`${table.status} in ('healthy', 'down')`),
+  ],
+);
+
+export const notificationDeliveries = pgTable(
+  'notification_deliveries',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    monitorId: uuid('monitor_id')
+      .notNull()
+      .references(() => monitors.id, { onDelete: 'cascade' }),
+    notificationServiceId: uuid('notification_service_id')
+      .notNull()
+      .references(() => notificationServices.id, { onDelete: 'cascade' }),
+    eventKey: text('event_key').notNull(),
+    kind: text('kind').notNull(),
+    message: jsonb('message').notNull(),
+    status: text('status').notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    leaseUntil: timestamp('lease_until', { withTimezone: true }),
+    leaseToken: uuid('lease_token'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+    lastError: text('last_error'),
+  },
+  (table) => [
+    unique('notification_deliveries_event_key_notification_service_id_key').on(
+      table.eventKey,
+      table.notificationServiceId,
+    ),
+    check(
+      'notification_deliveries_kind_check',
+      sql`${table.kind} in ('outage', 'recovery', 'reminder')`,
+    ),
+    check(
+      'notification_deliveries_status_check',
+      sql`${table.status} in ('pending', 'sending', 'sent', 'cancelled', 'failed')`,
+    ),
+    index('notification_deliveries_due_idx').on(table.status, table.nextAttemptAt),
+    index('notification_deliveries_monitor_idx').on(table.monitorId),
   ],
 );
