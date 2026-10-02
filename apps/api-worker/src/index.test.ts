@@ -27,6 +27,7 @@ const context = {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  delete (env as Record<string, unknown>).OAUTH;
   env.DB.close();
   env.DB = createD1Adapter(createTestDatabase());
 });
@@ -82,6 +83,95 @@ describe('worker entry point', () => {
       context,
     );
     expect(logout.status).toBe(204);
+  });
+
+  it('bridges an AT Protocol operator into a legacy product session and private history', async () => {
+    const cookie = 'uptime_atproto_session=opaque-token';
+    const fetchIdentity = vi.fn(async (request: Request) => {
+      expect(new URL(request.url).pathname).toBe('/api/auth/identity');
+      expect(request.headers.get('cookie')).toBe(cookie);
+      return Response.json({
+        user: { did: 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa', handle: 'operator.test' },
+        isOperator: true,
+      });
+    });
+    (env as Record<string, unknown>).OAUTH = { fetch: fetchIdentity };
+
+    const session = await worker.fetch(
+      new Request('https://api.test/api/auth/session', { headers: { cookie } }),
+      env,
+      context,
+    );
+    expect(session.status).toBe(200);
+    expect(await session.json()).toEqual({
+      user: { did: 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa', handle: 'operator.test' },
+      role: 'owner',
+      isOperator: true,
+      admin: {
+        id: 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+        did: 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+        handle: 'operator.test',
+      },
+    });
+
+    const monitors = await worker.fetch(
+      new Request('https://api.test/api/monitors', { headers: { cookie } }),
+      env,
+      context,
+    );
+    expect(monitors.status).toBe(200);
+    expect(fetchIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects nonoperators and malformed identity responses without trusting headers', async () => {
+    const cookie = 'uptime_atproto_session=opaque-token';
+    (env as Record<string, unknown>).OAUTH = {
+      fetch: vi.fn(async () =>
+        Response.json({
+          user: { did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb', handle: 'user.test' },
+          isOperator: false,
+        }),
+      ),
+    };
+    const response = await worker.fetch(
+      new Request('https://api.test/api/auth/session', {
+        headers: {
+          cookie,
+          'x-uptime-principal': JSON.stringify({
+            id: 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+            did: 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+            handle: 'operator.test',
+          }),
+        },
+      }),
+      env,
+      context,
+    );
+    expect(response.status).toBe(403);
+
+    const privateResponse = await worker.fetch(
+      new Request('https://api.test/api/monitors', { headers: { cookie } }),
+      env,
+      context,
+    );
+    expect(privateResponse.status).toBe(403);
+
+    const publicResponse = await worker.fetch(
+      new Request('https://api.test/api/regions', { headers: { cookie } }),
+      env,
+      context,
+    );
+    expect(publicResponse.status).toBe(200);
+
+    (env as Record<string, unknown>).OAUTH = {
+      fetch: vi.fn(async () => Response.json(null)),
+    };
+    const malformed = await worker.fetch(
+      new Request('https://api.test/api/auth/session', { headers: { cookie } }),
+      env,
+      context,
+    );
+    expect(malformed.status).toBe(401);
   });
 
   it('returns 404 for unknown routes and 405 for wrong methods', async () => {

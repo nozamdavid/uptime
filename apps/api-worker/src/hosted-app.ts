@@ -142,6 +142,21 @@ export async function hostedFetch(
         response = json({
           signup: principal ? await interestSignup(control, principal.did) : null,
         });
+      } else if (path === '/api/auth/identity' && request.method === 'GET') {
+        // This read-only bridge deliberately does not call ensureWorkspace.
+        const principal = await auth.principal(request);
+        if (!principal) throw new HttpErrorLike(401, 'unauthorized', 'Sign in with AT Protocol');
+        const user = await first<{ state: string }>(
+          control,
+          'SELECT state FROM users WHERE did = ?',
+          [principal.did],
+        );
+        if (user && user.state !== 'active')
+          throw new HttpErrorLike(403, 'account_suspended', 'Account is suspended');
+        response = json({
+          user: { did: principal.did, handle: principal.handle },
+          isOperator: operatorDids(env).includes(principal.did),
+        });
       } else if (
         /^\/api\/(monitors|status-pages)\/public\//.test(path) ||
         path.startsWith('/reports/public/')
@@ -182,74 +197,80 @@ export async function hostedFetch(
               'Monitoring access has not launched yet. Join the interest list on the home page.',
             );
         }
-        const workspace = await ensureWorkspace(env, principal);
-        const selectedId = request.headers.get('x-uptime-workspace');
-        const selected =
-          selectedId && selectedId !== workspace.id
-            ? await accessibleWorkspace(control, principal.did, uuid.parse(selectedId))
-            : { ...workspace, role: 'owner' as Role };
-        await run(
-          control,
-          'UPDATE workspaces SET last_seen_at = ? WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)',
-          [new Date().toISOString(), selected.id, new Date(Date.now() - 15 * 60_000).toISOString()],
-        );
-        if (path === '/api/auth/session' && request.method === 'GET') {
-          response = json({
-            user: principal,
-            workspace: {
-              id: selected.id,
-              name: selected.name,
-              state: selected.state,
-              plan: 'free',
-            },
-            role: selected.role,
-            isOperator,
-            limits: hostedLimits,
-            usage: await workspaceUsage(env, selected),
-            budget: await budgetSummary(control),
-            workspaces: await all(
-              control,
-              `SELECT w.id, w.name, w.state, m.role FROM workspaces w JOIN memberships m ON m.workspace_id = w.id WHERE m.did = ? AND w.state <> 'deleted'`,
-              [principal.did],
-            ),
-          });
-        } else if (path.startsWith('/api/operator/')) {
+        if (path.startsWith('/api/operator/')) {
           if (!isOperator) throw new HttpErrorLike(403, 'forbidden', 'Operator access required');
           response = await operatorRequest(request, env, principal);
-        } else if (path.startsWith('/api/workspace')) {
-          const execute = () => workspaceRequest(request, env, principal, selected);
-          response =
-            mutation(request) && path.startsWith('/api/workspace/targets')
+        } else {
+          const workspace = await ensureWorkspace(env, principal);
+          const selectedId = request.headers.get('x-uptime-workspace');
+          const selected =
+            selectedId && selectedId !== workspace.id
+              ? await accessibleWorkspace(control, principal.did, uuid.parse(selectedId))
+              : { ...workspace, role: 'owner' as Role };
+          await run(
+            control,
+            'UPDATE workspaces SET last_seen_at = ? WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)',
+            [
+              new Date().toISOString(),
+              selected.id,
+              new Date(Date.now() - 15 * 60_000).toISOString(),
+            ],
+          );
+          if (path === '/api/auth/session' && request.method === 'GET') {
+            response = json({
+              user: principal,
+              workspace: {
+                id: selected.id,
+                name: selected.name,
+                state: selected.state,
+                plan: 'free',
+              },
+              role: selected.role,
+              isOperator,
+              limits: hostedLimits,
+              usage: await workspaceUsage(env, selected),
+              budget: await budgetSummary(control),
+              workspaces: await all(
+                control,
+                `SELECT w.id, w.name, w.state, m.role FROM workspaces w JOIN memberships m ON m.workspace_id = w.id WHERE m.did = ? AND w.state <> 'deleted'`,
+                [principal.did],
+              ),
+            });
+          } else if (path.startsWith('/api/workspace')) {
+            const execute = () => workspaceRequest(request, env, principal, selected);
+            response =
+              mutation(request) && path.startsWith('/api/workspace/targets')
+                ? await withWorkspaceWriteLease(control, selected.id, execute)
+                : await execute();
+          } else {
+            if (selected.state !== 'active')
+              throw new HttpErrorLike(
+                403,
+                'workspace_unavailable',
+                'Workspace is waiting for capacity or suspended',
+              );
+            if (path.startsWith('/api/auth/'))
+              throw new HttpErrorLike(404, 'not_found', 'Use AT Protocol login');
+            if (mutation(request) && selected.role === 'viewer')
+              throw new HttpErrorLike(403, 'forbidden', 'Viewer access is read only');
+            await consumeBudget(control, 'private:global', 20_000, 86_400);
+            const db = await activeDatabase(env, selected.id);
+            const notificationTest = path.match(/^\/api\/notification-services\/([^/]+)\/test$/);
+            if (notificationTest && request.method === 'POST') {
+              await consumeBudget(control, `notification-tests:${selected.id}`, 10, 86_400);
+              await consumeBudget(
+                control,
+                `notification-test:${selected.id}:${uuid.parse(notificationTest[1])}`,
+                3,
+                3600,
+              );
+            }
+            await enforceHostedRequest(request, db);
+            const execute = () => dispatch(request, url, db, config, principal);
+            response = mutation(request)
               ? await withWorkspaceWriteLease(control, selected.id, execute)
               : await execute();
-        } else {
-          if (selected.state !== 'active')
-            throw new HttpErrorLike(
-              403,
-              'workspace_unavailable',
-              'Workspace is waiting for capacity or suspended',
-            );
-          if (path.startsWith('/api/auth/'))
-            throw new HttpErrorLike(404, 'not_found', 'Use AT Protocol login');
-          if (mutation(request) && selected.role === 'viewer')
-            throw new HttpErrorLike(403, 'forbidden', 'Viewer access is read only');
-          await consumeBudget(control, 'private:global', 20_000, 86_400);
-          const db = await activeDatabase(env, selected.id);
-          const notificationTest = path.match(/^\/api\/notification-services\/([^/]+)\/test$/);
-          if (notificationTest && request.method === 'POST') {
-            await consumeBudget(control, `notification-tests:${selected.id}`, 10, 86_400);
-            await consumeBudget(
-              control,
-              `notification-test:${selected.id}:${uuid.parse(notificationTest[1])}`,
-              3,
-              3600,
-            );
           }
-          await enforceHostedRequest(request, db);
-          const execute = () => dispatch(request, url, db, config, principal);
-          response = mutation(request)
-            ? await withWorkspaceWriteLease(control, selected.id, execute)
-            : await execute();
         }
       }
     }
