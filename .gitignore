@@ -12,3 +12,7 @@ coverage/
 playwright-report/
 test-results/
 .DS_Store
+docs/**
+AGENTS.md
+skills-lock.json
+.agents
