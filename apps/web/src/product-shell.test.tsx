@@ -514,7 +514,7 @@ describe('free product shell', () => {
     expect(apiMock.updateOperatorSlots).toHaveBeenCalledWith(2);
     const slotButtons = [
       ...view.container.querySelectorAll('.operator-budget .operator-row button'),
-    ];
+    ].filter((button) => ['Hold', 'Make available'].includes(button.textContent?.trim() ?? ''));
     await act(async () => {
       slotButtons[0]!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       await Promise.resolve();
@@ -564,7 +564,9 @@ describe('free product shell', () => {
       );
       await Promise.resolve();
     });
-    const button = view.container.querySelector('.operator-budget .operator-row button')!;
+    const button = [...view.container.querySelectorAll<HTMLButtonElement>('button')].find(
+      (candidate) => candidate.textContent?.trim() === 'Hold',
+    )!;
     await act(async () => {
       button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       await Promise.resolve();

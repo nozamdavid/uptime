@@ -1,24 +1,28 @@
-# AT Protocol OAuth Worker for staging.
-#
-# Staging runs two API backends behind the Pages gateway in
-# `deploy/cloudflare/staging/pages/_worker.js`:
-#
-#   - `uptime-staging-api` serves the monitoring app and its imported history.
-#   - this Worker serves OAuth, interest signup, and dedicated test workspaces.
-#
-# Splitting them keeps the staging gateway's R2 and reporter bindings intact.
-# Tenant bindings are provisioned before deployment. Interest signup allocates none.
-name = "uptime-staging-oauth-api"
-main = "../../../../apps/api-worker/src/index.ts"
+name = "uptime-staging-hosted-coordinator"
+main = "../../../../apps/coordinator-worker/src/index.ts"
 compatibility_date = "2026-08-30"
 compatibility_flags = ["global_fetch_strictly_public"]
 workers_dev = true
 
 [limits]
-cpu_ms = 100
+cpu_ms = 1000
 
 [observability]
 enabled = true
+
+[triggers]
+crons = ["* * * * *"]
+
+[[queues.producers]]
+binding = "TENANT_JOBS"
+queue = "uptime-staging-tenant-jobs"
+
+[[queues.consumers]]
+queue = "uptime-staging-tenant-jobs"
+max_batch_size = 1
+max_concurrency = 1
+max_retries = 3
+dead_letter_queue = "uptime-staging-tenant-jobs-dead"
 
 [[d1_databases]]
 binding = "CONTROL_DB"
@@ -31,19 +35,18 @@ binding = "REPORTS"
 bucket_name = "uptime-staging-reports"
 
 [vars]
-INTEREST_CHECK_ONLY = "true"
 ENVIRONMENT = "staging"
-PUBLIC_ORIGIN = "https://uptime-staging.pages.dev"
-WEB_ORIGIN = "https://uptime-staging.pages.dev"
-OPERATOR_DIDS = "did:plc:lmkzmvv6sdxntwtyxpg7fqqq"
 REGIONS_LIST = "eu-west,us-east,asia"
-SESSION_TTL_SECONDS = "604800"
-MIN_AVAILABLE_SLOTS = "1"
+WORKERS_URL_DOMAIN = "david-8af.workers.dev"
+PROBE_WORKER_NAME_PREFIX = "uptime-staging-hosted-probe-"
+DETAILED_RESULTS_RETENTION_DAYS = "1"
+DNS_DIAGNOSTICS_RETENTION_DAYS = "30"
+REPORT_INTERVAL_SECONDS = "60"
+NOTIFICATION_MAX_ATTEMPTS = "8"
+COORDINATOR_MONITOR_BATCH = "50"
+COORDINATOR_PROBE_CONCURRENCY = "32"
 
-# Set with `wrangler secret put --config <this file>`. Never commit values.
-# SESSION_SECRET
-# CREDENTIAL_ENCRYPTION_SECRET
-# OAUTH_STORAGE_SECRET
+# Secrets: PROBE_SIGNING_SECRET and CREDENTIAL_ENCRYPTION_SECRET.
 
 [[d1_databases]]
 binding = "TENANT_DB_000"

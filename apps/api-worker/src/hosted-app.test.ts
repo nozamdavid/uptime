@@ -23,6 +23,20 @@ afterEach(() => {
 });
 
 describe('hosted control plane', () => {
+  it('recognizes the default operator when no allowlist is configured', async () => {
+    const context = await createHostedContext();
+    const operator = await authenticatedCookie(
+      context.control,
+      'did:plc:lmkzmvv6sdxntwtyxpg7fqqq',
+      'noz.am',
+    );
+
+    const response = await fetchHosted(context, '/api/auth/identity', operator.cookie);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ isOperator: true });
+  });
+
   it('exposes OAuth identity without provisioning a workspace or tenant slot', async () => {
     const context = await createHostedContext();
     const operator = await authenticatedCookie(
@@ -216,7 +230,8 @@ describe('hosted control plane', () => {
         {},
         { method: 'PATCH', body: JSON.stringify({ maxWorkspaces: limit }) },
       );
-    expect((await patch(3)).status).toBe(400);
+    expect((await patch(11)).status).toBe(400);
+    expect(await (await patch(10)).json()).toMatchObject({ maxWorkspaces: 10 });
     expect(await (await patch(1)).json()).toMatchObject({ maxWorkspaces: 1 });
     const user = await authenticatedCookie(
       context.control,
@@ -463,6 +478,122 @@ describe('hosted control plane', () => {
       workspace_id: first.id,
       plan: 'free',
     });
+  });
+
+  it('keeps a configured minimum of enabled slots available to allocation', async () => {
+    const context = await createHostedContext();
+    Object.assign(context.env, { MIN_AVAILABLE_SLOTS: '1' });
+    context.control.prepare('UPDATE service_controls SET max_workspaces=1 WHERE id=1').run();
+    const user = { did: 'did:plc:dddddddddddddddddddddddd', handle: 'new.bsky.social' };
+
+    expect((await ensureWorkspace(context.env, user)).state).toBe('waiting_for_capacity');
+    Object.assign(context.env, { MIN_AVAILABLE_SLOTS: '0' });
+    expect((await ensureWorkspace(context.env, user)).state).toBe('active');
+  });
+
+  it('lets the operator assign an unused held staging slot to an interest signup', async () => {
+    const context = await createHostedContext();
+    Object.assign(context.env, {
+      ENVIRONMENT: 'staging',
+      MIN_AVAILABLE_SLOTS: '1',
+    });
+    const operator = await authenticatedCookie(
+      context.control,
+      'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+      'operator.test',
+    );
+    Object.assign(context.env, { OPERATOR_DIDS: operator.did });
+    const tenant = createTestDatabase();
+    databases.push(tenant);
+    Object.assign(context.env, { STAGING_TEST_DB_001: createD1Adapter(tenant) });
+    context.control
+      .prepare(
+        "INSERT INTO tenant_slots(binding_name,database_id,status) VALUES('STAGING_TEST_DB_001','staging-test-001','available')",
+      )
+      .run();
+    context.control
+      .prepare(
+        "INSERT INTO tenant_slot_controls(binding_name,admission_enabled) VALUES('STAGING_TEST_DB_001',0)",
+      )
+      .run();
+    const target = {
+      did: 'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb',
+      handle: 'waiting.bsky.social',
+    };
+    await recordInterest(context.controlDb, target);
+    const targetSession = await authenticatedCookie(context.control, target.did, target.handle);
+
+    const response = await fetchHosted(
+      context,
+      '/api/operator/slots/STAGING_TEST_DB_001/assignment',
+      operator.cookie,
+      {},
+      { method: 'POST', body: JSON.stringify({ ownerDid: target.did }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      state: 'active',
+      bindingName: 'STAGING_TEST_DB_001',
+      ownerDid: target.did,
+      ownerHandle: target.handle,
+    });
+    expect(
+      tenant.prepare('SELECT workspace_id FROM workspace_metadata WHERE id=1').get(),
+    ).toMatchObject({
+      workspace_id: expect.any(String),
+    });
+    const retry = await fetchHosted(
+      context,
+      '/api/operator/slots/STAGING_TEST_DB_001/assignment',
+      operator.cookie,
+      {},
+      { method: 'POST', body: JSON.stringify({ ownerDid: target.did }) },
+    );
+    expect(retry.status).toBe(200);
+    expect(
+      (
+        await fetchHosted(
+          context,
+          '/api/operator/slots/STAGING_TEST_DB_001/assignment',
+          targetSession.cookie,
+          {},
+          { method: 'POST', body: JSON.stringify({ ownerDid: target.did }) },
+        )
+      ).status,
+    ).toBe(403);
+  });
+
+  it('keeps staging reserved slots out of normal allocation while preserving one public spare', async () => {
+    const context = await createHostedContext();
+    Object.assign(context.env, { ENVIRONMENT: 'staging', MIN_AVAILABLE_SLOTS: '1' });
+    const bindings = [
+      'TENANT_TWO',
+      'STAGING_OPERATOR_DB',
+      'STAGING_TEST_DB_001',
+      'STAGING_TEST_DB_002',
+    ];
+    for (const bindingName of bindings) {
+      const database = createTestDatabase();
+      databases.push(database);
+      Object.assign(context.env, { [bindingName]: createD1Adapter(database) });
+      context.control
+        .prepare(
+          "INSERT INTO tenant_slots(binding_name,database_id,status) VALUES(?,?,'available')",
+        )
+        .run(bindingName, bindingName.toLowerCase());
+    }
+    const principal = {
+      did: 'did:plc:cccccccccccccccccccccccc',
+      handle: 'staging.bsky.social',
+    };
+    const workspace = await ensureWorkspace(context.env, principal);
+    expect(workspace.state).toBe('active');
+    expect(
+      context.control
+        .prepare('SELECT binding_name FROM tenant_slots WHERE workspace_id=?')
+        .get(workspace.id),
+    ).toEqual({ binding_name: 'TENANT_ONE' });
   });
 
   it('keeps free monitor quotas in the tenant database transaction', async () => {

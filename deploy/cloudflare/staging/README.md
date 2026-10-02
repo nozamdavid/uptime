@@ -34,12 +34,31 @@ reporter service binding and serves status-page reports from the bucket. It
 forwards monitoring APIs to the API Worker through a service binding.
 
 The separate `uptime-staging-oauth-api` Worker stores AT Protocol OAuth sessions
-and interest signups in `uptime-staging-control`. The gateway routes OAuth,
-interest, identity, and operator APIs to that Worker. The monitoring API verifies
-AT Protocol cookies through its `OAUTH` service binding and grants imported
-monitoring access only to accounts in `OPERATOR_DIDS`. Interest signups receive no
-access to that imported database. Identity checks and operator APIs allocate no
-monitoring workspace or tenant slot.
+and interest signups in `uptime-staging-control`. The gateway routes AT Protocol
+sessions and their monitoring requests to dedicated tenant databases. Password
+sessions and public reports without a workspace ID retain the imported history.
+Interest signups allocate no workspace until the operator explicitly assigns one.
+Identity checks and operator reads allocate no workspace or tenant slot.
+
+The hosted deployment command prepares the saved public capacity before
+deploying. At capacity ten, it creates thirteen databases: ten public slots, one
+assigned to the default operator @noz.am, and two held staging test slots. The
+three staging slots are outside the public limit. The allocator and Hold control
+always preserve at least one enabled, unused database. Use Assign workspace in
+the operator UI to grant a verified interest signup one of the held test slots.
+
+```bash
+scripts/deploy-hosted-workers.sh --dry-run
+scripts/deploy-hosted-workers.sh
+```
+
+The hosted coordinator uses `uptime-staging-tenant-jobs` and its dead-letter
+queue, plus separate `uptime-staging-hosted-probe-{region}` Workers. Its three
+probe regions are eu-west, us-east, and asia. These resources serve test tenant
+workspaces alongside the imported monitor deployment. Shared encryption and
+probe signing secrets are stored in the ignored, mode-600
+`deploy/cloudflare/staging/hosted.secrets.env` and uploaded to Wrangler secret
+storage. OAuth session and storage secrets stay unchanged.
 
 Deploy both backends when changing the identity bridge:
 

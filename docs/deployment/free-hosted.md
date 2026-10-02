@@ -1,6 +1,15 @@
 # Free hosted deployment
 
-This deployment uses one control D1 database, up to ten statically bound tenant D1 databases, one queue, one R2 bucket, an API Worker, a coordinator Worker, and a Pages gateway. It does not deploy or provision resources automatically.
+This deployment uses one control D1 database, a precreated tenant D1 pool, one queue, one R2 bucket, an API Worker, a coordinator Worker, and a Pages gateway. The public capacity is between one and ten. Staging adds three dedicated test databases.
+
+Deploy hosted Workers with `scripts/deploy-hosted-workers.sh`. Before uploading either Worker, it reads the operator's saved capacity, creates missing databases, applies migrations, registers trusted slots, updates both Workers' bindings, and bootstraps the operator workspace. Existing assignments and tenant data are preserved on repeat deployments. This branch defaults to staging and rejects production deployment.
+
+```bash
+scripts/deploy-hosted-workers.sh --dry-run
+scripts/deploy-hosted-workers.sh
+# Explicitly change the saved public capacity and prepare that pool:
+scripts/deploy-hosted-workers.sh --capacity 10
+```
 
 ## Interest check before release
 
@@ -10,11 +19,11 @@ Apply all control migrations, including `0002_slot_controls.sql` and `0003_inter
 
 ## Provisioning
 
-1. Create the control database, ten empty tenant databases, the `uptime-tenant-jobs` queue and dead-letter queue, the `uptime-reports` bucket, and a Pages project.
+1. Create the control database, the tenant job queue and dead-letter queue, the reports bucket, and a Pages project. The deployment script creates the tenant databases.
 2. Replace every `REPLACE_WITH_*` value in `deploy/cloudflare/hosted/*.wrangler.toml` with the real IDs and origin.
-3. Apply control migrations with `pnpm --filter @uptime/api-worker exec wrangler d1 migrations apply CONTROL_DB --remote --config ../../deploy/cloudflare/hosted/api.wrangler.toml`, then apply tenant migrations to each `TENANT_DB_000` through `TENANT_DB_009` using the same config.
-4. Set `SESSION_SECRET`, `CREDENTIAL_ENCRYPTION_SECRET`, `OAUTH_STORAGE_SECRET`, and `PROBE_SIGNING_SECRET` with `wrangler secret put --config deploy/cloudflare/hosted/{api,coordinator}.wrangler.toml`. Use separate production secrets.
-5. Set `OPERATOR_DIDS` to the comma-separated operator DID allowlist. Hosted registration uses AT Protocol OAuth and capacity admission; it does not use `ADMIN_EMAIL` bootstrap credentials.
+3. Set `SESSION_SECRET`, `CREDENTIAL_ENCRYPTION_SECRET`, and `OAUTH_STORAGE_SECRET` on the API Worker. Set the same `CREDENTIAL_ENCRYPTION_SECRET` on the coordinator, and matching `PROBE_SIGNING_SECRET` values on the coordinator and its probes. Use Wrangler secret storage and separate production secrets.
+4. Run `scripts/deploy-hosted-workers.sh` for the selected environment. It applies control and tenant migrations, creates and registers the required empty databases, and deploys both Workers. Deploy the probes and Pages with their matching environment configs.
+5. `@noz.am` (`did:plc:lmkzmvv6sdxntwtyxpg7fqqq`) is the default operator. A nonempty `OPERATOR_DIDS` allowlist overrides the default. Hosted registration uses AT Protocol OAuth and capacity admission; it does not use `ADMIN_EMAIL` bootstrap credentials.
 
 ## Capacity and registration
 
@@ -25,9 +34,13 @@ INSERT INTO tenant_slots(binding_name,database_id,schema_version,status)
 VALUES('TENANT_DB_000','THE_ACTUAL_DATABASE_ID',13,'available');
 ```
 
-Register only databases that are empty, fully migrated, and bound identically to both Workers. First login automatically reserves an unused slot, writes its tenant identity, and marks the workspace active. Registration remains `waiting_for_capacity` when admission is closed, the forecast reaches $15, or all ten slots are assigned. Never manually mark a workspace active before the identity marker is written. A deleted slot remains quarantined; create a fresh database rather than automatically reusing it.
+The deployment script performs this registration. Register only databases that are empty, fully migrated, and bound identically to both Workers. After the interest-only phase, first login automatically reserves an unused slot, writes its tenant identity, and marks the workspace active. Registration remains `waiting_for_capacity` when admission is closed, the forecast reaches $15, or allocation would consume the last available database. Never manually mark a workspace active before the identity marker is written. A deleted slot remains quarantined; create a fresh database rather than automatically reusing it.
 
-The operator's Capacity pool shows available, assigned, held, and quarantined slots. Set the workspace limit between 1 and the smaller of ten or the number of registered, bound slots. Lowering the limit stops additional allocations without removing existing workspaces. Hold and Make available apply only to unused slots; held slots are excluded from allocation. Assigned and quarantined slots cannot be reopened or reassigned through these controls. Adding a physical database still requires provisioning, migrations, identical Worker bindings, and trusted registration as above.
+The operator's Capacity pool shows available, assigned, held, and quarantined slots. Set the public workspace limit between 1 and 10. The next hosted deployment precreates databases for that limit. Lowering the limit stops additional allocations without removing existing workspaces or databases. Hold and Make available apply only to unused slots; held slots are excluded from automatic allocation. Assigned and quarantined slots cannot be reopened or reassigned through these controls.
+
+Deployed environments reserve at least one enabled, unused database (`MIN_AVAILABLE_SLOTS=1`). Both allocation and Hold enforce that floor atomically. As a result, a public pool of ten can automatically assign nine while its last database remains available. The configured limit is an upper bound, not a promise that the reserve can be consumed. Provisioning does not automatically recycle quarantined databases.
+
+Staging with capacity ten has thirteen databases: `TENANT_DB_000` through `TENANT_DB_009`, `STAGING_OPERATOR_DB` assigned to @noz.am, and `STAGING_TEST_DB_001` / `STAGING_TEST_DB_002` initially held for later assignment. The three staging slots are outside the public workspace limit. Use Assign workspace on an unused slot to select a verified interest signup and grant that account its own workspace. Explicit assignment can use a held slot, preserves the last available database, and respects the $20 forecast ceiling. Once assigned, the account can use `/app` during the interest-only phase. Test accounts must join the interest list first. No authentication credentials are created or stored by assignment.
 
 Activate provisions a waiting workspace through the same identity checks as signup. This explicit operator action may admit an individual while automatic admission is closed or the forecast has reached $15, provided a ready slot and room under the workspace limit exist and the forecast remains below the configured ceiling, at most $20. Resume restores a workspace that the operator suspended. Both actions are audited, and neither changes the automatic admission switch.
 

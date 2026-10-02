@@ -78,8 +78,10 @@ function oauthRoute(pathname, request) {
   if (pathname === '/api/interest' || pathname.startsWith('/api/interest/')) return true;
   if (pathname === '/api/operator' || pathname.startsWith('/api/operator/')) return true;
   if (pathname === '/api/auth/identity') return true;
+  if (pathname === '/api/workspace' || pathname.startsWith('/api/workspace/')) return true;
   return (
-    pathname === '/api/auth/logout' &&
+    pathname.startsWith('/api/') &&
+    pathname !== '/api/auth/login' &&
     /(?:^|;\s*)uptime_atproto_session=/.test(request.headers.get('cookie') ?? '')
   );
 }
@@ -88,7 +90,12 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (oauthRoute(url.pathname, request)) {
+    if (
+      oauthRoute(url.pathname, request) ||
+      (url.pathname.startsWith('/reports/public/') && url.searchParams.has('workspace')) ||
+      (/^\/api\/(monitors|status-pages)\/public\//.test(url.pathname) &&
+        url.searchParams.has('workspace'))
+    ) {
       return env.OAUTH.fetch(request);
     }
 

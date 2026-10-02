@@ -67,6 +67,7 @@ const didSchema = z
   .regex(/^did:(plc:[a-z2-7]{24}|web:[A-Za-z0-9._:%-]+)$/);
 const uuid = z.uuid();
 const mutation = (request: Request) => !['GET', 'HEAD', 'OPTIONS'].includes(request.method);
+export const defaultOperatorDid = 'did:plc:lmkzmvv6sdxntwtyxpg7fqqq';
 
 /** Authorize in the control database before selecting any customer data binding. */
 export async function hostedFetch(
@@ -369,11 +370,30 @@ async function assertBodyLimit(request: Request) {
   }
 }
 function operatorDids(env: CloudflareEnv) {
-  return typeof env.OPERATOR_DIDS === 'string'
-    ? env.OPERATOR_DIDS.split(',')
-        .map((value) => value.trim())
-        .filter(Boolean)
-    : [];
+  const configured =
+    typeof env.OPERATOR_DIDS === 'string'
+      ? env.OPERATOR_DIDS.split(',')
+          .map((value) => value.trim())
+          .filter(Boolean)
+      : [];
+  return configured.length > 0 ? configured : [defaultOperatorDid];
+}
+
+function minimumAvailableSlots(env: CloudflareEnv) {
+  const deployedDefault = env.ENVIRONMENT === 'staging' || env.ENVIRONMENT === 'production' ? 1 : 0;
+  const value = Number(env.MIN_AVAILABLE_SLOTS ?? deployedDefault);
+  return Number.isInteger(value) && value > 0 ? value : 0;
+}
+const stagingReservedSlotNames = [
+  'STAGING_OPERATOR_DB',
+  'STAGING_TEST_DB_001',
+  'STAGING_TEST_DB_002',
+] as const;
+function isStagingReservedSlot(env: CloudflareEnv, bindingName: string | undefined) {
+  return (
+    env.ENVIRONMENT === 'staging' &&
+    stagingReservedSlotNames.includes(bindingName as (typeof stagingReservedSlotNames)[number])
+  );
 }
 async function activeDatabase(env: CloudflareEnv, id: string) {
   const workspace = await first<Workspace>(
@@ -469,10 +489,12 @@ export async function ensureWorkspace(
 async function provisionWorkspace(
   env: CloudflareEnv,
   workspace: Workspace,
-  operatorActivation = false,
+  options: { operatorActivation?: boolean; bindingName?: string } = {},
 ): Promise<Workspace> {
   const control = env.CONTROL_DB as D1Database;
   const timestamp = new Date().toISOString();
+  const operatorActivation = options.operatorActivation === true;
+  const explicitBinding = typeof options.bindingName === 'string';
   if (workspace.state === 'waiting_for_capacity') {
     const budget = await budgetSummary(control);
     if (
@@ -484,11 +506,45 @@ async function provisionWorkspace(
         `UPDATE tenant_slots SET workspace_id = ?, status = 'assigned'
         WHERE binding_name = (SELECT s.binding_name FROM tenant_slots s
           WHERE s.status = 'available' AND s.workspace_id IS NULL
-          AND NOT EXISTS (SELECT 1 FROM tenant_slot_controls c WHERE c.binding_name = s.binding_name AND c.admission_enabled = 0)
+          ${explicitBinding ? 'AND s.binding_name = ?' : ''}
+          ${!explicitBinding && env.ENVIRONMENT === 'staging' ? `AND s.binding_name NOT IN (${stagingReservedSlotNames.map(() => '?').join(',')})` : ''}
+          ${explicitBinding ? '' : 'AND NOT EXISTS (SELECT 1 FROM tenant_slot_controls c WHERE c.binding_name = s.binding_name AND c.admission_enabled = 0)'}
           ORDER BY s.binding_name LIMIT 1)
         AND NOT EXISTS (SELECT 1 FROM tenant_slots WHERE workspace_id = ?)
-        AND (SELECT count(*) FROM tenant_slots WHERE status = 'assigned') < (SELECT max_workspaces FROM service_controls WHERE id = 1)`,
-        [workspace.id, workspace.id],
+        ${
+          explicitBinding && isStagingReservedSlot(env, options.bindingName)
+            ? ''
+            : `AND (SELECT count(*) FROM tenant_slots s3
+          WHERE s3.status = 'assigned'
+          ${env.ENVIRONMENT === 'staging' ? `AND s3.binding_name NOT IN (${stagingReservedSlotNames.map(() => '?').join(',')})` : ''}) <
+          (SELECT max_workspaces FROM service_controls WHERE id = 1)`
+        }
+        ${
+          explicitBinding
+            ? `AND ((COALESCE((SELECT admission_enabled FROM tenant_slot_controls c WHERE c.binding_name = ?),1) = 0 AND
+              (SELECT count(*) FROM tenant_slots s2 WHERE s2.status = 'available' AND s2.workspace_id IS NULL
+                AND COALESCE((SELECT admission_enabled FROM tenant_slot_controls c2 WHERE c2.binding_name = s2.binding_name),1)=1) >= ${minimumAvailableSlots(env)}) OR
+             (COALESCE((SELECT admission_enabled FROM tenant_slot_controls c WHERE c.binding_name = ?),1) = 1 AND
+              (SELECT count(*) FROM tenant_slots s2 WHERE s2.status = 'available' AND s2.workspace_id IS NULL
+                AND COALESCE((SELECT admission_enabled FROM tenant_slot_controls c2 WHERE c2.binding_name = s2.binding_name),1)=1) > ${minimumAvailableSlots(env)}))`
+            : `AND (SELECT count(*) FROM tenant_slots s
+          WHERE s.status = 'available' AND s.workspace_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM tenant_slot_controls c WHERE c.binding_name = s.binding_name AND c.admission_enabled = 0))
+          > ${minimumAvailableSlots(env)}`
+        }`,
+        [
+          workspace.id,
+          ...(explicitBinding ? [options.bindingName!] : []),
+          ...(!explicitBinding && env.ENVIRONMENT === 'staging' ? stagingReservedSlotNames : []),
+          workspace.id,
+          ...(explicitBinding &&
+          !isStagingReservedSlot(env, options.bindingName) &&
+          env.ENVIRONMENT === 'staging'
+            ? stagingReservedSlotNames
+            : []),
+          ...(!explicitBinding && env.ENVIRONMENT === 'staging' ? stagingReservedSlotNames : []),
+          ...(explicitBinding ? [options.bindingName!, options.bindingName!] : []),
+        ],
       );
     }
     const slot = await first<{ binding_name: string; database_id: string }>(
@@ -670,7 +726,7 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
     const inventory = await slotInventory(env);
     const input = z
       .object({
-        maxWorkspaces: z.number().int().min(1).max(Math.min(10, inventory.configuredSlots)),
+        maxWorkspaces: z.number().int().min(1).max(10),
       })
       .parse(await readJson(request));
     await run(control, 'UPDATE service_controls SET max_workspaces=? WHERE id=1', [
@@ -678,6 +734,153 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
     ]);
     await audit(control, null, principal.did, 'workspace_capacity', input);
     return json(await slotInventory(env));
+  }
+  const slotAssignment = path.match(/^\/api\/operator\/slots\/([A-Z][A-Z0-9_]{0,63})\/assignment$/);
+  if (slotAssignment && request.method === 'POST') {
+    const bindingName = slotAssignment[1]!;
+    const input = z.object({ ownerDid: didSchema }).parse(await readJson(request));
+    const binding = env[bindingName] as D1Database | undefined;
+    if (!binding || typeof binding.prepare !== 'function')
+      throw new HttpErrorLike(409, 'slot_unavailable', 'Slot is not bound to this deployment');
+    const slot = await first<{
+      binding_name: string;
+      status: 'available' | 'assigned' | 'deleting';
+      workspace_id: string | null;
+    }>(control, 'SELECT binding_name,status,workspace_id FROM tenant_slots WHERE binding_name=?', [
+      bindingName,
+    ]);
+    if (!slot)
+      throw new HttpErrorLike(409, 'slot_unavailable', 'Only an unused slot can be assigned');
+
+    const user = await first<{ did: string; handle: string; state: string }>(
+      control,
+      'SELECT did,handle,state FROM users WHERE did=?',
+      [input.ownerDid],
+    );
+    const interest = await first<{ did: string; handle: string }>(
+      control,
+      'SELECT did,handle FROM interest_signups WHERE did=?',
+      [input.ownerDid],
+    );
+    if (user && user.state !== 'active')
+      throw new HttpErrorLike(409, 'user_unavailable', 'The selected user is not active');
+    const ownerHandle = user?.handle ?? interest?.handle;
+    if (!ownerHandle)
+      throw new HttpErrorLike(
+        404,
+        'interest_signup_not_found',
+        'The selected user has not joined the interest list',
+      );
+
+    const existing = await first<Workspace>(control, 'SELECT * FROM workspaces WHERE owner_did=?', [
+      input.ownerDid,
+    ]);
+    if (slot.status !== 'available') {
+      if (slot.status === 'assigned' && slot.workspace_id === existing?.id) {
+        if (existing.state === 'waiting_for_capacity') {
+          const repaired = await provisionWorkspace(env, existing, {
+            operatorActivation: true,
+            bindingName,
+          });
+          if (repaired.state !== 'active')
+            throw new HttpErrorLike(409, 'capacity_unavailable', 'The assigned slot is not ready');
+          return json({
+            workspaceId: repaired.id,
+            state: repaired.state,
+            bindingName,
+            ownerDid: input.ownerDid,
+            ownerHandle,
+          });
+        }
+        if (existing.state === 'active')
+          return json({
+            workspaceId: existing.id,
+            state: existing.state,
+            bindingName,
+            ownerDid: input.ownerDid,
+            ownerHandle,
+          });
+      }
+      throw new HttpErrorLike(409, 'slot_unavailable', 'Only an unused slot can be assigned');
+    }
+    if (existing?.state === 'deleted' || existing?.state === 'deleting')
+      throw new HttpErrorLike(
+        409,
+        'workspace_unavailable',
+        'The selected user has a deleted workspace',
+      );
+    if (existing) {
+      const assigned = await first<{ binding_name: string }>(
+        control,
+        "SELECT binding_name FROM tenant_slots WHERE workspace_id=? AND status='assigned'",
+        [existing.id],
+      );
+      if (assigned && assigned.binding_name !== bindingName)
+        throw new HttpErrorLike(
+          409,
+          'workspace_already_assigned',
+          'The selected user already has another slot',
+        );
+      if (assigned && existing.state === 'active')
+        return json({
+          workspaceId: existing.id,
+          state: existing.state,
+          bindingName,
+          ownerDid: input.ownerDid,
+          ownerHandle,
+        });
+    }
+    const timestamp = new Date().toISOString();
+    await run(
+      control,
+      `INSERT INTO users(did,handle,state,created_at,updated_at,last_seen_at) VALUES(?,?,'active',?,?,?)
+       ON CONFLICT(did) DO UPDATE SET handle=excluded.handle,updated_at=excluded.updated_at,last_seen_at=excluded.last_seen_at`,
+      [input.ownerDid, ownerHandle, timestamp, timestamp, timestamp],
+    );
+    const workspace =
+      existing ??
+      (await first<Workspace>(
+        control,
+        `INSERT INTO workspaces(id,owner_did,name,state,plan,created_at,updated_at,last_seen_at,next_dispatch_at)
+         VALUES(?,?,?,'waiting_for_capacity','free',?,?,?,?) RETURNING *`,
+        [
+          randomId(),
+          input.ownerDid,
+          `${ownerHandle}'s workspace`,
+          timestamp,
+          timestamp,
+          timestamp,
+          timestamp,
+        ],
+      ));
+    if (!workspace) throw new Error('Workspace provisioning failed');
+    await run(
+      control,
+      `INSERT INTO memberships(workspace_id,did,role,created_at) VALUES(?,?,'owner',?) ON CONFLICT(workspace_id,did) DO NOTHING`,
+      [workspace.id, input.ownerDid, timestamp],
+    );
+    const provisioned = await provisionWorkspace(env, workspace, {
+      operatorActivation: true,
+      bindingName,
+    });
+    if (provisioned.state !== 'active')
+      throw new HttpErrorLike(
+        409,
+        'capacity_unavailable',
+        'The selected slot cannot be assigned while preserving capacity and budget limits',
+      );
+    await audit(control, provisioned.id, principal.did, 'slot_assignment', {
+      bindingName,
+      ownerDid: input.ownerDid,
+      ownerHandle,
+    });
+    return json({
+      workspaceId: provisioned.id,
+      state: provisioned.state,
+      bindingName,
+      ownerDid: input.ownerDid,
+      ownerHandle,
+    });
   }
   const slotAdmission = path.match(/^\/api\/operator\/slots\/([A-Z][A-Z0-9_]{0,63})\/admission$/);
   if (slotAdmission && request.method === 'POST') {
@@ -690,8 +893,11 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
       control,
       `INSERT INTO tenant_slot_controls(binding_name,admission_enabled)
       SELECT binding_name, ? FROM tenant_slots WHERE binding_name=? AND status='available' AND workspace_id IS NULL
+      AND (? = 1 OR (SELECT count(*) FROM tenant_slots s
+        WHERE s.status='available' AND s.workspace_id IS NULL
+        AND COALESCE((SELECT admission_enabled FROM tenant_slot_controls c WHERE c.binding_name=s.binding_name),1)=1) > ?)
       ON CONFLICT(binding_name) DO UPDATE SET admission_enabled=excluded.admission_enabled RETURNING binding_name`,
-      [input.enabled ? 1 : 0, bindingName],
+      [input.enabled ? 1 : 0, bindingName, input.enabled ? 1 : 0, minimumAvailableSlots(env)],
     );
     if (!updated)
       throw new HttpErrorLike(
@@ -744,7 +950,7 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
       id,
     ]);
     if (workspace?.state === 'waiting_for_capacity' && input.state === 'active') {
-      const provisioned = await provisionWorkspace(env, workspace, true);
+      const provisioned = await provisionWorkspace(env, workspace, { operatorActivation: true });
       if (provisioned.state !== 'active')
         throw new HttpErrorLike(
           409,
