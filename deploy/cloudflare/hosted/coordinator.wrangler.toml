@@ -1,0 +1,102 @@
+name = "uptime-hosted-coordinator"
+main = "../../../apps/coordinator-worker/src/index.ts"
+compatibility_date = "2026-08-30"
+compatibility_flags = ["global_fetch_strictly_public"]
+workers_dev = true
+
+[limits]
+cpu_ms = 1000
+
+[observability]
+enabled = true
+
+[triggers]
+crons = ["* * * * *"]
+
+[[queues.producers]]
+binding = "TENANT_JOBS"
+queue = "uptime-tenant-jobs"
+
+[[queues.consumers]]
+queue = "uptime-tenant-jobs"
+max_batch_size = 1
+max_concurrency = 1
+max_retries = 3
+dead_letter_queue = "uptime-tenant-jobs-dead"
+
+[[d1_databases]]
+binding = "CONTROL_DB"
+database_name = "uptime-control"
+database_id = "REPLACE_WITH_CONTROL_D1_DATABASE_ID"
+migrations_dir = "../../../packages/cloudflare/src/control-migrations"
+
+[[r2_buckets]]
+binding = "REPORTS"
+bucket_name = "uptime-reports"
+
+# Each tenant database is a static binding. Keep the inventory at ten slots.
+[[d1_databases]]
+binding = "TENANT_DB_000"
+database_name = "uptime-tenant-000"
+database_id = "REPLACE_WITH_TENANT_000_DATABASE_ID"
+migrations_dir = "../../../packages/cloudflare/src/migrations"
+[[d1_databases]]
+binding = "TENANT_DB_001"
+database_name = "uptime-tenant-001"
+database_id = "REPLACE_WITH_TENANT_001_DATABASE_ID"
+migrations_dir = "../../../packages/cloudflare/src/migrations"
+[[d1_databases]]
+binding = "TENANT_DB_002"
+database_name = "uptime-tenant-002"
+database_id = "REPLACE_WITH_TENANT_002_DATABASE_ID"
+migrations_dir = "../../../packages/cloudflare/src/migrations"
+[[d1_databases]]
+binding = "TENANT_DB_003"
+database_name = "uptime-tenant-003"
+database_id = "REPLACE_WITH_TENANT_003_DATABASE_ID"
+migrations_dir = "../../../packages/cloudflare/src/migrations"
+[[d1_databases]]
+binding = "TENANT_DB_004"
+database_name = "uptime-tenant-004"
+database_id = "REPLACE_WITH_TENANT_004_DATABASE_ID"
+migrations_dir = "../../../packages/cloudflare/src/migrations"
+[[d1_databases]]
+binding = "TENANT_DB_005"
+database_name = "uptime-tenant-005"
+database_id = "REPLACE_WITH_TENANT_005_DATABASE_ID"
+migrations_dir = "../../../packages/cloudflare/src/migrations"
+[[d1_databases]]
+binding = "TENANT_DB_006"
+database_name = "uptime-tenant-006"
+database_id = "REPLACE_WITH_TENANT_006_DATABASE_ID"
+migrations_dir = "../../../packages/cloudflare/src/migrations"
+[[d1_databases]]
+binding = "TENANT_DB_007"
+database_name = "uptime-tenant-007"
+database_id = "REPLACE_WITH_TENANT_007_DATABASE_ID"
+migrations_dir = "../../../packages/cloudflare/src/migrations"
+[[d1_databases]]
+binding = "TENANT_DB_008"
+database_name = "uptime-tenant-008"
+database_id = "REPLACE_WITH_TENANT_008_DATABASE_ID"
+migrations_dir = "../../../packages/cloudflare/src/migrations"
+[[d1_databases]]
+binding = "TENANT_DB_009"
+database_name = "uptime-tenant-009"
+database_id = "REPLACE_WITH_TENANT_009_DATABASE_ID"
+migrations_dir = "../../../packages/cloudflare/src/migrations"
+
+[vars]
+ENVIRONMENT = "production"
+REGIONS_LIST = "eu-west,us-east,asia"
+WORKERS_URL_DOMAIN = "REPLACE_WITH_ACCOUNT_SUBDOMAIN.workers.dev"
+DETAILED_RESULTS_RETENTION_DAYS = "1"
+DNS_DIAGNOSTICS_RETENTION_DAYS = "30"
+REPORT_INTERVAL_SECONDS = "60"
+NOTIFICATION_MAX_ATTEMPTS = "8"
+COORDINATOR_MONITOR_BATCH = "50"
+COORDINATOR_PROBE_CONCURRENCY = "32"
+
+# Set with wrangler secret put. Never commit values.
+# PROBE_SIGNING_SECRET
+# CREDENTIAL_ENCRYPTION_SECRET

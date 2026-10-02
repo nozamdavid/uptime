@@ -75,6 +75,7 @@ export interface AppEnv {
   db: D1Database;
   now: () => Date;
   log: LogSink;
+  principal?: { id: string; did: string; handle: string };
 }
 
 export interface LogSink {
@@ -538,7 +539,12 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
   router.add('POST', '/api/monitors', async (c) => {
     await requireAdmin(c);
     const { db, config } = c.env;
-    const input = monitorCreateSchema.parse(await readJson(c.request));
+    const body = await readJson(c.request);
+    const input = monitorCreateSchema.parse(
+      c.env.principal && body && typeof body === 'object'
+        ? { outageThreshold: 2, recoveryThreshold: 1, ...body }
+        : body,
+    );
     assertRegionsEnabled(config, input.regionIds);
     assertPublicHttpUrl(input.url);
     await assertMonitorSlugAvailable(db, input.publicSlug ?? null, null);
@@ -983,6 +989,7 @@ async function resolveAdmin(
   c: RouteContext<AppEnv>,
   now: () => Date,
 ): Promise<SessionAdmin | null> {
+  if (c.env.principal) return c.env.principal;
   const token = parseCookies(c.request.headers.get('cookie'))[SESSION_COOKIE];
   if (!token) return null;
   const admin = await lookupSession(c.env.db, c.env.config, token, now());

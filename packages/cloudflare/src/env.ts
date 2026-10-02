@@ -10,6 +10,8 @@ import type { D1Database, R2Bucket } from './workers-types.js';
 export interface CloudflareEnv {
   DB: D1Database;
   REPORTS?: R2Bucket;
+  /** Control-plane D1 binding used by the hosted multi-tenant coordinator. */
+  CONTROL_DB?: D1Database;
   SESSION_SECRET?: string;
   PROBE_SIGNING_SECRET?: string;
   ADMIN_EMAIL?: string;

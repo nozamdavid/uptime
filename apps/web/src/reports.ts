@@ -25,6 +25,16 @@ import type {
   StatusPageReportSnapshotMonitor,
 } from '@uptime/contracts';
 import type { MonitorLatencyData, PublicMonitorDetailResponse, PublicStatusPage } from './api.js';
+import * as apiModule from './api.js';
+
+function workspaceSearch(): string {
+  try {
+    const helper = apiModule.publicWorkspaceSearch;
+    return typeof helper === 'function' ? helper() : '';
+  } catch {
+    return '';
+  }
+}
 import { frontendConfig } from './config.js';
 
 export type SnapshotFreshness = Omit<
@@ -69,7 +79,7 @@ export function monitorReportUrl(
   baseUrl: string | null = frontendConfig().reportsBaseUrl,
 ): string | null {
   if (!baseUrl) return null;
-  return `${baseUrl}/public/monitors/${encodeURIComponent(reference)}.json`;
+  return `${baseUrl}/public/monitors/${encodeURIComponent(reference)}.json${workspaceSearch()}`;
 }
 
 export function statusPageReportUrl(
@@ -77,14 +87,14 @@ export function statusPageReportUrl(
   baseUrl: string | null = frontendConfig().reportsBaseUrl,
 ): string | null {
   if (!baseUrl) return null;
-  return `${baseUrl}/public/status-pages/${encodeURIComponent(reference)}.json`;
+  return `${baseUrl}/public/status-pages/${encodeURIComponent(reference)}.json${workspaceSearch()}`;
 }
 
 export function statusPageIndexUrl(
   baseUrl: string | null = frontendConfig().reportsBaseUrl,
 ): string | null {
   if (!baseUrl) return null;
-  return `${baseUrl}/public/status-pages.json`;
+  return `${baseUrl}/public/status-pages.json${workspaceSearch()}`;
 }
 
 export class SnapshotError extends Error {

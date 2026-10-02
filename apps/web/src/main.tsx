@@ -9,9 +9,10 @@ import {
 } from '@tanstack/react-router';
 import { createRoot } from 'react-dom/client';
 import { useEffect, useRef, useState } from 'react';
-import type { FormEvent, KeyboardEvent } from 'react';
+import type { KeyboardEvent } from 'react';
 import type { MonitorSummary } from '@uptime/contracts';
 import { api } from './api.js';
+import type { ProductSession } from './api.js';
 import { MonitorDetail } from './monitor-detail.js';
 import { MonitorForm } from './monitor-form.js';
 import { monitorDisplayName } from './monitor-format.js';
@@ -19,9 +20,45 @@ import { MonitorList } from './monitor-list.js';
 import { NotificationsPage } from './notifications.js';
 import { PublicStatusPage, StatusPageEditor, StatusPagesIndex } from './status-pages.js';
 import './styles.css';
+import {
+  AuthPage,
+  LandingPage,
+  OperatorPage,
+  ProductSessionContext,
+  SettingsPage,
+} from './product-shell.js';
 
 const rootRoute = createRootRoute({ component: AppShell });
-const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: Overview });
+const indexRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/',
+  component: LandingPage,
+});
+const appRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/app',
+  component: Overview,
+});
+const loginRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/login',
+  component: LoginRoute,
+});
+const signupRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/signup',
+  component: SignupRoute,
+});
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/settings',
+  component: SettingsPage,
+});
+const operatorRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/operator',
+  component: OperatorPage,
+});
 const detailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/monitors/$monitorId',
@@ -54,6 +91,11 @@ const publicStatusPageRoute = createRoute({
 });
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  appRoute,
+  loginRoute,
+  signupRoute,
+  settingsRoute,
+  operatorRoute,
   detailRoute,
   publicDetailRoute,
   statusPagesRoute,
@@ -76,14 +118,36 @@ function AppShell() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const isPublicRoute = isPublicMonitorPath(pathname);
   const isPublicStatusPage = pathname.startsWith('/status/');
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const isLanding = pathname === '/';
+  const isAuthRoute = pathname === '/login' || pathname === '/signup';
+  const [session, setSession] = useState<ProductSession | null>(null);
+  const [authenticated, setAuthenticated] = useState<boolean | null>(
+    isLanding || isAuthRoute ? false : null,
+  );
   useEffect(() => {
-    if (isPublicRoute) return;
+    if (isPublicRoute || isLanding || isAuthRoute) return;
     api
       .session()
-      .then(() => setAuthenticated(true))
+      .then((result) => {
+        setSession(result);
+        if (result.workspace?.id)
+          window.sessionStorage.setItem('uptime.workspaceId', result.workspace.id);
+        setAuthenticated(true);
+      })
       .catch(() => setAuthenticated(false));
-  }, [isPublicRoute]);
+  }, [isPublicRoute, isLanding, isAuthRoute]);
+  if (isLanding)
+    return (
+      <main className="public-workspace">
+        <Outlet />
+      </main>
+    );
+  if (isAuthRoute)
+    return (
+      <main className="public-workspace">
+        <Outlet />
+      </main>
+    );
   if (isPublicRoute)
     return (
       <main
@@ -98,52 +162,37 @@ function AppShell() {
         Loading session…
       </div>
     );
-  if (!authenticated) return <SignIn onSuccess={() => setAuthenticated(true)} />;
+  if (!authenticated)
+    return <AuthPage mode="login" onAuthenticated={() => setAuthenticated(true)} />;
+  const allowRestrictedRoute = pathname === '/settings' || pathname === '/operator';
   return (
-    <Workspace onSignOut={() => setAuthenticated(false)}>
-      <Outlet />
-    </Workspace>
+    <ProductSessionContext.Provider value={session}>
+      <Workspace
+        allowRestrictedRoute={allowRestrictedRoute}
+        session={session}
+        onSignOut={() => {
+          window.sessionStorage.removeItem('uptime.workspaceId');
+          setSession(null);
+          setAuthenticated(false);
+        }}
+      >
+        <Outlet />
+      </Workspace>
+    </ProductSessionContext.Provider>
   );
 }
 
-function SignIn({ onSuccess }: { onSuccess: () => void }) {
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setError('');
-    try {
-      await api.signIn(password);
-      onSuccess();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Sign-in failed');
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <main className="signin">
-      <form className="signin__form" onSubmit={submit}>
-        <p className="product-mark">UPTIME / PERSONAL ADMIN</p>
-        <h1>Sign in</h1>
-        <p>Use the administrator account configured for this installation.</p>
-        <Field label="Password" type="password" value={password} onChange={setPassword} required />
-        {error && (
-          <p className="field-error" role="alert">
-            {error}
-          </p>
-        )}
-        <button className="button button--primary" disabled={busy || !password}>
-          {busy ? 'Signing in…' : 'Sign in'}
-        </button>
-      </form>
-    </main>
-  );
-}
-
-function Workspace({ children, onSignOut }: { children: React.ReactNode; onSignOut: () => void }) {
+function Workspace({
+  children,
+  onSignOut,
+  session,
+  allowRestrictedRoute,
+}: {
+  children: React.ReactNode;
+  onSignOut: () => void;
+  session: ProductSession | null;
+  allowRestrictedRoute: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [monitors, setMonitors] = useState<MonitorSummary[]>([]);
@@ -197,9 +246,27 @@ function Workspace({ children, onSignOut }: { children: React.ReactNode; onSignO
       <header className="topbar">
         <div className="topbar__inner">
           <nav className="topbar__nav" aria-label="Admin sections">
-            <a className="brand" href="/">
+            <a className="brand" href="/app">
               Monitors
             </a>
+            {session?.workspaces && session.workspaces.length > 1 && (
+              <label className="workspace-switcher">
+                <span className="sr-only">Workspace</span>
+                <select
+                  value={session.workspace?.id ?? ''}
+                  onChange={(event) => {
+                    window.sessionStorage.setItem('uptime.workspaceId', event.target.value);
+                    window.location.reload();
+                  }}
+                >
+                  {session.workspaces.map((workspace) => (
+                    <option value={workspace.id} key={workspace.id}>
+                      {workspace.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <span className="topbar__divider" aria-hidden="true" />
             <a className="brand" href="/status-pages">
               Status pages
@@ -208,6 +275,18 @@ function Workspace({ children, onSignOut }: { children: React.ReactNode; onSignO
             <a className="brand" href="/notifications">
               Notifications
             </a>
+            <span className="topbar__divider" aria-hidden="true" />
+            <a className="brand" href="/settings">
+              Settings
+            </a>
+            {session?.isOperator && (
+              <>
+                <span className="topbar__divider" aria-hidden="true" />
+                <a className="brand" href="/operator">
+                  Operator
+                </a>
+              </>
+            )}
           </nav>
           <button
             ref={trigger}
@@ -230,9 +309,17 @@ function Workspace({ children, onSignOut }: { children: React.ReactNode; onSignO
           </div>
         </div>
       </header>
-      <main className="workspace">{children}</main>
+      <main
+        className={`workspace${session?.workspace?.state !== 'active' ? ' workspace--restricted' : ''}`}
+      >
+        {session?.workspace?.state !== 'active' && !allowRestrictedRoute ? (
+          <WorkspaceState state={session?.workspace?.state ?? 'waiting'} />
+        ) : (
+          children
+        )}
+      </main>
       <footer className="footer-line">
-        <span>Personal monitor</span>
+        <span>Free monitoring</span>
       </footer>
       {open && (
         <div
@@ -331,6 +418,32 @@ function Workspace({ children, onSignOut }: { children: React.ReactNode; onSignO
   );
 }
 
+function WorkspaceState({ state }: { state: string }) {
+  const waiting = state === 'waiting';
+  const deleting = state === 'deleting' || state === 'deleted';
+  return (
+    <section className="workspace-state" role="status">
+      <p className="mono-label">
+        WORKSPACE {waiting ? 'WAITING' : deleting ? 'DELETION PENDING' : 'SUSPENDED'}
+      </p>
+      <h1>
+        {waiting
+          ? 'Your workspace is being prepared.'
+          : deleting
+            ? 'Workspace deletion is pending.'
+            : 'Your workspace is suspended.'}
+      </h1>
+      <p>
+        {waiting
+          ? 'Operational forms will be available when setup is complete.'
+          : deleting
+            ? 'New checks are stopped while workspace data is removed.'
+            : 'Operational forms are unavailable while this workspace is suspended.'}
+      </p>
+    </section>
+  );
+}
+
 function Overview() {
   const [formOpen, setFormOpen] = useState(false);
   const [reload, setReload] = useState(0);
@@ -408,6 +521,27 @@ function Overview() {
   );
 }
 
+function LoginRoute() {
+  return (
+    <AuthPage
+      mode="login"
+      onAuthenticated={() => {
+        window.location.assign('/app');
+      }}
+    />
+  );
+}
+function SignupRoute() {
+  return (
+    <AuthPage
+      mode="signup"
+      onAuthenticated={() => {
+        window.location.assign('/app');
+      }}
+    />
+  );
+}
+
 function DetailRoute() {
   const { monitorId } = detailRoute.useParams();
   return <MonitorDetail monitorId={monitorId} />;
@@ -426,31 +560,6 @@ function StatusPageEditorRoute() {
 function PublicStatusPageRoute() {
   const { statusPageId } = publicStatusPageRoute.useParams();
   return <PublicStatusPage statusPageId={statusPageId} />;
-}
-function Field({
-  label,
-  type,
-  value,
-  onChange,
-  required,
-}: {
-  label: string;
-  type: string;
-  value: string;
-  onChange: (value: string) => void;
-  required?: boolean;
-}) {
-  return (
-    <label className="field">
-      <span>{label}</span>
-      <input
-        type={type}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        required={required}
-      />
-    </label>
-  );
 }
 function State({
   kind,

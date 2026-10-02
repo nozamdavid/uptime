@@ -5,6 +5,17 @@ to nine regions. Includes latency charts, request history, optional DNS
 diagnostics, notification destinations, public monitor views, and grouped
 status pages.
 
+## Free hosted version
+
+The [first version](docs/plans/free-v1-implementation.md) includes AT Protocol
+OAuth signup, dedicated customer databases, team access, and an operator dashboard.
+Use the [hosted runbook](docs/deployment/free-hosted.md) for local OAuth development
+and deployment. Its $20 forecast guard requires Cloudflare billing alerts.
+The [product release plan](docs/plans/product-release-plan.md) covers positioning,
+user journeys, operations, launch gates, and the broader roadmap.
+The [platform research](docs/research/saas-platform-research.md) records infrastructure
+limits, costs, and requirements for a later paid release.
+
 ## Architecture
 
 - The API Worker handles authentication, configuration, and private history.
@@ -58,6 +69,11 @@ node --test deploy/cloudflare/staging/pages/gateway.test.mjs
 ```
 
 ## Deployment
+
+The free hosted product uses AT Protocol signup, a dedicated D1 database per
+workspace, and a $20 monthly budget. See the [implementation record](docs/plans/free-v1-implementation.md)
+and [hosted setup](docs/deployment/free-hosted.md). The existing single-admin
+deployment remains available when `CONTROL_DB` is absent.
 
 Follow the [Cloudflare deployment guide](deploy/cloudflare/README.md). Production
 and staging use separate checked-in Wrangler configurations; the

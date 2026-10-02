@@ -24,6 +24,9 @@ compatibility_date = "${compatibilityDate}"
 compatibility_flags = ["global_fetch_strictly_public"]
 workers_dev = true
 
+[limits]
+cpu_ms = 50
+
 [observability]
 enabled = true
 

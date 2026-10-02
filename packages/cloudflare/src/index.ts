@@ -9,3 +9,6 @@ export * from './notification-providers.js';
 export * from './notification-history.js';
 export * from './notification-preview.js';
 export * from './bluesky-notifications.js';
+export * from './tenancy.js';
+export * from './usage-meter.js';
+export * from './tenant-lifecycle.js';

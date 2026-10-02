@@ -19,6 +19,8 @@ export { WebhookNotificationProvider } from './providers/webhook.js';
 export { SmtpNotificationProvider } from './providers/smtp.js';
 export { HomeAssistantNotificationProvider } from './providers/home-assistant.js';
 
+type SupportedNotificationProviderKind = Exclude<NotificationProviderKind, 'bluesky'>;
+
 const providers = {
   telegram: TelegramNotificationProvider,
   discord: DiscordNotificationProvider,
@@ -28,7 +30,7 @@ const providers = {
   smtp: SmtpNotificationProvider,
   'home-assistant': HomeAssistantNotificationProvider,
 } satisfies Record<
-  NotificationProviderKind,
+  SupportedNotificationProviderKind,
   new (config: unknown, fetchImpl?: typeof fetch) => NotificationProvider
 >;
 
@@ -37,5 +39,9 @@ export function createNotificationProvider(
   config: unknown,
   fetchImpl: typeof fetch = fetch,
 ): NotificationProvider {
-  return new providers[kind](config, fetchImpl);
+  if (!(kind in providers)) {
+    throw new Error(`Unsupported notification provider: ${kind}`);
+  }
+  const Provider = providers[kind as SupportedNotificationProviderKind];
+  return new Provider(config, fetchImpl);
 }

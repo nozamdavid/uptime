@@ -1,0 +1,76 @@
+# SaaS platform research
+
+Verified 2026-10-02 against primary documentation. “Sourced fact” sections quote or summarize the linked owner documentation. “Recommendation” sections are design judgments for releasing the existing uptime monitor as a multi-user SaaS.
+
+## Cloudflare storage and tenancy
+
+### Sourced facts
+
+- Workers Paid starts at **$5/month** and includes **10 million inbound requests/month** and **30 million CPU milliseconds/month**. Outbound subrequests are not individually billed as Worker inbound requests. For an existing paid account, a new application shares those account allowances rather than requiring another base subscription. ([Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/))
+- Cloudflare describes D1 as suitable for “multiple, smaller (10 GB) databases,” including **per-user, per-tenant, or per-entity databases**. On Workers Paid, the account limit is **50,000 databases**, each database is **10 GB**, and account storage is **1 TB**. On Workers Free, the limits are **10 databases**, **500 MB per database**, and **5 GB total account storage**. A database is single-threaded; throughput depends on query duration, and overload can return an error. ([D1 limits](https://developers.cloudflare.com/d1/platform/limits/))
+- D1 Workers access is through a configured `env.<BINDING_NAME>` binding. The binding identifies a particular database; the documented setup adds the database ID and binding to Wrangler configuration. ([D1 database API](https://developers.cloudflare.com/d1/worker-api/d1-database/), [D1 setup](https://developers.cloudflare.com/d1/get-started/))
+- Cloudflare’s D1 API can create databases programmatically with an account API token and supports `jurisdiction` values `eu`, `fedramp`, and `us`, plus a primary-location hint and optional read replication. ([Create D1 database API](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/create/))
+- D1 pricing counts rows read and written. Workers Paid includes **25 billion rows read/month**, **50 million rows written/month**, and **5 GB storage**; additional rows read are **$0.001/million**, rows written **$1/million**, and storage **$0.75/GB-month**. Index maintenance adds an additional written row when an indexed column is written. Query metadata exposes row counts and storage, useful for attribution and budget checks. ([D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/), [D1 metrics](https://developers.cloudflare.com/d1/observability/metrics-analytics/))
+- The documented Workers script limit is approximately **5,000 bindings**, which makes one statically declared D1 binding per user a poor fit even though the account can hold more databases. ([D1 limits](https://developers.cloudflare.com/d1/platform/limits/))
+- SQLite-backed Durable Objects provide one SQLite database per object. On Workers Paid, each object has a **10 GB** storage limit, there is no account storage limit, objects are unlimited, and each object has a soft limit of **1,000 requests/second**. They are single-threaded. ([Durable Objects FAQ](https://developers.cloudflare.com/durable-objects/reference/faq/), [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/))
+- SQLite-backed Durable Object **storage** publishes the same row-read/write allowances and rates as D1: Paid includes **25 billion rows read/month** and **50 million rows written/month**; SQL stored data includes **5 GB-month**, then costs **$0.20/GB-month**. Durable Objects also have separate request and active-duration meters, and `setAlarm()` is billed as one row write while deletes count as writes. Cloudflare says the row allowances/rates “match D1 pricing”; it does not state on this page whether D1 and Durable Object row allowances are separate account pools, so unit economics must verify this in the billing dashboard. ([Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/))
+
+### Recommendation
+
+- Treat the user’s **one default workspace as the tenancy boundary** in free v1. Use a small control-plane D1 for account identity, workspace-to-database registry, provisioning state, and operator metadata. The workspace’s monitor configuration and uptime history live in its own D1 database. Do not create a database synchronously in signup; provision asynchronously, record `provisioning|ready|failed`, and retry safely.
+- For strict per-user database isolation, run a feasibility spike using the **Cloudflare D1 REST API** from a trusted provisioning service and test database creation, schema migration, deletion, and authenticated query latency. The Worker binding API alone does not document a dynamic “lookup database by ID” operation; a runtime design that depends on dynamic D1 access must prove the REST/API-token path and its operational security.
+- For the existing `env.DB` hot path, use a **bounded shard Worker** with up to 25 preprovisioned, statically bound D1 databases, as selected in the release plan. This requires the provider account to use Workers Paid because Workers Free permits only 10 D1 databases. The control-plane registry atomically assigns each new workspace an available shard/database slot; requests route by that registry. This preserves database-per-workspace ownership while avoiding a binding per signup. The approximately 5,000 binding limit still bounds the number of bindings per script; shard routing and deployment must be load-tested.
+- Workers for Platforms Dynamic Dispatch can route requests to dynamically created **Workers**, and uploaded user Workers can receive D1 bindings. It is designed for customer code execution and routing, not a documented way to dynamically replace a normal Worker’s D1 binding on each request. Treat it as a larger isolation architecture with a separate operational and pricing review, not as a shortcut for the current `env.DB` API. ([Dynamic dispatch](https://developers.cloudflare.com/cloudflare-for-platforms/workers-for-platforms/configuration/dynamic-dispatch/), [Workers for Platforms architecture](https://developers.cloudflare.com/cloudflare-for-platforms/workers-for-platforms/how-workers-for-platforms-works/), [Workers for Platforms bindings](https://developers.cloudflare.com/cloudflare-for-platforms/workers-for-platforms/configuration/bindings/))
+- Do not silently fall back to a shared database or treat `user_id` as the ownership entity. If the per-workspace database path cannot meet the measured launch gates, stop and make that an explicit product decision. A per-workspace SQLite Durable Object is a separate alternative to benchmark, with different limits and operational behavior; it is not an implicit fallback.
+- Keep high-cardinality uptime samples out of broad dashboard scans. Retain a bounded window, index only the access paths the product needs, and inspect `rows_read`, `rows_written`, and `size_after` from query metadata in a staging load test. Unit economics should be measured from actual probe frequency, retention, indexes, and retry rates. ([D1 return metadata](https://developers.cloudflare.com/d1/worker-api/return-object/))
+
+## Queues, Workflows, and monitor scheduling
+
+### Sourced facts
+
+- Queues charges operations per **64 KB** written, read, or deleted. A normal consumed message is about three operations, retries add reads, and Paid includes **1,000,000 operations/month** at **$0.40/million** after that. Paid retention defaults to **4 days**, configurable to **14 days**. ([Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/))
+- Workflows can sleep until a relative duration or a fixed date, and sleeping instances do not consume active concurrency. Paid supports **50,000 concurrent running instances**, **2,000,000 queued instances**, **300 creations/second per account** and **100/second per workflow**, with **10,000 steps** by default. On Workers Paid, instances created by `schedules` can run for up to **one hour per cron firing without consuming a Workflow concurrency slot**; after that budget they yield into the normal queue and do not fail solely because the hour was used. ([Workflow limits](https://developers.cloudflare.com/workflows/reference/limits/), [sleeping and retrying](https://developers.cloudflare.com/workflows/build/sleeping-and-retrying/))
+- Workflow schedules are capped at **100 cron expressions per account**. Workflows billing includes requests, CPU, persisted storage, and steps; Paid includes **500,000 steps/month**, then **$0.80 per additional 100,000 steps**, with **$0.20/GB-month** workflow storage. Step count excludes rollback handlers and retries. ([Workflow scheduling](https://developers.cloudflare.com/workflows/build/trigger-workflows/), [Workflow pricing](https://developers.cloudflare.com/workflows/reference/pricing/))
+- Workflows cannot be deployed to Workers for Platforms namespaces. ([Workflow limits](https://developers.cloudflare.com/workflows/reference/limits/))
+
+### Recommendation
+
+- Use a single dispatcher schedule (or a small fixed number of schedules) to enqueue due checks. Do not create a cron expression per user or per monitor. Use a durable `next_run_at` index and lease rows, then send probe jobs to Queues. This avoids the 100-schedule cap and lets monitor frequency scale independently.
+- Make probe jobs idempotent with a stable check/run ID. Configure retry and dead-letter handling, and measure queue operations including retries. Keep webhook and probe work short; store detailed results in the tenant data store.
+- Use Workflows only when a monitor needs durable multi-step behavior, delayed retries, or a long wait. A simple recurring probe usually needs a dispatcher plus Queue consumer and has a simpler cost model.
+
+## Billing later, outside free v1
+
+### Sourced facts
+
+- Stripe documents `invoice.payment_failed` for failed subscription invoice payments. The PaymentIntent can become `requires_payment_method` and the subscription `incomplete`; Stripe recommends notifying the customer, collecting a new payment method, updating the default payment method, and considering Smart Retries. ([Subscription webhooks](https://docs.stripe.com/billing/subscriptions/webhooks))
+- `customer.subscription.updated` reports plan/status changes and `customer.subscription.deleted` reports that a subscription ended. ([Stripe event types](https://docs.stripe.com/api/events/types))
+- Stripe retries failed live webhook deliveries for up to **three days** with exponential backoff. Event order is not guaranteed. Stripe recommends storing processed event IDs and ignoring duplicates; separate Event objects can also represent the same underlying object and type. ([Webhook delivery behavior and deduplication](https://docs.stripe.com/webhooks))
+- Stripe requires signature verification using the raw request body and recommends returning a `2xx` quickly, then processing asynchronously. Stripe explicitly recommends an asynchronous queue for delivery spikes. ([Webhook handler requirements](https://docs.stripe.com/webhooks))
+- Stripe Tax provides tax calculation, registration monitoring, and filing/reporting integrations. Stripe’s Managed Payments product is a distinct merchant-of-record offering that can assume covered transaction tax, fraud, dispute, and support responsibilities. ([Stripe Tax](https://docs.stripe.com/tax), [Stripe Managed Payments overview](https://support.stripe.com/topics/managed-payments?locale=en-GB), [Stripe MoR guide](https://stripe.com/resources/more/merchant-of-record-for-saas))
+
+### Recommendation for the later paid release
+
+- Model entitlements locally, with `subscription_status`, `plan_id`, `current_period_end`, `cancel_at_period_end`, and a grace/suspension policy. Treat Stripe as the billing system of record and webhooks as the state-change feed; do not gate access only from the checkout redirect.
+- Persist each webhook’s Stripe `event.id` under a unique constraint before applying the state transition. Verify the signature, enqueue the event, return `2xx`, and process events idempotently. Re-fetch current Stripe objects when event ordering matters.
+- Handle at minimum: subscription created/updated/deleted, invoice paid, invoice payment failed, invoice payment action required, refunds, disputes, and customer updates if billing data is copied locally. Define exact behavior for failed payment, cancellation at period end, immediate cancellation, and reactivation before implementation.
+- Decide explicitly whether the company is the seller/merchant of record or whether a managed-payments product is being evaluated. Stripe Tax alone is tax tooling; it does not by itself establish a merchant-of-record transfer. Get jurisdiction-specific legal and tax advice before selling to EU consumers.
+
+## EU privacy and release gate
+
+### Sourced facts
+
+- The European Commission identifies the GDPR as the core EU regulation for protection of natural persons’ personal data, applies it across the EEA, and notes that controller/processor obligations and lawful bases remain substantive requirements. The Commission also describes Standard Contractual Clauses for transfers outside the EEA. ([European Commission GDPR framework](https://commission.europa.eu/law/law-topic/data-protection/legal-framework-eu-data-protection_en))
+- D1 database creation supports an `eu` jurisdiction restriction. ([Create D1 database API](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/create/))
+
+### Recommendation
+
+- Before public launch, document the controller/processor roles, data inventory, retention/deletion workflow, subprocessors, transfer mechanism, security measures, and user export/delete path. Keep probe URLs and incident payloads separate from account and billing PII where possible.
+- Offer EU residency as an explicit storage choice only after verifying every processor and operational log path. A D1 `eu` jurisdiction flag is useful evidence for database placement, but it is not a complete GDPR compliance determination.
+
+## Free v1 release gates and feasibility spike
+
+1. The release plan proposes **3 monitors, a 300-second interval, up to 3 selected regions, 24 hours of raw checks, 30 days of daily rollups, one owner plus up to 2 additional members, and one status page**. There is no billing or paid entitlement path in this release.
+2. Provision **10 then 50 real staging databases** and shard bindings. Measure creation, schema migration, query latency, deletion, REST authentication, failure recovery, atomic slot assignment, and registry consistency. Model **1,000 additional workspaces synthetically** rather than provisioning 1,000 or 10,000 real resources.
+3. Replay representative free-tier probe traffic and record rows read/written per check, index overhead, storage growth, Queue retries, and Workflow steps. Use the measurements to confirm the 3-monitor/300-second envelope and operator capacity.
+4. Test signup, failed provisioning, database deletion/export, workspace suspension, and shard exhaustion as recoverable workflows. Release only when an operator can locate each workspace’s identity, database, probe, and status-page state from the control plane.
