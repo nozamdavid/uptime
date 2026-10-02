@@ -68,13 +68,15 @@ test('sends every AT Protocol OAuth and interest route to the OAuth binding', as
   }
 });
 
-test('routes operator APIs to OAuth and keeps session and monitor requests on the authenticated monitoring API', async () => {
+test('routes AT Protocol sessions and private test workspaces to the hosted backend', async () => {
   for (const [path, expected] of [
     ['/api/operator/interest', 'oauth'],
     ['/api/operator/slots', 'oauth'],
     ['/api/auth/identity', 'oauth'],
-    ['/api/auth/session', 'api'],
-    ['/api/monitors', 'api'],
+    ['/api/auth/session', 'oauth'],
+    ['/api/monitors', 'oauth'],
+    ['/api/regions', 'oauth'],
+    ['/api/workspace/usage', 'oauth'],
   ]) {
     const { env, calls } = environment();
     const request = new Request(`https://uptime-staging.pages.dev${path}`, {
@@ -84,6 +86,31 @@ test('routes operator APIs to OAuth and keeps session and monitor requests on th
     assert.equal(calls[0][0], expected, path);
     assert.equal(calls[0][1], request);
     assert.equal(calls[0][1].headers.get('cookie'), 'uptime_atproto_session=opaque');
+  }
+});
+
+test('keeps password sessions and imported history on the legacy API', async () => {
+  for (const path of ['/api/auth/session', '/api/monitors']) {
+    const { env, calls } = environment();
+    await gateway.fetch(
+      new Request(`https://uptime-staging.pages.dev${path}`, {
+        headers: { cookie: 'uptime_session=legacy' },
+      }),
+      env,
+    );
+    assert.equal(calls[0][0], 'api');
+  }
+});
+
+test('scopes tenant reports to the hosted backend and preserves imported public reports', async () => {
+  for (const path of [
+    '/reports/public/status-pages.json?workspace=tenant',
+    '/reports/public/monitors/demo.json?workspace=tenant',
+    '/api/monitors/public/demo?workspace=tenant',
+  ]) {
+    const { env, calls } = environment();
+    await gateway.fetch(new Request(`https://uptime-staging.pages.dev${path}`), env);
+    assert.equal(calls[0][0], 'oauth');
   }
 });
 

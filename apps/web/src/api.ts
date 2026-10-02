@@ -344,6 +344,12 @@ export const api = {
       'POST',
       { enabled },
     ),
+  assignOperatorSlot: (bindingName: string, ownerDid: string) =>
+    sendJson<{ workspaceId: string; state: string; bindingName: string }>(
+      `/operator/slots/${encodeURIComponent(bindingName)}/assignment`,
+      'POST',
+      { ownerDid },
+    ),
   updateOperatorControls: (input: { admissionOpen: boolean; externalMonthlyCostUsd: number }) =>
     sendJson<{ budget: ProductBudget }>('/operator/controls', 'PATCH', input),
   setWorkspaceState: (id: string, state: 'active' | 'suspended', reason: string) =>
