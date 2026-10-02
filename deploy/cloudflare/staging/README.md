@@ -6,6 +6,12 @@ and Pages project uses the `uptime-staging` namespace.
 Run commands from the repository root. Never use the production configs in
 `deploy/cloudflare/` for staging work.
 
+On `codex/product-release-plan`, `scripts/deploy-app-workers.sh` and
+`scripts/deploy-workers.sh` default to staging and reject production targets,
+including `DEPLOY_ENVIRONMENT=production`. On other named branches, select
+staging explicitly with `--environment staging`. Detached checkouts cannot deploy
+through these scripts.
+
 ## Resources
 
 | Resource           | Staging value                                      |
@@ -25,7 +31,28 @@ Run commands from the repository root. Never use the production configs in
 
 R2 stays private. The Pages gateway forwards public monitor requests to the
 reporter service binding and serves status-page reports from the bucket. It
-forwards `/api/*` to the API Worker through a service binding.
+forwards monitoring APIs to the API Worker through a service binding.
+
+The separate `uptime-staging-oauth-api` Worker stores AT Protocol OAuth sessions
+and interest signups in `uptime-staging-control`. The gateway routes OAuth,
+interest, identity, and operator APIs to that Worker. The monitoring API verifies
+AT Protocol cookies through its `OAUTH` service binding and grants imported
+monitoring access only to accounts in `OPERATOR_DIDS`. Interest signups receive no
+access to that imported database. Identity checks and operator APIs allocate no
+monitoring workspace or tenant slot.
+
+Deploy both backends when changing the identity bridge:
+
+```bash
+pnpm --filter @uptime/api-worker exec wrangler d1 migrations apply CONTROL_DB \
+  --remote --config ../../deploy/cloudflare/staging/oauth-api/wrangler.toml
+pnpm --filter @uptime/api-worker exec wrangler deploy \
+  --config ../../deploy/cloudflare/staging/oauth-api/wrangler.toml
+scripts/deploy-app-workers.sh --environment staging --target api
+```
+
+OAuth secrets belong only on the OAuth Worker. Keep them in Wrangler secret
+storage, never in committed code or the Pages build.
 
 ## Safety rules
 
@@ -159,12 +186,14 @@ Test the gateway before deployment:
 node --test deploy/cloudflare/staging/pages/gateway.test.mjs
 ```
 
-Deploy to the staging branch of the staging Pages project:
+Deploy to the staging Pages project's configured production branch (`staging`).
+The project is isolated from the production `uptime` project. This updates
+`uptime-staging.pages.dev`, rather than only a branch preview:
 
 ```bash
 pnpm --filter @uptime/api-worker exec wrangler pages deploy \
   ../../../../dist/staging/web \
-  --cwd /home/david/workspace/uptime/deploy/cloudflare/staging/pages \
+  --cwd "$PWD/deploy/cloudflare/staging/pages" \
   --project-name uptime-staging \
   --branch staging \
   --commit-dirty=true

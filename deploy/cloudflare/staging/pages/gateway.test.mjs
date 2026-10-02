@@ -13,6 +13,9 @@ function environment({ object = null } = {}) {
     calls,
     env: {
       API: { fetch: async (request) => (calls.push(['api', request]), new Response('api')) },
+      OAUTH: {
+        fetch: async (request) => (calls.push(['oauth', request]), new Response('oauth')),
+      },
       REPORTER: {
         fetch: async (request) => (calls.push(['reporter', request]), new Response('monitor')),
       },
@@ -36,6 +39,90 @@ test('forwards the original API request to the staging service binding', async (
   assert.equal((await gateway.fetch(request, env)).status, 200);
   assert.equal(calls[0][0], 'api');
   assert.equal(calls[0][1], request);
+});
+
+test('sends every AT Protocol OAuth and interest route to the OAuth binding', async () => {
+  const cases = [
+    ['/oauth/client-metadata.json', 'GET'],
+    ['/oauth/jwks.json', 'GET'],
+    ['/api/auth/atproto/start', 'POST'],
+    ['/api/auth/atproto/callback?code=a&state=b&iss=https%3A%2F%2Fbsky.social', 'GET'],
+    ['/api/interest/session', 'GET'],
+    ['/api/auth/logout', 'POST'],
+  ];
+  for (const [path, method] of cases) {
+    const { env, calls } = environment();
+    const request = new Request(`https://uptime-staging.pages.dev${path}`, {
+      method,
+      ...(method === 'POST'
+        ? { body: '{}', headers: { cookie: 'uptime_atproto_session=opaque' } }
+        : {}),
+    });
+    assert.equal(await (await gateway.fetch(request, env)).text(), 'oauth');
+    assert.deepEqual(
+      calls.map(([kind]) => kind),
+      ['oauth'],
+      `${path} must not reach the monitoring API binding`,
+    );
+    assert.equal(calls[0][1], request);
+  }
+});
+
+test('routes operator APIs to OAuth and keeps session and monitor requests on the authenticated monitoring API', async () => {
+  for (const [path, expected] of [
+    ['/api/operator/interest', 'oauth'],
+    ['/api/operator/slots', 'oauth'],
+    ['/api/auth/identity', 'oauth'],
+    ['/api/auth/session', 'api'],
+    ['/api/monitors', 'api'],
+  ]) {
+    const { env, calls } = environment();
+    const request = new Request(`https://uptime-staging.pages.dev${path}`, {
+      headers: { cookie: 'uptime_atproto_session=opaque' },
+    });
+    await gateway.fetch(request, env);
+    assert.equal(calls[0][0], expected, path);
+    assert.equal(calls[0][1], request);
+    assert.equal(calls[0][1].headers.get('cookie'), 'uptime_atproto_session=opaque');
+  }
+});
+
+test('password logout remains on the API when no AT Protocol cookie is present', async () => {
+  const { env, calls } = environment();
+  await gateway.fetch(
+    new Request('https://uptime-staging.pages.dev/api/auth/logout', {
+      method: 'POST',
+      headers: { cookie: 'uptime_session=opaque' },
+    }),
+    env,
+  );
+  assert.equal(calls[0][0], 'api');
+});
+
+test('leaves monitoring API and public report routes on their existing bindings', async () => {
+  for (const [path, method, expected] of [
+    ['/api/monitors', 'POST', 'api'],
+    ['/api/auth/login', 'POST', 'api'],
+    ['/reports/public/status-pages.json', 'GET', 'r2'],
+  ]) {
+    const { env, calls } = environment();
+    await gateway.fetch(
+      new Request(`https://uptime-staging.pages.dev${path}`, {
+        method,
+        ...(method === 'POST' ? { body: '{}' } : {}),
+      }),
+      env,
+    );
+    assert.ok(
+      calls.some(([kind]) => kind === expected),
+      `${path} should reach ${expected}`,
+    );
+    assert.equal(
+      calls.some(([kind]) => kind === 'oauth'),
+      false,
+      `${path} must not reach the OAuth binding`,
+    );
+  }
 });
 
 test('forwards monitor snapshots to the reporter without reading the cohort from R2', async () => {

@@ -12,6 +12,10 @@ database_name = "uptime-staging"
 database_id = "3900c94a-82a0-4422-a5f8-1a56b781cea7"
 migrations_dir = "../../../../packages/cloudflare/src/migrations"
 
+[[services]]
+binding = "OAUTH"
+service = "uptime-staging-oauth-api"
+
 [vars]
 ENVIRONMENT = "staging"
 REGIONS_LIST = "us-east,us-west,canada-central,eu-west,eu-north,eu-south,asia,asia-east,asia-south"

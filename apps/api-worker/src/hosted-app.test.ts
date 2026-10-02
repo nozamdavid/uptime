@@ -1,11 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { hashSessionToken, type R2Bucket } from '@uptime/cloudflare';
+import { hashPassword, hashSessionToken, type R2Bucket } from '@uptime/cloudflare';
 import { createD1Adapter, createTestDatabase } from '@uptime/cloudflare/testing';
 
 import { consumeBudget, ensureWorkspace, hostedFetch } from './hosted-app.js';
 import { recordInterest } from './interest.js';
+import worker from './index.js';
 
 const controlSchema = ['0001_control.sql', '0002_slot_controls.sql', '0003_interest_signups.sql']
   .map((name) =>
@@ -22,6 +23,125 @@ afterEach(() => {
 });
 
 describe('hosted control plane', () => {
+  it('exposes OAuth identity without provisioning a workspace or tenant slot', async () => {
+    const context = await createHostedContext();
+    const operator = await authenticatedCookie(
+      context.control,
+      'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+      'operator.test',
+    );
+    Object.assign(context.env, { OPERATOR_DIDS: operator.did });
+
+    const response = await fetchHosted(context, '/api/auth/identity', operator.cookie);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      user: { did: operator.did, handle: 'operator.test' },
+      isOperator: true,
+    });
+    expect(context.control.prepare('SELECT count(*) AS count FROM workspaces').get()).toEqual({
+      count: 0,
+    });
+    expect(
+      context.control
+        .prepare('SELECT count(*) AS count FROM tenant_slots WHERE workspace_id IS NOT NULL')
+        .get(),
+    ).toEqual({ count: 0 });
+  });
+
+  it('serves operator capacity endpoints without provisioning an operator workspace', async () => {
+    const context = await createHostedContext();
+    const operator = await authenticatedCookie(
+      context.control,
+      'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+      'operator.test',
+    );
+    Object.assign(context.env, { OPERATOR_DIDS: operator.did });
+
+    const response = await fetchHosted(context, '/api/operator/slots', operator.cookie);
+
+    expect(response.status).toBe(200);
+    expect(context.control.prepare('SELECT count(*) AS count FROM workspaces').get()).toEqual({
+      count: 0,
+    });
+  });
+
+  it('denies expired and suspended hosted identities', async () => {
+    const context = await createHostedContext();
+    const expired = await authenticatedCookie(
+      context.control,
+      'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+      'expired.test',
+    );
+    context.control
+      .prepare('UPDATE atproto_login_sessions SET expires_at = ? WHERE did = ?')
+      .run('2020-01-01T00:00:00.000Z', expired.did);
+    expect((await fetchHosted(context, '/api/auth/identity', expired.cookie)).status).toBe(401);
+
+    const suspended = await authenticatedCookie(
+      context.control,
+      'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb',
+      'suspended.test',
+    );
+    context.control
+      .prepare(
+        "INSERT INTO users(did, handle, state, created_at, updated_at, last_seen_at) VALUES (?, ?, 'suspended', ?, ?, ?)",
+      )
+      .run(suspended.did, 'suspended.test', now(), now(), now());
+    expect((await fetchHosted(context, '/api/auth/identity', suspended.cookie)).status).toBe(403);
+  });
+
+  it('bridges a real hosted OAuth cookie into legacy session and monitor reads', async () => {
+    const context = await createHostedContext();
+    const operator = await authenticatedCookie(
+      context.control,
+      'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+      'operator.test',
+    );
+    Object.assign(context.env, { OPERATOR_DIDS: operator.did });
+    const legacyDb = createTestDatabase();
+    databases.push(legacyDb);
+    const legacyEnv = {
+      DB: createD1Adapter(legacyDb),
+      ADMIN_EMAIL: 'admin@example.com',
+      ADMIN_PASSWORD_HASH: await hashPassword('correct horse battery staple'),
+      SESSION_SECRET: 'l'.repeat(32),
+      CREDENTIAL_ENCRYPTION_SECRET: 'c'.repeat(32),
+      REGIONS_LIST: '',
+      ENVIRONMENT: 'test',
+      OAUTH: {
+        fetch: (request: Request) =>
+          hostedFetch(request, context.env, {
+            waitUntil() {},
+          } as unknown as ExecutionContext),
+      },
+    };
+    const response = await worker.fetch(
+      new Request('https://legacy.example.com/api/auth/session', {
+        headers: { cookie: operator.cookie },
+      }),
+      legacyEnv as Parameters<typeof worker.fetch>[1],
+      { waitUntil() {} } as unknown as ExecutionContext,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      user: { did: operator.did, handle: 'operator.test' },
+      role: 'owner',
+      isOperator: true,
+    });
+    const monitors = await worker.fetch(
+      new Request('https://legacy.example.com/api/monitors', {
+        headers: { cookie: operator.cookie },
+      }),
+      legacyEnv as Parameters<typeof worker.fetch>[1],
+      { waitUntil() {} } as unknown as ExecutionContext,
+    );
+    expect(monitors.status).toBe(200);
+    expect(context.control.prepare('SELECT count(*) AS count FROM workspaces').get()).toEqual({
+      count: 0,
+    });
+  });
+
   it('confirms only the signed-in interest record and blocks new product access before release', async () => {
     const context = await createHostedContext();
     Object.assign(context.env, { INTEREST_CHECK_ONLY: 'true' });

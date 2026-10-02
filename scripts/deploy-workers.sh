@@ -2,7 +2,60 @@
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# The target helper validates the branch and requested environment before any
+# deployment command can run. It sets the global deployment_environment.
+# shellcheck source=/dev/null
+source "$repo_root/scripts/deployment-target.sh"
+
+environment_arg="${DEPLOY_ENVIRONMENT:-}"
+wrangler_args=()
+usage() {
+  cat <<'EOF'
+Usage: scripts/deploy-workers.sh [options] [wrangler arguments]
+  --environment staging|production  Deployment environment
+  --help                            Show this message
+
+Wrangler arguments such as --dry-run and --secrets-file are passed through.
+Worker names, routes, environments, and configs are managed by this script.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --environment)
+      (($# >= 2)) || { printf 'deploy-workers: --environment requires a value\n' >&2; exit 1; }
+      environment_arg="$2"
+      shift 2
+      ;;
+    --environment=*)
+      environment_arg="${1#*=}"
+      shift
+      ;;
+    --config|-c|--name|--env|-e|--route|--routes|--dispatch-namespace)
+      printf 'deploy-workers: resource targeting is managed by this script\n' >&2
+      exit 1
+      ;;
+    --config=*|-c=*|--name=*|--env=*|-e=*|--route=*|--routes=*|--dispatch-namespace=*)
+      printf 'deploy-workers: resource targeting is managed by this script\n' >&2
+      exit 1
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      wrangler_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+select_deployment_environment "$repo_root" "$environment_arg"
 config_dir="$repo_root/deploy/cloudflare"
+if [[ "$deployment_environment" == "staging" ]]; then
+  config_dir+="/staging/probes"
+fi
 
 regions_list="${REGIONS_LIST:-}"
 if [[ -z "$regions_list" && -f "$repo_root/.env" ]]; then
@@ -61,7 +114,7 @@ fi
 cd -- "$repo_root"
 for config in "${configs[@]}"; do
   printf 'deploy-workers: deploying %s\n' "$(basename -- "$config")" >&2
-  if pnpm --filter @uptime/probe-worker exec wrangler deploy --config "$config" "$@"; then
+  if pnpm --filter @uptime/probe-worker exec wrangler deploy --config "$config" "${wrangler_args[@]}"; then
     continue
   else
     status=$?

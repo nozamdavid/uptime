@@ -9,6 +9,8 @@ import {
   corsHeaders,
   errorResponse,
   HttpErrorLike,
+  json,
+  parseCookies,
 } from './http.js';
 import { parseApiEnv } from './env.js';
 import { UrlPolicyError } from './security.js';
@@ -113,6 +115,22 @@ export default {
         context.waitUntil(pruneExpiredSessions(db, new Date()).catch(() => undefined));
       }
 
+      const atprotoCookie = parseCookies(request.headers.get('cookie')).uptime_atproto_session;
+      if (atprotoCookie && requiresOauthBridge(url.pathname)) {
+        const principal = await lookupHostedIdentity(request, env);
+        appEnv.principal = principal;
+        if (url.pathname === '/api/auth/session' && method === 'GET') {
+          return withCors(
+            json({
+              user: { did: principal.did, handle: principal.handle },
+              role: 'owner',
+              isOperator: true,
+              admin: { id: principal.did, did: principal.did, handle: principal.handle },
+            }),
+          );
+        }
+      }
+
       const response = await matched.handler({
         request: request as unknown as Request,
         env: appEnv,
@@ -125,6 +143,70 @@ export default {
     }
   },
 } satisfies ExportedHandler<CloudflareEnv>;
+
+function requiresOauthBridge(pathname: string): boolean {
+  if (pathname === '/api/auth/session' || pathname === '/api/auth/logout') return true;
+  if (pathname.startsWith('/api/monitors/public/')) return false;
+  if (pathname.startsWith('/api/status-pages/public/')) return false;
+  return (
+    pathname.startsWith('/api/monitors') ||
+    pathname.startsWith('/api/status-pages') ||
+    pathname.startsWith('/api/notification-') ||
+    pathname.startsWith('/api/badges')
+  );
+}
+
+interface HostedIdentity {
+  id: string;
+  did: string;
+  handle: string;
+}
+
+async function lookupHostedIdentity(request: Request, env: CloudflareEnv): Promise<HostedIdentity> {
+  const binding = env.OAUTH as { fetch(input: Request): Promise<Response> } | undefined;
+  if (!binding || typeof binding.fetch !== 'function')
+    throw new HttpErrorLike(401, 'unauthorized', 'Authentication is required');
+  let response: Response;
+  try {
+    // Keep the destination a fixed local route. The service binding must never
+    // be redirected to a URL supplied by the caller.
+    response = await binding.fetch(
+      new Request(new URL('/api/auth/identity', request.url), {
+        method: 'GET',
+        headers: { cookie: request.headers.get('cookie') ?? '' },
+      }),
+    );
+  } catch {
+    throw new HttpErrorLike(401, 'unauthorized', 'Authentication is required');
+  }
+  if (response.status === 401)
+    throw new HttpErrorLike(401, 'unauthorized', 'Authentication is required');
+  if (response.status === 403)
+    throw new HttpErrorLike(403, 'forbidden', 'Operator access required');
+  if (!response.ok) throw new HttpErrorLike(401, 'unauthorized', 'Authentication is required');
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new HttpErrorLike(401, 'unauthorized', 'Authentication is required');
+  }
+  if (!body || typeof body !== 'object') {
+    throw new HttpErrorLike(401, 'unauthorized', 'Authentication is required');
+  }
+  const candidate = body as {
+    user?: { did?: unknown; handle?: unknown };
+    isOperator?: unknown;
+  };
+  if (
+    candidate.isOperator !== true ||
+    typeof candidate.user?.did !== 'string' ||
+    typeof candidate.user.handle !== 'string' ||
+    candidate.user.did.length === 0 ||
+    candidate.user.handle.length === 0
+  )
+    throw new HttpErrorLike(403, 'forbidden', 'Operator access required');
+  return { id: candidate.user.did, did: candidate.user.did, handle: candidate.user.handle };
+}
 
 function enforceRateLimit(request: Request, pathname: string, method: string): Response | null {
   const address = clientAddress(request);
