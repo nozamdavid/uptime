@@ -11,6 +11,8 @@ The [first version](docs/plans/free-v1-implementation.md) includes AT Protocol
 OAuth signup, dedicated customer databases, team access, and an operator dashboard.
 Use the [hosted runbook](docs/deployment/free-hosted.md) for local OAuth development
 and deployment. Its $20 forecast guard requires Cloudflare billing alerts.
+The public landing currently collects interest through identity-only AT Protocol
+OAuth. Signups appear in the operator page and do not allocate workspace databases.
 The [product release plan](docs/plans/product-release-plan.md) covers positioning,
 user journeys, operations, launch gates, and the broader roadmap.
 The [platform research](docs/research/saas-platform-research.md) records infrastructure

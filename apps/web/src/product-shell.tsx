@@ -3,87 +3,149 @@ import type { FormEvent } from 'react';
 import { api } from './api.js';
 import type { ProductSession } from './api.js';
 
-const FREE_LIMITS = [
-  ['3 monitors', 'Track the endpoints that matter most.'],
-  ['5 minute checks', 'A calm cadence for personal services.'],
-  ['up to 3 regions', 'Checks from three locations.'],
-  ['24h detailed history', 'Inspect every recent check.'],
-  ['30d daily history', 'See the longer uptime trend.'],
-  ['1 status page', 'Share one clear public status page.'],
-] as const;
-
 export const ProductSessionContext = createContext<ProductSession | null>(null);
 export function useProductSession() {
   return useContext(ProductSessionContext);
 }
 
 export function LandingPage() {
+  const [interestState, setInterestState] = useState<'idle' | 'loading' | 'confirmed' | 'error'>(
+    'idle',
+  );
+  const [interestSignup, setInterestSignup] = useState<{ handle: string } | null>(null);
+  useEffect(() => {
+    if (
+      typeof window === 'undefined' ||
+      new URLSearchParams(window.location.search).get('interest') !== 'joined'
+    )
+      return;
+    setInterestState('loading');
+    api
+      .interestSession()
+      .then(({ signup }) => {
+        if (!signup) {
+          setInterestState('error');
+          return;
+        }
+        setInterestSignup({ handle: signup.handle });
+        setInterestState('confirmed');
+      })
+      .catch(() => setInterestState('error'));
+  }, []);
   return (
     <main className="landing">
       <header className="landing__nav">
         <a className="brand" href="/">
           Uptime
         </a>
-        <nav aria-label="Site navigation">
-          <a href="#limits">Free plan</a>
-          <a href="/login">Log in</a>
-        </nav>
+        <span className="mono-label">COMING SOON</span>
       </header>
       <section className="landing__hero">
         <p className="mono-label">UPTIME FOR SMALL SYSTEMS</p>
-        <h1>Know when your service is down.</h1>
+        <h1>Simple uptime monitoring for indie developers and small teams.</h1>
         <p className="landing__lede">
-          Simple regional checks, useful history, and a public status page. Free for personal
-          projects.
+          We’re shaping a focused way to watch the services that matter. Join the interest list for
+          early access.
         </p>
-        <div className="landing__actions">
-          <a className="button button--primary" href="/signup">
-            Start free with AT Protocol
-          </a>
-          <a className="button button--quiet" href="https://bsky.app/signup">
-            Create an AT Protocol account
-          </a>
-        </div>
+        {interestState === 'confirmed' ? (
+          <p role="status">Thanks, @{interestSignup?.handle} is on the interest list.</p>
+        ) : interestState === 'loading' ? (
+          <p role="status">Checking your signup…</p>
+        ) : (
+          <>
+            {interestState === 'error' && (
+              <p className="field-error" role="alert">
+                We couldn’t confirm that signup. Please try again.
+              </p>
+            )}
+            <InterestForm />
+          </>
+        )}
         <p className="landing__note">
-          No password or email stored here. Your DID is the stable account identity; your handle can
-          change.
+          Identity only: we record your DID and handle. No password, posts, follows, or write
+          permission.
         </p>
-      </section>
-      <section className="landing__details" id="limits" aria-labelledby="free-plan-title">
-        <div>
-          <p className="mono-label">THE FREE PLAN</p>
-          <h2 id="free-plan-title">Everything needed to keep an eye on a small service.</h2>
-        </div>
-        <div className="free-limit-grid">
-          {FREE_LIMITS.map(([title, detail]) => (
-            <article className="free-limit" key={title}>
-              <strong>{title}</strong>
-              <p>{detail}</p>
-            </article>
-          ))}
-        </div>
       </section>
       <section className="landing__policies" aria-label="Policies">
         <p id="privacy">
-          <strong>Privacy.</strong> Uptime uses your AT Protocol DID as your stable account identity
-          and displays your current handle. It stores encrypted session tokens needed to keep you
-          signed in. Monitored URLs, check results, notification settings, and public status content
-          are used to provide the service.
+          <strong>Privacy.</strong> We save your verified AT Protocol DID, handle, and signup date
+          for this interest check. Sign-in tokens are encrypted. The list is visible to the service
+          owner. Joining does not create a monitoring workspace.
         </p>
         <p id="terms">
-          <strong>Terms.</strong> Use the service for systems you own or are authorized to monitor.
-          Workspace owners control members and deletion; deletion requests are queued and stop new
-          checks while data is removed. For account or monitoring questions, contact the service
-          owner.
+          <strong>Coming soon.</strong> This is an interest list while we prepare the release.
+          Joining is free and does not guarantee a launch date or early access.
         </p>
       </section>
       <footer className="landing__footer">
         <span>Built for independent builders.</span>
         <span>
-          <a href="#privacy">Privacy</a> · <a href="#terms">Terms</a> ·{' '}
-          <a href="/signup">Start monitoring</a>
+          <a href="#privacy">Privacy</a> · <a href="/operator">Operator</a>
         </span>
       </footer>
+    </main>
+  );
+}
+
+export function InterestForm() {
+  const [handle, setHandle] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(() =>
+    typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('auth_error')
+      ? 'AT Protocol sign-in was not completed. Please try again.'
+      : '',
+  );
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api.startAtProto(handle.trim(), '/?interest=joined');
+      if (result.authorizationUrl) window.location.assign(result.authorizationUrl);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not start signup');
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <form className="auth-card" onSubmit={submit} noValidate>
+      <label className="field" htmlFor="interest-handle">
+        <span>AT Protocol handle</span>
+        <input
+          id="interest-handle"
+          value={handle}
+          onChange={(event) => setHandle(event.target.value)}
+          placeholder="you.bsky.social"
+          autoComplete="username"
+          required
+        />
+      </label>
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
+      <button className="button button--primary" disabled={busy || !handle.trim()}>
+        {busy ? 'Connecting…' : 'Join interest list'}
+      </button>
+    </form>
+  );
+}
+
+export function InterestSignupPage() {
+  return (
+    <main className="auth-page">
+      <a className="brand auth-page__brand" href="/">
+        Uptime
+      </a>
+      <p className="mono-label">COMING SOON</p>
+      <h1>Join the interest list.</h1>
+      <p>We’ll use your AT Protocol identity only. No password or posting permission.</p>
+      <InterestForm />
+      <p className="auth-card__switch">
+        <a href="/">Back to home</a>
+      </p>
     </main>
   );
 }
@@ -159,7 +221,9 @@ export function AuthPage({
         </button>
         <p className="auth-card__switch">
           {isSignup ? 'Already have a workspace?' : 'New here?'}{' '}
-          <a href={isSignup ? '/login' : '/signup'}>{isSignup ? 'Log in' : 'Create one free'}</a>
+          <a href={isSignup ? '/login' : '/signup'}>
+            {isSignup ? 'Log in' : 'Join the interest list'}
+          </a>
         </p>
       </form>
     </main>
@@ -400,14 +464,22 @@ export function SettingsPage() {
 export function OperatorPage() {
   const session = useProductSession();
   const [data, setData] = useState<Awaited<ReturnType<typeof api.operatorWorkspaces>> | null>(null);
+  const [slots, setSlots] = useState<Awaited<ReturnType<typeof api.operatorSlots>> | null>(null);
+  const [interest, setInterest] = useState<Awaited<ReturnType<typeof api.operatorInterest>> | null>(
+    null,
+  );
   const [error, setError] = useState('');
   const [controlError, setControlError] = useState('');
   const [savingControls, setSavingControls] = useState(false);
+  const [pendingWorkspaceId, setPendingWorkspaceId] = useState<string | null>(null);
   useEffect(() => {
     if (session?.isOperator)
-      api
-        .operatorWorkspaces()
-        .then(setData)
+      Promise.all([api.operatorWorkspaces(), api.operatorSlots(), api.operatorInterest()])
+        .then(([workspaces, inventory, interestList]) => {
+          setData(workspaces);
+          setSlots(inventory);
+          setInterest(interestList);
+        })
         .catch((reason) =>
           setError(reason instanceof Error ? reason.message : 'Could not load workspaces'),
         );
@@ -431,7 +503,7 @@ export function OperatorPage() {
           {error}
         </p>
       )}
-      {!data ? (
+      {!data || !slots || !interest ? (
         <p role="status">Loading workspaces…</p>
       ) : (
         <>
@@ -439,7 +511,10 @@ export function OperatorPage() {
             <h2>Admission and budget</h2>
             <p className="operator-budget__summary">
               Forecast $
-              {((data.budget.baseUsd ?? 0) + (data.budget.externalMonthlyCostUsd ?? 0)).toFixed(2)}
+              {(
+                data.budget.forecastUsd ??
+                (data.budget.baseUsd ?? 0) + (data.budget.externalMonthlyCostUsd ?? 0)
+              ).toFixed(2)}
               /mo · ceiling ${data.budget.ceilingUsd.toFixed(2)}
             </p>
             <p className="operator-budget__coverage">
@@ -499,9 +574,116 @@ export function OperatorPage() {
               </p>
             )}
           </article>
+          <article className="settings-card operator-budget">
+            <h2>Interest list · {interest.total}</h2>
+            {interest.signups.length === 0 ? (
+              <p>No signups yet.</p>
+            ) : (
+              <div className="operator-list">
+                {interest.signups.map((signup) => (
+                  <div className="operator-row" key={signup.did}>
+                    <div>
+                      <strong>@{signup.handle}</strong>
+                      <small>{signup.did}</small>
+                    </div>
+                    <small>{new Date(signup.createdAt).toLocaleDateString()}</small>
+                  </div>
+                ))}
+              </div>
+            )}
+          </article>
+          <article className="settings-card operator-budget">
+            <h2>Capacity pool</h2>
+            <p>
+              {slots.availableSlots} available · {slots.assignedSlots} assigned · {slots.heldSlots}{' '}
+              held · {slots.quarantinedSlots} quarantined
+            </p>
+            <p className="operator-budget__coverage">
+              {slots.configuredSlots} configured Cloudflare database slots. This controls the
+              configured pool; new physical databases still require deployment configuration.
+            </p>
+            <form
+              className="operator-controls"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const form = new FormData(event.currentTarget);
+                setSavingControls(true);
+                setControlError('');
+                void api
+                  .updateOperatorSlots(Number(form.get('maxWorkspaces') ?? slots.maxWorkspaces))
+                  .then(setSlots)
+                  .catch((reason) =>
+                    setControlError(
+                      reason instanceof Error ? reason.message : 'Could not update capacity limit',
+                    ),
+                  )
+                  .finally(() => setSavingControls(false));
+              }}
+            >
+              <label>
+                Workspace limit
+                <input
+                  name="maxWorkspaces"
+                  type="number"
+                  min="1"
+                  max={Math.min(10, slots.configuredSlots)}
+                  defaultValue={slots.maxWorkspaces}
+                  disabled={savingControls}
+                />
+              </label>
+              <button className="button button--quiet" disabled={savingControls}>
+                {savingControls ? 'Saving…' : 'Save limit'}
+              </button>
+            </form>
+            <div className="operator-list">
+              {slots.slots.map((slot) => (
+                <div className="operator-row" key={slot.bindingName}>
+                  <div>
+                    <strong>{slot.bindingName}</strong>
+                    <small>
+                      {slot.status === 'assigned'
+                        ? `Assigned to ${slot.ownerHandle ?? slot.workspaceId ?? 'workspace'}`
+                        : slot.status === 'deleting'
+                          ? 'Deleting'
+                          : slot.admissionEnabled
+                            ? 'Available'
+                            : 'Held'}
+                    </small>
+                  </div>
+                  {slot.status === 'available' && slot.workspaceId === null && (
+                    <button
+                      className="button button--quiet"
+                      disabled={savingControls}
+                      onClick={() => {
+                        setSavingControls(true);
+                        setControlError('');
+                        void api
+                          .setSlotAdmission(slot.bindingName, !slot.admissionEnabled)
+                          .then(setSlots)
+                          .catch((reason) =>
+                            setControlError(
+                              reason instanceof Error
+                                ? reason.message
+                                : 'Could not update slot admission',
+                            ),
+                          )
+                          .finally(() => setSavingControls(false));
+                      }}
+                    >
+                      {slot.admissionEnabled ? 'Hold' : 'Make available'}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </article>
           <div className="operator-list">
             {data.workspaces?.map((workspace) => {
-              const canSuspend = workspace.state === 'active' || workspace.state === 'suspended';
+              const canSuspend =
+                workspace.state === 'active' ||
+                workspace.state === 'suspended' ||
+                workspace.state === 'waiting_for_capacity';
+              const nextState = workspace.state === 'active' ? 'suspended' : 'active';
               return (
                 <article className="settings-card operator-row" key={workspace.id}>
                   <div>
@@ -518,37 +700,47 @@ export function OperatorPage() {
                   {canSuspend && (
                     <button
                       className="button button--quiet"
+                      disabled={pendingWorkspaceId === workspace.id}
                       onClick={() => {
-                        const state = workspace.state === 'suspended' ? 'active' : 'suspended';
+                        setPendingWorkspaceId(workspace.id);
                         setControlError('');
                         void api
                           .setWorkspaceState(
                             workspace.id,
-                            state,
-                            state === 'suspended' ? 'Operator action' : 'Operator restored',
+                            nextState,
+                            nextState === 'suspended' ? 'Operator action' : 'Operator restored',
                           )
-                          .then(() =>
+                          .then(() => api.operatorSlots())
+                          .then((inventory) => {
+                            setSlots(inventory);
                             setData((current) =>
                               current
                                 ? {
                                     ...current,
                                     workspaces: current.workspaces?.map((item) =>
-                                      item.id === workspace.id ? { ...item, state } : item,
+                                      item.id === workspace.id
+                                        ? { ...item, state: nextState }
+                                        : item,
                                     ),
                                   }
                                 : current,
-                            ),
-                          )
+                            );
+                          })
                           .catch((reason) =>
                             setControlError(
                               reason instanceof Error
                                 ? reason.message
                                 : 'Could not update workspace',
                             ),
-                          );
+                          )
+                          .finally(() => setPendingWorkspaceId(null));
                       }}
                     >
-                      {workspace.state === 'suspended' ? 'Activate' : 'Suspend'}
+                      {workspace.state === 'active'
+                        ? 'Suspend'
+                        : workspace.state === 'suspended'
+                          ? 'Resume'
+                          : 'Activate'}
                     </button>
                   )}
                 </article>
