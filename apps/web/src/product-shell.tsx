@@ -233,6 +233,7 @@ export function AuthPage({
 
 export function SettingsPage() {
   const session = useProductSession();
+  const importedStaging = session?.workspace?.kind === 'staging_import';
   const [usage, setUsage] = useState<Awaited<ReturnType<typeof api.usage>> | null>(null);
   const [members, setMembers] = useState<Awaited<ReturnType<typeof api.workspaceMembers>> | null>(
     null,
@@ -332,8 +333,19 @@ export function SettingsPage() {
         <p>Role: {session?.role ?? 'owner'}</p>
       </div>
       <div className="settings-card">
-        <h2>Free plan</h2>
-        {usage ? (
+        <h2>{importedStaging ? 'Imported staging monitors' : 'Free plan'}</h2>
+        {usage && importedStaging ? (
+          <>
+            <p>
+              {usage.usage.monitors} monitors · {usage.usage.statusPages} status pages ·{' '}
+              {usage.usage.notificationServices} notification services
+            </p>
+            <p className="settings-note">
+              This workspace keeps the existing staging checks and history. Its limits and retention
+              follow the imported staging system.
+            </p>
+          </>
+        ) : usage && usage.limits ? (
           <p>
             {usage.usage.monitors} / {usage.limits.monitors} monitors · {usage.usage.statusPages} /{' '}
             {usage.limits.statusPages} status pages · {usage.usage.notificationServices} /{' '}
@@ -342,10 +354,12 @@ export function SettingsPage() {
         ) : (
           <p role="status">Loading usage…</p>
         )}
-        <p className="settings-note">
-          Includes 5 minute checks, up to 3 regions, 24 hours of detailed history, and 30 days of
-          daily history.
-        </p>
+        {!importedStaging && (
+          <p className="settings-note">
+            Includes 5 minute checks, up to 3 regions, 24 hours of detailed history, and 30 days of
+            daily history.
+          </p>
+        )}
       </div>
       <div className="settings-card">
         <h2>Members</h2>
@@ -422,7 +436,11 @@ export function SettingsPage() {
       </div>
       <div className="settings-card settings-card--actions">
         <h2>Workspace data</h2>
-        <p>Download a JSON copy of your workspace or permanently delete it.</p>
+        <p>
+          {importedStaging
+            ? 'Download a JSON copy of your workspace.'
+            : 'Download a JSON copy of your workspace or permanently delete it.'}
+        </p>
         {deletionQueued ? (
           <p className="field-success" role="status">
             Deletion queued. This workspace will stop accepting checks while it is removed.
@@ -434,9 +452,11 @@ export function SettingsPage() {
                 <button className="button button--quiet" onClick={() => void downloadExport()}>
                   Download export
                 </button>
-                <button className="button button--danger" onClick={() => setDeleteOpen(true)}>
-                  Delete workspace
-                </button>
+                {!importedStaging && (
+                  <button className="button button--danger" onClick={() => setDeleteOpen(true)}>
+                    Delete workspace
+                  </button>
+                )}
               </div>
               {deleteOpen && (
                 <div className="confirm-box" role="alert">
@@ -641,7 +661,11 @@ export function OperatorPage() {
               {slots.slots.map((slot) => (
                 <div className="operator-row" key={slot.bindingName}>
                   <div>
-                    <strong>{slot.bindingName}</strong>
+                    <strong>
+                      {slot.kind === 'staging_import'
+                        ? 'Imported staging monitors'
+                        : slot.bindingName}
+                    </strong>
                     <small>
                       {slot.status === 'assigned'
                         ? `Assigned to ${slot.ownerHandle ?? slot.workspaceId ?? 'workspace'}`
@@ -652,32 +676,35 @@ export function OperatorPage() {
                             : 'Held'}
                     </small>
                   </div>
-                  {slot.status === 'available' && slot.workspaceId === null && (
-                    <button
-                      className="button button--quiet"
-                      disabled={savingControls}
-                      onClick={() => {
-                        setSavingControls(true);
-                        setControlError('');
-                        void api
-                          .setSlotAdmission(slot.bindingName, !slot.admissionEnabled)
-                          .then(setSlots)
-                          .catch((reason) =>
-                            setControlError(
-                              reason instanceof Error
-                                ? reason.message
-                                : 'Could not update slot admission',
-                            ),
-                          )
-                          .finally(() => setSavingControls(false));
-                      }}
-                    >
-                      {slot.admissionEnabled ? 'Hold' : 'Make available'}
-                    </button>
-                  )}
+                  {slot.kind !== 'staging_import' &&
+                    slot.status === 'available' &&
+                    slot.workspaceId === null && (
+                      <button
+                        className="button button--quiet"
+                        disabled={savingControls}
+                        onClick={() => {
+                          setSavingControls(true);
+                          setControlError('');
+                          void api
+                            .setSlotAdmission(slot.bindingName, !slot.admissionEnabled)
+                            .then(setSlots)
+                            .catch((reason) =>
+                              setControlError(
+                                reason instanceof Error
+                                  ? reason.message
+                                  : 'Could not update slot admission',
+                              ),
+                            )
+                            .finally(() => setSavingControls(false));
+                        }}
+                      >
+                        {slot.admissionEnabled ? 'Hold' : 'Make available'}
+                      </button>
+                    )}
                   {slot.status === 'available' && slot.workspaceId === null && (
                     <SlotAssignment
                       bindingName={slot.bindingName}
+                      imported={slot.kind === 'staging_import'}
                       signups={interest.signups.filter(
                         (signup) => signup.did !== session?.user?.did,
                       )}

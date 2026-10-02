@@ -30,6 +30,20 @@ migrations_dir = "../../../../packages/cloudflare/src/control-migrations"
 binding = "REPORTS"
 bucket_name = "uptime-staging-reports"
 
+[[services]]
+binding = "IMPORTED_API"
+service = "uptime-staging-api"
+
+[[services]]
+binding = "IMPORTED_REPORTER"
+service = "uptime-staging-reporter"
+
+[[d1_databases]]
+binding = "STAGING_IMPORTED_DB"
+database_name = "uptime-staging"
+database_id = "3900c94a-82a0-4422-a5f8-1a56b781cea7"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
 [vars]
 INTEREST_CHECK_ONLY = "true"
 ENVIRONMENT = "staging"

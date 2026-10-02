@@ -34,6 +34,12 @@ migrations_dir = "../../../../packages/cloudflare/src/control-migrations"
 binding = "REPORTS"
 bucket_name = "uptime-staging-reports"
 
+[[d1_databases]]
+binding = "STAGING_IMPORTED_DB"
+database_name = "uptime-staging"
+database_id = "3900c94a-82a0-4422-a5f8-1a56b781cea7"
+migrations_dir = "../../../../packages/cloudflare/src/migrations"
+
 [vars]
 ENVIRONMENT = "staging"
 REGIONS_LIST = "eu-west,us-east,asia"

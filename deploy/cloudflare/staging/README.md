@@ -47,6 +47,24 @@ three staging slots are outside the public limit. The allocator and Hold control
 always preserve at least one enabled, unused database. Use Assign workspace in
 the operator UI to grant a verified interest signup one of the held test slots.
 
+The existing `uptime-staging` database is a fourteenth, held slot named
+`STAGING_IMPORTED_DB`, displayed as Imported staging monitors. Run
+`scripts/register-staging-import.sh --environment staging` after binding it to
+the OAuth API and hosted coordinator. Registration preserves its 107 monitors,
+one status page, and history, and is safe to repeat. Assign it explicitly to an
+interest signup that does not already own a workspace. Assignment grants access
+to the entire imported fleet, not an empty database.
+
+The imported slot uses a separate `staging_workspace_identity` marker. It never
+gets free-plan `workspace_metadata`, never enters automatic signup, and cannot
+be deleted through workspace settings. Its API calls use the legacy API's
+credential secret and regional configuration, and its reports use the existing
+root R2 objects and reporter. The legacy coordinator remains its only scheduler;
+the hosted queue ignores it. Suspension blocks app access while existing staging
+checks continue. Hosted usage covers control and direct database reads. Proxied
+API requests and legacy scheduled work are outside the hosted per-user forecast;
+review their Cloudflare metrics separately.
+
 ```bash
 scripts/deploy-hosted-workers.sh --dry-run
 scripts/deploy-hosted-workers.sh

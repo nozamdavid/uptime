@@ -68,6 +68,46 @@ describe('nine-region monitor form', () => {
     expect(html).toContain('value="1"');
     expect(html).toContain('Verify this origin before monitoring it.');
   });
+
+  it('preserves imported staging monitor settings instead of applying free limits', () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        ProductSessionContext.Provider,
+        {
+          value: {
+            user: { did: 'did:plc:imported', handle: 'imported.test' },
+            workspace: {
+              id: 'workspace-imported',
+              name: 'Imported staging',
+              plan: 'free',
+              kind: 'staging_import',
+              state: 'active',
+            },
+            role: 'owner',
+          },
+        },
+        createElement(MonitorForm, {
+          monitor: {
+            id: 'monitor-imported',
+            name: 'Imported monitor',
+            url: 'https://status.example.test/health',
+            regionIds: ['us-east', 'eu-west', 'asia', 'asia-east'],
+            intervalSeconds: 60,
+            timeoutMs: 20_000,
+            enabled: true,
+            dnsDiagnosticsEnabled: true,
+            isPublic: false,
+          },
+          onCancel: () => undefined,
+          onSaved: () => undefined,
+        }),
+      ),
+    );
+    expect(html).toContain('Every 1 min');
+    expect(html).toContain('value="20"');
+    expect(html).toContain('4 selected regions');
+    expect(html).not.toContain('Verify this origin before monitoring it.');
+  });
   it('requires an exact typed confirmation before deleting history', async () => {
     Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
       configurable: true,

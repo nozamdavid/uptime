@@ -60,7 +60,11 @@ const frequencyMarks = [
 
 export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Props) {
   const session = useProductSession();
-  const hostedFree = Boolean(session?.user && session.workspace?.plan === 'free');
+  const hostedFree = Boolean(
+    session?.user &&
+    session.workspace?.plan === 'free' &&
+    session.workspace.kind !== 'staging_import',
+  );
   const [value, setValue] = useState<MonitorCreate>(() => ({
     ...initial,
     ...monitor,

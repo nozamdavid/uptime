@@ -15,6 +15,7 @@ import {
 import { parseApiEnv } from './env.js';
 import { UrlPolicyError } from './security.js';
 import { hostedFetch } from './hosted-app.js';
+import { z } from 'zod';
 
 /** Rate-limit budgets for login, notification tests, and public endpoints. */
 const loginRateLimit = { max: 8, windowSeconds: 60 };
@@ -124,7 +125,7 @@ export default {
             json({
               user: { did: principal.did, handle: principal.handle },
               role: 'owner',
-              isOperator: true,
+              isOperator: !principal.importedWorkspaceId,
               admin: { id: principal.did, did: principal.did, handle: principal.handle },
             }),
           );
@@ -160,20 +161,30 @@ interface HostedIdentity {
   id: string;
   did: string;
   handle: string;
+  importedWorkspaceId?: string;
 }
 
 async function lookupHostedIdentity(request: Request, env: CloudflareEnv): Promise<HostedIdentity> {
   const binding = env.OAUTH as { fetch(input: Request): Promise<Response> } | undefined;
   if (!binding || typeof binding.fetch !== 'function')
     throw new HttpErrorLike(401, 'unauthorized', 'Authentication is required');
+  const workspaceId = request.headers.get('x-uptime-workspace');
+  const importedWorkspace =
+    env.ENVIRONMENT === 'staging' && workspaceId && z.uuid().safeParse(workspaceId).success
+      ? workspaceId
+      : null;
+  const bridgePath = importedWorkspace ? '/api/auth/imported-identity' : '/api/auth/identity';
   let response: Response;
   try {
     // Keep the destination a fixed local route. The service binding must never
     // be redirected to a URL supplied by the caller.
     response = await binding.fetch(
-      new Request(new URL('/api/auth/identity', request.url), {
+      new Request(new URL(bridgePath, request.url), {
         method: 'GET',
-        headers: { cookie: request.headers.get('cookie') ?? '' },
+        headers: {
+          cookie: request.headers.get('cookie') ?? '',
+          ...(importedWorkspace ? { 'x-uptime-workspace': importedWorkspace } : {}),
+        },
       }),
     );
   } catch {
@@ -196,7 +207,28 @@ async function lookupHostedIdentity(request: Request, env: CloudflareEnv): Promi
   const candidate = body as {
     user?: { did?: unknown; handle?: unknown };
     isOperator?: unknown;
+    importedWorkspaceId?: unknown;
+    role?: unknown;
   };
+  if (importedWorkspace) {
+    if (
+      candidate.importedWorkspaceId !== importedWorkspace ||
+      typeof candidate.user?.did !== 'string' ||
+      typeof candidate.user.handle !== 'string' ||
+      candidate.user.did.length === 0 ||
+      candidate.user.handle.length === 0 ||
+      !['owner', 'maintainer', 'viewer'].includes(candidate.role as string)
+    )
+      throw new HttpErrorLike(403, 'forbidden', 'Workspace access denied');
+    if (candidate.role === 'viewer' && !['GET', 'HEAD', 'OPTIONS'].includes(request.method))
+      throw new HttpErrorLike(403, 'forbidden', 'Viewer access is read only');
+    return {
+      id: candidate.user.did,
+      did: candidate.user.did,
+      handle: candidate.user.handle,
+      importedWorkspaceId: importedWorkspace,
+    };
+  }
   if (
     candidate.isOperator !== true ||
     typeof candidate.user?.did !== 'string' ||
