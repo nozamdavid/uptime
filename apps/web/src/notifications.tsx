@@ -9,6 +9,7 @@ import type { FormEvent } from 'react';
 
 import { api, RequestError } from './api.js';
 import { NotificationHistoryView } from './notification-history.js';
+import { useProductSession } from './product-shell.js';
 
 interface EditorState {
   id?: string;
@@ -113,6 +114,8 @@ function editorFromService(service: NotificationService): EditorState {
 }
 
 export function NotificationsPage() {
+  const session = useProductSession();
+  const hostedFree = Boolean(session?.user && session.workspace?.plan === 'free');
   const [services, setServices] = useState<NotificationService[] | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [error, setError] = useState('');
@@ -126,7 +129,17 @@ export function NotificationsPage() {
     setError('');
     api
       .notificationServices()
-      .then(({ services: loaded }) => alive && setServices(loaded))
+      .then(
+        ({ services: loaded }) =>
+          alive &&
+          setServices(
+            hostedFree
+              ? loaded.filter(
+                  (service) => service.provider === 'telegram' || service.provider === 'discord',
+                )
+              : loaded,
+          ),
+      )
       .catch((reason) => {
         if (!alive) return;
         setServices([]);
@@ -135,7 +148,7 @@ export function NotificationsPage() {
     return () => {
       alive = false;
     };
-  }, [reload]);
+  }, [reload, hostedFree]);
 
   async function run(id: string, action: () => Promise<unknown>, success: string) {
     setBusyId(id);
@@ -186,6 +199,7 @@ export function NotificationsPage() {
       ) : editor ? (
         <NotificationServiceEditor
           value={editor}
+          hostedFree={hostedFree}
           onCancel={() => setEditor(null)}
           onSaved={() => {
             setEditor(null);
@@ -298,10 +312,12 @@ export function NotificationsPage() {
 
 function NotificationServiceEditor({
   value: initialValue,
+  hostedFree,
   onCancel,
   onSaved,
 }: {
   value: EditorState;
+  hostedFree: boolean;
   onCancel: () => void;
   onSaved: () => void;
 }) {
@@ -367,11 +383,13 @@ function NotificationServiceEditor({
             disabled={editing}
             onChange={(event) => set('provider', event.target.value as NotificationProviderKind)}
           >
-            {Object.entries(providerLabels).map(([kind, label]) => (
-              <option key={kind} value={kind}>
-                {label}
-              </option>
-            ))}
+            {Object.entries(providerLabels)
+              .filter(([kind]) => !hostedFree || kind === 'telegram' || kind === 'discord')
+              .map(([kind, label]) => (
+                <option key={kind} value={kind}>
+                  {label}
+                </option>
+              ))}
           </select>
           {editing && <small>The provider cannot be changed after creation.</small>}
         </label>

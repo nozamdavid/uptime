@@ -12,6 +12,7 @@ import {
 } from './http.js';
 import { parseApiEnv } from './env.js';
 import { UrlPolicyError } from './security.js';
+import { hostedFetch } from './hosted-app.js';
 
 /** Rate-limit budgets for login, notification tests, and public endpoints. */
 const loginRateLimit = { max: 8, windowSeconds: 60 };
@@ -49,6 +50,7 @@ const router = createApiRouter({ log, notificationFetch: workerFetch });
  */
 export default {
   async fetch(request: Request, env: CloudflareEnv, context: ExecutionContext): Promise<Response> {
+    if (env.CONTROL_DB) return hostedFetch(request, env, context);
     let config;
     try {
       config = parseApiEnv(env);

@@ -9,6 +9,7 @@ import { regionById, regionIds } from '@uptime/regions';
 document.body.innerHTML = '<div id="root"></div>';
 (window as unknown as { scrollTo: () => void }).scrollTo = () => undefined;
 const { DeleteHistoryDialog, MonitorForm } = await import('./monitor-form.js');
+const { ProductSessionContext } = await import('./product-shell.js');
 
 function render(
   regionSelection: readonly (typeof regionIds)[number][] = regionIds,
@@ -34,6 +35,39 @@ function render(
 }
 
 describe('nine-region monitor form', () => {
+  it('applies hosted free notification and check policy', () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        ProductSessionContext.Provider,
+        {
+          value: {
+            user: { did: 'did:plc:test', handle: 'test.bsky.social' },
+            workspace: { id: 'workspace-1', name: 'Test', plan: 'free', state: 'active' },
+            role: 'owner',
+          },
+        },
+        createElement(MonitorForm, {
+          monitor: {
+            id: 'monitor-1',
+            name: 'Test',
+            url: 'https://status.example.test/health',
+            regionIds: ['us-east'],
+            intervalSeconds: 60,
+            timeoutMs: 10_000,
+            enabled: true,
+            dnsDiagnosticsEnabled: true,
+            isPublic: false,
+          },
+          onCancel: () => undefined,
+          onSaved: () => undefined,
+        }),
+      ),
+    );
+    expect(html).toContain('Check frequency');
+    expect(html).toContain('value="2"');
+    expect(html).toContain('value="1"');
+    expect(html).toContain('Verify this origin before monitoring it.');
+  });
   it('requires an exact typed confirmation before deleting history', async () => {
     Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
       configurable: true,

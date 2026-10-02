@@ -48,6 +48,9 @@ export interface CoordinatorEnv extends CloudflareEnv {
   DB: D1Database;
   REPORTS?: R2Bucket;
   MONITOR_REFRESH?: Workflow<MonitorRefreshParams>;
+  /** Present only in hosted multi-tenant deployments. */
+  CONTROL_DB?: D1Database;
+  TENANT_JOBS?: Queue<import('./tenant-dispatch.js').TenantJob>;
 }
 
 export interface ReportEnv extends CloudflareEnv {

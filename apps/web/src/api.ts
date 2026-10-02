@@ -99,6 +99,79 @@ export interface StatusPageDetail extends StatusPageSummary {
     }>;
   }>;
 }
+export interface ProductLimits {
+  monitors: number;
+  regions: number;
+  intervalSeconds: number;
+  statusPages: number;
+  notificationServices: number;
+  rawRetentionDays: number;
+  dailyRetentionDays: number;
+}
+export interface ProductUsage {
+  monitors: number;
+  statusPages: number;
+  notificationServices: number;
+}
+export interface ProductBudget {
+  ceilingUsd: number;
+  baseUsd: number;
+  externalMonthlyCostUsd?: number;
+  admissionOpen?: boolean;
+  coverage?: string;
+}
+export interface OperatorWorkspace {
+  id: string;
+  name: string;
+  ownerDid: string;
+  ownerHandle: string;
+  state: string;
+  monitorCount: number;
+  rowsRead: number;
+  rowsWritten: number;
+  storageBytes: number;
+  lastSeenAt: string | null;
+}
+export interface WorkspaceSummary {
+  id: string;
+  name: string;
+  state: string;
+  role: 'owner' | 'maintainer' | 'viewer';
+}
+export interface ProductSession {
+  user?: { did: string; handle: string };
+  role?: 'owner' | 'maintainer' | 'viewer';
+  workspace?: {
+    id: string;
+    name: string;
+    plan: 'free';
+    state: 'active' | 'waiting' | 'suspended' | string;
+  };
+  isOperator?: boolean;
+  limits?: ProductLimits;
+  usage?: ProductUsage;
+  budget?: ProductBudget;
+  workspaces?: WorkspaceSummary[];
+  admin?: { email: string };
+}
+export interface WorkspaceMember {
+  did: string;
+  handle: string;
+  role: 'owner' | 'maintainer' | 'viewer';
+}
+export interface WorkspaceInvitation {
+  id: string;
+  inviteeDid: string;
+  role: 'maintainer' | 'viewer';
+  expiresAt?: string;
+}
+export interface WorkspaceTarget {
+  id: string;
+  origin: string;
+  verifiedAt: string | null;
+  token?: string;
+  verificationUrl?: string;
+}
 export type PublicStatusPage = StatusPageReportSnapshot['statusPage'];
 
 export class RequestError extends Error {
@@ -118,6 +191,29 @@ export function apiUrl(path: string): string {
   return `${frontendConfig().apiBaseUrl}${path}`;
 }
 
+/** Returns the workspace selected for private calls, if a session has one. */
+export function productWorkspaceId(current?: ProductSession | null): string | undefined {
+  if (current?.workspace?.id) return current.workspace.id;
+  if (typeof window === 'undefined') return undefined;
+  return window.sessionStorage.getItem('uptime.workspaceId') ?? undefined;
+}
+
+/** Query string to append to public links and report requests. */
+export function publicWorkspaceSearch(
+  search = typeof window === 'undefined' ? '' : window.location.search,
+  current?: ProductSession | null,
+): string {
+  const params = new URLSearchParams(search);
+  const workspace = params.get('workspace') ?? productWorkspaceId(current);
+  return workspace ? `?workspace=${encodeURIComponent(workspace)}` : '';
+}
+
+function appendPublicWorkspace(path: string): string {
+  const workspace = publicWorkspaceSearch();
+  if (!workspace || path.includes('workspace=')) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}${workspace.slice(1)}`;
+}
+
 async function request<T>(
   path: string,
   init?: RequestInit,
@@ -125,13 +221,18 @@ async function request<T>(
 ): Promise<T> {
   const headers =
     init?.headers !== undefined || init?.body !== undefined ? new Headers(init.headers) : undefined;
-  if (init?.body !== undefined && headers && !headers.has('content-type')) {
-    headers.set('content-type', 'application/json');
+  const workspace = credentials === 'omit' ? undefined : productWorkspaceId();
+  const requestHeaders = headers ?? (workspace ? new Headers() : undefined);
+  if (workspace && requestHeaders && !requestHeaders.has('x-uptime-workspace')) {
+    requestHeaders.set('x-uptime-workspace', workspace);
+  }
+  if (init?.body !== undefined && requestHeaders && !requestHeaders.has('content-type')) {
+    requestHeaders.set('content-type', 'application/json');
   }
   const response = await fetch(apiUrl(path), {
     ...init,
     credentials,
-    ...(headers ? { headers } : {}),
+    ...(requestHeaders ? { headers: requestHeaders } : {}),
   });
   if (!response.ok) {
     const error = (await response.json().catch(() => undefined)) as ApiError | undefined;
@@ -146,7 +247,7 @@ async function request<T>(
 }
 
 async function publicRequest<T>(path: string): Promise<T> {
-  return request<T>(path, undefined, 'omit');
+  return request<T>(appendPublicWorkspace(path), undefined, 'omit');
 }
 
 function sendJson<T>(path: string, method: string, input: unknown) {
@@ -164,10 +265,50 @@ async function monitorDetail<TSummary>(path: string, range: string, isPublic = f
 }
 
 export const api = {
-  session: () => request<{ admin: { email: string } }>('/auth/session'),
+  session: () => request<ProductSession>('/auth/session'),
+  startAtProto: (handle: string) =>
+    sendJson<{ authorizationUrl: string }>('/auth/atproto/start', 'POST', { handle }),
   signIn: (password: string) =>
     sendJson<{ admin: { email: string } }>('/auth/login', 'POST', { password }),
   signOut: () => request<void>('/auth/logout', { method: 'POST' }),
+  usage: () =>
+    request<{ usage: ProductUsage; limits: ProductLimits; budget: ProductBudget }>(
+      '/workspace/usage',
+    ),
+  workspaceMembers: () =>
+    request<{ members: WorkspaceMember[]; invitations: WorkspaceInvitation[] }>(
+      '/workspace/members',
+    ),
+  inviteWorkspaceMember: (did: string, role: 'maintainer' | 'viewer') =>
+    sendJson<{ invitation: WorkspaceInvitation }>('/workspace/invitations', 'POST', { did, role }),
+  acceptWorkspaceInvitation: (id: string) =>
+    sendJson<{ member: WorkspaceMember }>(`/workspace/invitations/${id}/accept`, 'POST', {}),
+  removeWorkspaceMember: (did: string) =>
+    request<void>(`/workspace/members/${encodeURIComponent(did)}`, { method: 'DELETE' }),
+  exportWorkspace: () => request<unknown>('/workspace/export'),
+  deleteWorkspace: () => request<{ status?: string }>('/workspace', { method: 'DELETE' }),
+  workspaceTargets: () => request<{ targets: WorkspaceTarget[] }>('/workspace/targets'),
+  createWorkspaceTarget: (origin: string) =>
+    sendJson<{ id: string; origin: string; token: string; verificationUrl: string }>(
+      '/workspace/targets',
+      'POST',
+      { origin },
+    ),
+  verifyWorkspaceTarget: (id: string) =>
+    sendJson<{ target: WorkspaceTarget }>(
+      `/workspace/targets/${encodeURIComponent(id)}/verify`,
+      'POST',
+      {},
+    ),
+  operatorWorkspaces: () =>
+    request<{ workspaces: OperatorWorkspace[]; budget: ProductBudget }>('/operator/workspaces'),
+  updateOperatorControls: (input: { admissionOpen: boolean; externalMonthlyCostUsd: number }) =>
+    sendJson<{ budget: ProductBudget }>('/operator/controls', 'PATCH', input),
+  setWorkspaceState: (id: string, state: 'active' | 'suspended', reason: string) =>
+    sendJson<{ workspace: OperatorWorkspace }>(`/operator/workspaces/${id}/state`, 'POST', {
+      state,
+      reason,
+    }),
   regions: () => request<{ regions: RegionDefinition[] }>('/regions'),
   monitors: () => request<{ monitors: MonitorSummary[] }>('/monitors'),
   badges: () => request<{ badges: Badge[] }>('/badges'),

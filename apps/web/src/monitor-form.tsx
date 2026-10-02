@@ -18,7 +18,8 @@ import {
 } from '@uptime/regions';
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { api, RequestError } from './api.js';
+import { api, RequestError, type WorkspaceTarget } from './api.js';
+import { useProductSession } from './product-shell.js';
 import { formatInterval } from './monitor-format.js';
 import {
   checkFrequencySliderIndex,
@@ -43,8 +44,8 @@ const initial: MonitorCreate = {
   isPublic: false,
   publicSlug: null,
   notificationServiceIds: [],
-  outageThreshold: 3,
-  recoveryThreshold: 2,
+  outageThreshold: 2,
+  recoveryThreshold: 1,
   repeatNotificationMinutes: null,
   badgeId: null,
   uptimeThresholds: defaultUptimeThresholds,
@@ -58,12 +59,25 @@ const frequencyMarks = [
 ] as const;
 
 export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Props) {
+  const session = useProductSession();
+  const hostedFree = Boolean(session?.user && session.workspace?.plan === 'free');
   const [value, setValue] = useState<MonitorCreate>(() => ({
     ...initial,
     ...monitor,
+    ...(hostedFree
+      ? {
+          intervalSeconds: 300,
+          timeoutMs: Math.min(monitor?.timeoutMs ?? 10_000, 10_000),
+          regionIds: (monitor?.regionIds ?? initial.regionIds).slice(0, 3),
+          dnsDiagnosticsEnabled: false,
+          outageThreshold: 2,
+          recoveryThreshold: 1,
+          repeatNotificationMinutes: null,
+        }
+      : {}),
     notificationServiceIds: monitor?.notificationServiceIds ?? [],
-    outageThreshold: monitor?.outageThreshold ?? 3,
-    recoveryThreshold: monitor?.recoveryThreshold ?? 2,
+    outageThreshold: monitor?.outageThreshold ?? 2,
+    recoveryThreshold: monitor?.recoveryThreshold ?? 1,
     repeatNotificationMinutes: monitor?.repeatNotificationMinutes ?? null,
     badgeId: monitor?.badgeId ?? monitor?.badge?.id ?? null,
     uptimeThresholds: monitor?.uptimeThresholds ?? defaultUptimeThresholds,
@@ -82,6 +96,10 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
   const [urlError, setUrlError] = useState('');
   const [historyDeleteOpen, setHistoryDeleteOpen] = useState(false);
   const [historyDeleted, setHistoryDeleted] = useState(false);
+  const [targets, setTargets] = useState<WorkspaceTarget[]>([]);
+  const [targetDraft, setTargetDraft] = useState<WorkspaceTarget | null>(null);
+  const [targetBusy, setTargetBusy] = useState(false);
+  const [targetError, setTargetError] = useState('');
   useEffect(() => {
     let alive = true;
     api
@@ -120,10 +138,17 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
           reason instanceof Error ? reason.message : 'Notification services could not be loaded.',
         );
       });
+    if (hostedFree)
+      api
+        .workspaceTargets()
+        .then(({ targets: next }) => {
+          if (alive) setTargets(next);
+        })
+        .catch(() => undefined);
     return () => {
       alive = false;
     };
-  }, []);
+  }, [hostedFree]);
   const slugError = value.publicSlug
     ? (publicMonitorSlugSchema.safeParse(value.publicSlug).error?.issues[0]?.message ?? '')
     : '';
@@ -177,7 +202,58 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
     setUrlError(message);
     return message;
   }
+  function originForValue(raw = value.url) {
+    try {
+      return new URL(normalizeMonitorUrl(raw)).origin;
+    } catch {
+      return '';
+    }
+  }
+  const targetOrigin = originForValue();
+  const verifiedTarget = targets.find(
+    (target) => target.origin === targetOrigin && target.verifiedAt,
+  );
+  async function createTarget() {
+    if (!targetOrigin) {
+      setTargetError('Enter a valid URL before creating a verification target.');
+      return;
+    }
+    setTargetBusy(true);
+    setTargetError('');
+    try {
+      const created = await api.createWorkspaceTarget(targetOrigin);
+      const draft = { ...created, verifiedAt: null };
+      setTargetDraft(draft);
+      setTargets((current) => [
+        ...current.filter((target) => target.origin !== targetOrigin),
+        draft,
+      ]);
+    } catch (reason) {
+      setTargetError(
+        reason instanceof Error ? reason.message : 'Could not create verification target.',
+      );
+    } finally {
+      setTargetBusy(false);
+    }
+  }
+  async function verifyTarget() {
+    if (!targetDraft) return;
+    setTargetBusy(true);
+    setTargetError('');
+    try {
+      const result = await api.verifyWorkspaceTarget(targetDraft.id);
+      setTargets((current) =>
+        current.map((target) => (target.id === result.target.id ? result.target : target)),
+      );
+      setTargetDraft(null);
+    } catch (reason) {
+      setTargetError(reason instanceof Error ? reason.message : 'Verification failed.');
+    } finally {
+      setTargetBusy(false);
+    }
+  }
   function toggle(region: RegionId) {
+    if (hostedFree && !value.regionIds.includes(region) && value.regionIds.length >= 3) return;
     set(
       'regionIds',
       value.regionIds.includes(region)
@@ -221,6 +297,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
       nextUrlError ||
       timeoutError ||
       slugError ||
+      (hostedFree && !verifiedTarget) ||
       notificationRulesInvalid ||
       uptimeThresholdsInvalid ||
       unresolvedBadge ||
@@ -286,6 +363,41 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
               ? urlError
               : 'HTTPS is used when no scheme is provided. Private and reserved addresses are rejected.'}
           </small>
+          {hostedFree && targetOrigin && !verifiedTarget && (
+            <div className="verification-box">
+              <strong>Verify this origin before monitoring it.</strong>
+              <p>
+                Place the token at <code>{targetOrigin}/.well-known/uptime-verification.txt</code>.
+              </p>
+              {targetDraft ? (
+                <>
+                  <code>{targetDraft.token}</code>
+                  <button
+                    type="button"
+                    className="button button--quiet"
+                    onClick={() => void verifyTarget()}
+                    disabled={targetBusy}
+                  >
+                    {targetBusy ? 'Checking…' : 'Verify origin'}
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="button button--quiet"
+                  onClick={() => void createTarget()}
+                  disabled={targetBusy}
+                >
+                  {targetBusy ? 'Preparing…' : 'Create verification token'}
+                </button>
+              )}
+              {targetError && (
+                <p className="field-error" role="alert">
+                  {targetError}
+                </p>
+              )}
+            </div>
+          )}
         </label>
         <label className="field monitor-badge-field">
           <span>
@@ -360,7 +472,12 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
                           type="checkbox"
                           checked={value.regionIds.includes(region.id)}
                           onChange={() => toggle(region.id)}
-                          disabled={busy}
+                          disabled={
+                            busy ||
+                            (hostedFree &&
+                              !value.regionIds.includes(region.id) &&
+                              value.regionIds.length >= 3)
+                          }
                         />
                         <span>
                           <strong>{region.label}</strong>
@@ -395,6 +512,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
               max={checkIntervalPresets.length - 1}
               step="1"
               value={frequencySliderIndex}
+              disabled={hostedFree || busy}
               aria-label="Check frequency"
               aria-valuetext={`${frequencyMinutes} minute${frequencyMinutes === 1 ? '' : 's'}`}
               onInput={(event) =>
@@ -427,6 +545,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
               max={timeoutConstraints.maximumMs / 1000}
               step="1"
               value={value.timeoutMs / 1000}
+              disabled={hostedFree || busy}
               onBlur={() => setTouched((state) => ({ ...state, timeoutMs: true }))}
               onChange={(event) => set('timeoutMs', Number(event.target.value) * 1000)}
               aria-invalid={Boolean(touched.timeoutMs && timeoutError)}
@@ -489,7 +608,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
             <input
               type="checkbox"
               checked={value.dnsDiagnosticsEnabled}
-              disabled={busy}
+              disabled={hostedFree || busy}
               onChange={(event) => set('dnsDiagnosticsEnabled', event.target.checked)}
               aria-describedby="dns-diagnostics-help"
             />
@@ -572,8 +691,8 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
           <div className="form-grid notification-thresholds">
             {(
               [
-                ['outageThreshold', 'Failed checks before outage', 3],
-                ['recoveryThreshold', 'Healthy checks before recovery', 2],
+                ['outageThreshold', 'Failed checks before outage', 2],
+                ['recoveryThreshold', 'Healthy checks before recovery', 1],
               ] as const
             ).map(([key, label, fallback]) => (
               <label className="field" key={key}>
@@ -584,6 +703,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
                   max="100"
                   required
                   value={value[key] ?? fallback}
+                  disabled={hostedFree || busy}
                   onChange={(event) => set(key, Number(event.target.value))}
                 />
               </label>
@@ -593,7 +713,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
             <input
               type="checkbox"
               checked={value.repeatNotificationMinutes !== null}
-              disabled={busy}
+              disabled={hostedFree || busy}
               onChange={(event) =>
                 set('repeatNotificationMinutes', event.target.checked ? 60 : null)
               }
@@ -612,6 +732,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
                 max="10080"
                 required
                 value={value.repeatNotificationMinutes}
+                disabled={hostedFree || busy}
                 onChange={(event) => set('repeatNotificationMinutes', Number(event.target.value))}
               />
               <small>Between 1 minute and 7 days.</small>
@@ -630,7 +751,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
             <input
               type="checkbox"
               checked={value.isPublic}
-              disabled={busy}
+              disabled={hostedFree || busy}
               onChange={(event) => set('isPublic', event.target.checked)}
               aria-describedby="public-sharing-help"
             />
@@ -692,7 +813,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
             <button
               type="button"
               className="button button--danger"
-              disabled={busy}
+              disabled={hostedFree || busy}
               onClick={() => setHistoryDeleteOpen(true)}
             >
               Delete all history

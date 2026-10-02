@@ -4,6 +4,9 @@ compatibility_date = "2026-08-30"
 compatibility_flags = ["global_fetch_strictly_public"]
 workers_dev = true
 
+[limits]
+cpu_ms = 50
+
 [observability]
 enabled = true
 
