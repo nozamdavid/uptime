@@ -170,6 +170,48 @@ describe('free product shell', () => {
     await view.cleanup();
   });
 
+  it('shows imported staging usage without free quotas or deletion', async () => {
+    apiMock.usage.mockResolvedValue({
+      usage: { monitors: 107, statusPages: 1, notificationServices: 2 },
+      limits: null,
+      budget: { baseUsd: 5, ceilingUsd: 20 },
+    });
+    apiMock.workspaceMembers.mockResolvedValue({
+      members: [{ did: 'did:plc:owner', handle: 'owner.test', role: 'owner' }],
+      invitations: [],
+    });
+    const view = createTestRoot();
+    await act(async () => {
+      view.root.render(
+        createElement(
+          ProductSessionContext.Provider,
+          {
+            value: {
+              role: 'owner',
+              user: { did: 'did:plc:owner', handle: 'owner.test' },
+              workspace: {
+                id: 'workspace-imported',
+                name: 'Imported staging',
+                plan: 'free',
+                kind: 'staging_import',
+                state: 'active',
+              },
+            },
+          },
+          createElement(SettingsPage),
+        ),
+      );
+      await Promise.resolve();
+    });
+    expect(view.container.textContent).toContain('107 monitors');
+    expect(view.container.textContent).toContain('1 status pages');
+    expect(view.container.textContent).toContain('existing staging checks and history');
+    expect(view.container.textContent).not.toContain('Free plan');
+    expect(view.container.textContent).not.toContain(' / 3 monitors');
+    expect(view.container.textContent).not.toContain('Delete workspace');
+    await view.cleanup();
+  });
+
   it('shows operator budget controls and workspace usage', async () => {
     apiMock.operatorWorkspaces.mockResolvedValue({
       budget: {

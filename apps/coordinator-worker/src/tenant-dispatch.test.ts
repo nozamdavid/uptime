@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { budgetAllowsWork, enforceFreePolicy, recordWorkspaceUsage } from './tenant-dispatch.js';
+import {
+  budgetAllowsWork,
+  dispatchDueTenants,
+  enforceFreePolicy,
+  recordWorkspaceUsage,
+  runTenantJob,
+} from './tenant-dispatch.js';
 import { makeDatabase } from './testing.js';
 import type { CoordinatorConfig } from './env.js';
 
@@ -92,5 +98,99 @@ describe('hosted tenant policy and metering', () => {
         }
       ).admission_open,
     ).toBe(0);
+  });
+
+  it('does not enqueue or purge the imported staging workspace', async () => {
+    const { sqlite, db } = makeDatabase();
+    sqlite.exec(`
+      CREATE TABLE service_controls (
+        id INTEGER PRIMARY KEY, monthly_budget_usd REAL NOT NULL,
+        admission_open INTEGER NOT NULL, max_workspaces INTEGER NOT NULL DEFAULT 10,
+        external_monthly_cost_usd REAL NOT NULL
+      );
+      INSERT INTO service_controls VALUES (1, 20, 1, 10, 0);
+      CREATE TABLE workspace_usage_daily (
+        workspace_id TEXT, day TEXT, rows_read INTEGER, rows_written INTEGER,
+        storage_bytes INTEGER, PRIMARY KEY (workspace_id, day)
+      );
+      CREATE TABLE request_budgets (key TEXT PRIMARY KEY, window_started_at TEXT, count INTEGER);
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY, state TEXT NOT NULL, next_dispatch_at TEXT,
+        updated_at TEXT NOT NULL, execution_lease_token TEXT, execution_lease_until TEXT
+      );
+      CREATE TABLE tenant_slots (
+        binding_name TEXT PRIMARY KEY, workspace_id TEXT, database_id TEXT, status TEXT
+      );
+      CREATE TABLE dispatch_outbox (
+        id TEXT PRIMARY KEY, workspace_id TEXT, scheduled_at TEXT, status TEXT,
+        attempts INTEGER, next_attempt_at TEXT, created_at TEXT, dispatched_at TEXT, last_error TEXT
+      );
+      INSERT INTO workspaces VALUES ('00000000-0000-4000-8000-000000000001', 'active', '2026-10-03T00:00:00.000Z', '2026-10-02T00:00:00.000Z', NULL, NULL);
+      INSERT INTO tenant_slots VALUES ('STAGING_IMPORTED_DB', '00000000-0000-4000-8000-000000000001', '3900c94a-82a0-4422-a5f8-1a56b781cea7', 'assigned');
+    `);
+    const sent: unknown[] = [];
+    const env = {
+      CONTROL_DB: db,
+      ENVIRONMENT: 'staging',
+      TENANT_JOBS: { send: async (job: unknown) => void sent.push(job) },
+    } as never;
+    const result = await dispatchDueTenants(env, new Date('2026-10-03T00:01:00.000Z'));
+    expect(result).toEqual({ attempted: 0, sent: 0, failed: 0 });
+    expect(sent).toHaveLength(0);
+  });
+
+  it('drops stale imported jobs before taking a lease', async () => {
+    const { sqlite, db } = makeDatabase();
+    sqlite.exec(`
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY, state TEXT NOT NULL, next_dispatch_at TEXT,
+        updated_at TEXT NOT NULL, execution_lease_token TEXT, execution_lease_until TEXT
+      );
+      CREATE TABLE tenant_slots (
+        binding_name TEXT PRIMARY KEY, workspace_id TEXT, database_id TEXT, status TEXT
+      );
+      INSERT INTO workspaces VALUES ('00000000-0000-4000-8000-000000000002', 'active', NULL, '2026-10-02T00:00:00.000Z', NULL, NULL);
+      INSERT INTO tenant_slots VALUES ('STAGING_IMPORTED_DB', '00000000-0000-4000-8000-000000000002', '3900c94a-82a0-4422-a5f8-1a56b781cea7', 'assigned');
+    `);
+    await runTenantJob({ CONTROL_DB: db, ENVIRONMENT: 'staging' } as never, {
+      workspaceId: '00000000-0000-4000-8000-000000000002',
+      scheduledAt: '2026-10-03T00:00:00.000Z',
+    });
+    expect(sqlite.prepare('SELECT execution_lease_token FROM workspaces').get()).toEqual({
+      execution_lease_token: null,
+    });
+  });
+
+  it('does not apply the staging bypass in production', async () => {
+    const { sqlite, db } = makeDatabase();
+    sqlite.exec(`
+      CREATE TABLE service_controls (
+        id INTEGER PRIMARY KEY, monthly_budget_usd REAL NOT NULL,
+        admission_open INTEGER NOT NULL, max_workspaces INTEGER NOT NULL DEFAULT 10,
+        external_monthly_cost_usd REAL NOT NULL
+      );
+      INSERT INTO service_controls VALUES (1, 20, 1, 10, 0);
+      CREATE TABLE workspace_usage_daily (
+        workspace_id TEXT, day TEXT, rows_read INTEGER, rows_written INTEGER,
+        storage_bytes INTEGER, PRIMARY KEY (workspace_id, day)
+      );
+      CREATE TABLE request_budgets (key TEXT PRIMARY KEY, window_started_at TEXT, count INTEGER);
+      CREATE TABLE workspaces (id TEXT PRIMARY KEY, state TEXT NOT NULL, next_dispatch_at TEXT, updated_at TEXT NOT NULL, execution_lease_token TEXT, execution_lease_until TEXT);
+      CREATE TABLE tenant_slots (binding_name TEXT PRIMARY KEY, workspace_id TEXT, database_id TEXT, status TEXT);
+      CREATE TABLE dispatch_outbox (id TEXT PRIMARY KEY, workspace_id TEXT, scheduled_at TEXT, status TEXT, attempts INTEGER, next_attempt_at TEXT, created_at TEXT, dispatched_at TEXT, last_error TEXT, UNIQUE (workspace_id, scheduled_at));
+      INSERT INTO workspaces VALUES ('00000000-0000-4000-8000-000000000003', 'active', '2026-10-03T00:00:00.000Z', '2026-10-02T00:00:00.000Z', NULL, NULL);
+      INSERT INTO tenant_slots VALUES ('STAGING_IMPORTED_DB', '00000000-0000-4000-8000-000000000003', '3900c94a-82a0-4422-a5f8-1a56b781cea7', 'assigned');
+    `);
+    const sent: unknown[] = [];
+    const result = await dispatchDueTenants(
+      {
+        CONTROL_DB: db,
+        ENVIRONMENT: 'production',
+        TENANT_JOBS: { send: async (job: unknown) => void sent.push(job) },
+      } as never,
+      new Date('2026-10-03T00:01:00.000Z'),
+    );
+    expect(result.sent).toBe(1);
+    expect(sent).toHaveLength(1);
   });
 });

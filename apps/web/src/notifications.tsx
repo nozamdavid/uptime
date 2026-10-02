@@ -115,7 +115,11 @@ function editorFromService(service: NotificationService): EditorState {
 
 export function NotificationsPage() {
   const session = useProductSession();
-  const hostedFree = Boolean(session?.user && session.workspace?.plan === 'free');
+  const hostedFree = Boolean(
+    session?.user &&
+    session.workspace?.plan === 'free' &&
+    session.workspace.kind !== 'staging_import',
+  );
   const [services, setServices] = useState<NotificationService[] | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [error, setError] = useState('');

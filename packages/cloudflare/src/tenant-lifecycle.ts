@@ -1,5 +1,6 @@
 import { all, batch, first, run } from './db.js';
 import { tenantReportsBucket } from './tenancy.js';
+import { isStagingImportedWorkspace } from './staging-import.js';
 import type { D1Database, R2Bucket } from './workers-types.js';
 
 export interface TenantLifecycleEnv {
@@ -42,6 +43,8 @@ export async function purgeWorkspaceData(
   workspaceId: string,
   now: Date = new Date(),
 ): Promise<boolean> {
+  if (await isStagingImportedWorkspace(env, workspaceId))
+    throw new Error('Imported staging data cannot be purged through workspace deletion');
   const control = env.CONTROL_DB;
   const workspace = await first<DeletingWorkspace>(
     control,

@@ -5,6 +5,10 @@ import {
   purgeWorkspaceData,
   resolveWorkspaceDatabase,
   tenantReportsBucket,
+  isStagingImportedSlot,
+  isStagingImportedWorkspace,
+  stagingImportedBindingName,
+  stagingImportedDatabaseId,
   type D1Database,
   type R2Bucket,
 } from '@uptime/cloudflare';
@@ -110,18 +114,38 @@ export async function dispatchDueTenants(
       .bind(budgetCutoff),
   ]);
   const deleting = await control
-    .prepare("SELECT id FROM workspaces WHERE state = 'deleting' ORDER BY updated_at LIMIT 5")
-    .all<{ id: string }>();
-  for (const workspace of deleting.results) await purgeWorkspaceData(env, workspace.id, now);
+    .prepare(
+      `SELECT w.id, s.binding_name, s.database_id
+      FROM workspaces w LEFT JOIN tenant_slots s ON s.workspace_id = w.id AND s.status = 'assigned'
+      WHERE w.state = 'deleting' ORDER BY w.updated_at LIMIT 5`,
+    )
+    .all<{ id: string; binding_name: string | null; database_id: string | null }>();
+  for (const workspace of deleting.results) {
+    if (
+      workspace.binding_name &&
+      workspace.database_id &&
+      isStagingImportedSlot(env, workspace.binding_name, workspace.database_id)
+    )
+      continue;
+    await purgeWorkspaceData(env, workspace.id, now);
+  }
   if (!(await budgetAllowsWork(control, now))) return { attempted: 0, sent: 0, failed: 0 };
+  const importedFilter =
+    env.ENVIRONMENT === 'staging' ? 'AND NOT (s.binding_name = ? AND s.database_id = ?)' : '';
   const rows = await control
     .prepare(
-      `SELECT id, next_dispatch_at FROM workspaces
-       WHERE state = 'active' AND (next_dispatch_at IS NULL OR next_dispatch_at <= ?)
-       ORDER BY COALESCE(next_dispatch_at, '0000-01-01T00:00:00.000Z'), id
+      `SELECT w.id, w.next_dispatch_at FROM workspaces w
+       LEFT JOIN tenant_slots s ON s.workspace_id = w.id AND s.status = 'assigned'
+       WHERE w.state = 'active' AND (w.next_dispatch_at IS NULL OR w.next_dispatch_at <= ?)
+         ${importedFilter}
+       ORDER BY COALESCE(w.next_dispatch_at, '0000-01-01T00:00:00.000Z'), w.id
        LIMIT ?`,
     )
-    .bind(nowIso, dispatchLimit)
+    .bind(
+      ...(env.ENVIRONMENT === 'staging'
+        ? [nowIso, stagingImportedBindingName, stagingImportedDatabaseId, dispatchLimit]
+        : [nowIso, dispatchLimit]),
+    )
     .all<DueWorkspace>();
 
   let sent = 0;
@@ -267,6 +291,7 @@ export async function runTenantJob(
     .bind(job.workspaceId)
     .first<{ state: string }>();
   if (!workspace || workspace.state !== 'active') return;
+  if (await isStagingImportedWorkspace(env, job.workspaceId)) return;
   const leaseToken = randomToken(16);
   const leaseUntil = new Date(now.getTime() + 16 * 60_000).toISOString();
   const lease = await env.CONTROL_DB.prepare(

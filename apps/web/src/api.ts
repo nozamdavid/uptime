@@ -140,6 +140,7 @@ export interface OperatorSlot {
   admissionEnabled: boolean;
   workspaceId: string | null;
   ownerHandle: string | null;
+  kind?: 'staging_import' | string;
 }
 export interface OperatorSlots {
   maxWorkspaces: number;
@@ -173,10 +174,11 @@ export interface ProductSession {
     id: string;
     name: string;
     plan: 'free';
+    kind?: 'staging_import' | string;
     state: 'active' | 'waiting_for_capacity' | 'suspended' | 'deleting' | 'deleted' | string;
   };
   isOperator?: boolean;
-  limits?: ProductLimits;
+  limits?: ProductLimits | null;
   usage?: ProductUsage;
   budget?: ProductBudget;
   workspaces?: WorkspaceSummary[];
@@ -304,7 +306,7 @@ export const api = {
     sendJson<{ admin: { email: string } }>('/auth/login', 'POST', { password }),
   signOut: () => request<void>('/auth/logout', { method: 'POST' }),
   usage: () =>
-    request<{ usage: ProductUsage; limits: ProductLimits; budget: ProductBudget }>(
+    request<{ usage: ProductUsage; limits: ProductLimits | null; budget: ProductBudget }>(
       '/workspace/usage',
     ),
   workspaceMembers: () =>
