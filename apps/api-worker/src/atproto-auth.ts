@@ -88,6 +88,8 @@ export interface AtprotoAuthConfig {
   cookieSecure: boolean;
   /** Local path where the browser lands after a successful login. */
   successPath?: string;
+  /** Local path where a failed login can be retried. */
+  failurePath?: string;
   /** Local HTTP metadata is permitted only for Workers development. */
   allowLocalHttp?: boolean;
 }
@@ -116,6 +118,8 @@ export interface AtprotoAuthDependencies {
   /** Test-only runtime hook. Production always uses Workers WebCrypto. */
   oauthRuntime?: RuntimeImplementation;
   log?: { warn(bindings: Record<string, unknown>, message: string): void };
+  /** Called only after OAuth and browser binding have both been verified. */
+  onLogin?: (principal: AtprotoPrincipal, returnTo: string) => Promise<void>;
 }
 
 interface LoginSessionRow {
@@ -249,6 +253,11 @@ export function createAtprotoAuth(dependencies: AtprotoAuthDependencies) {
       }
       if (!isDid(completed.session.did))
         return authFailure(config, 'OAuth returned an invalid account.');
+
+      await dependencies.onLogin?.(
+        { did: completed.session.did, handle: appState.handle },
+        appState.returnTo,
+      );
 
       const token = randomToken(32);
       const expiresAt = new Date(now().getTime() + config.sessionTtlSeconds * 1_000);
@@ -844,12 +853,13 @@ function validateConfig(config: AtprotoAuthConfig): AtprotoAuthConfig {
     ...config,
     publicOrigin: origin.origin,
     successPath: localReturnPath(config.successPath, '/'),
+    failurePath: localReturnPath(config.failurePath, localReturnPath(config.successPath, '/')),
   };
 }
 
 function normalizeHandle(value: unknown): string {
   if (typeof value !== 'string') throw new TypeError('handle is required');
-  const handle = value.trim().toLowerCase();
+  const handle = value.trim().replace(/^@/, '').toLowerCase();
   if (
     handle.length < 3 ||
     handle.length > MAX_HANDLE_LENGTH ||
@@ -985,7 +995,7 @@ function redactDiagnostic(value: string): string {
 
 function authFailure(config: AtprotoAuthConfig, message: string): Response {
   const headers = new Headers({
-    location: `${config.successPath}?auth_error=atproto`,
+    location: `${config.failurePath}?auth_error=atproto`,
     'cache-control': 'no-store',
   });
   headers.append('set-cookie', clearLoginCookie(STATE_COOKIE, config));

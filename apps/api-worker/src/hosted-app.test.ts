@@ -5,11 +5,16 @@ import { hashSessionToken, type R2Bucket } from '@uptime/cloudflare';
 import { createD1Adapter, createTestDatabase } from '@uptime/cloudflare/testing';
 
 import { consumeBudget, ensureWorkspace, hostedFetch } from './hosted-app.js';
+import { recordInterest } from './interest.js';
 
-const controlSchema = readFileSync(
-  new URL('../../../packages/cloudflare/src/control-migrations/0001_control.sql', import.meta.url),
-  'utf8',
-);
+const controlSchema = ['0001_control.sql', '0002_slot_controls.sql', '0003_interest_signups.sql']
+  .map((name) =>
+    readFileSync(
+      new URL(`../../../packages/cloudflare/src/control-migrations/${name}`, import.meta.url),
+      'utf8',
+    ),
+  )
+  .join('\n');
 const databases: ReturnType<typeof createTestDatabase>[] = [];
 
 afterEach(() => {
@@ -17,6 +22,232 @@ afterEach(() => {
 });
 
 describe('hosted control plane', () => {
+  it('confirms only the signed-in interest record and blocks new product access before release', async () => {
+    const context = await createHostedContext();
+    Object.assign(context.env, { INTEREST_CHECK_ONLY: 'true' });
+    const user = await authenticatedCookie(
+      context.control,
+      'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb',
+      'interest.test',
+    );
+    await recordInterest(context.controlDb, { did: user.did, handle: 'interest.test' });
+    expect(await (await fetchHosted(context, '/api/interest/session', '')).json()).toEqual({
+      signup: null,
+    });
+    expect(
+      await (await fetchHosted(context, '/api/interest/session', user.cookie)).json(),
+    ).toMatchObject({ signup: { did: user.did, handle: 'interest.test' } });
+    const access = await fetchHosted(context, '/api/auth/session', user.cookie);
+    expect(access.status).toBe(403);
+    expect(await access.json()).toMatchObject({ error: { code: 'product_not_released' } });
+    expect((await fetchHosted(context, '/api/operator/interest', user.cookie)).status).toBe(403);
+    expect(context.control.prepare('SELECT count(*) AS count FROM workspaces').get()).toEqual({
+      count: 0,
+    });
+    expect(
+      context.control
+        .prepare("SELECT count(*) AS count FROM tenant_slots WHERE status='available'")
+        .get(),
+    ).toEqual({ count: 1 });
+    const operator = await authenticatedCookie(
+      context.control,
+      'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+      'operator.test',
+    );
+    Object.assign(context.env, { OPERATOR_DIDS: operator.did });
+    const collected = await fetchHosted(context, '/api/operator/interest', operator.cookie);
+    expect(collected.status).toBe(200);
+    expect(await collected.json()).toMatchObject({
+      total: 1,
+      signups: [{ did: user.did, handle: 'interest.test' }],
+    });
+  });
+
+  it('lets operators inspect capacity, change its limit, and hold only unused slots', async () => {
+    const context = await createHostedContext();
+    const operator = await authenticatedCookie(
+      context.control,
+      'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+      'operator.test',
+    );
+    Object.assign(context.env, { OPERATOR_DIDS: operator.did });
+    await fetchHosted(context, '/api/auth/session', operator.cookie);
+    const spare = createTestDatabase();
+    databases.push(spare);
+    Object.assign(context.env, { TENANT_TWO: createD1Adapter(spare) });
+    context.control
+      .prepare(
+        "INSERT INTO tenant_slots(binding_name,database_id,status) VALUES('TENANT_TWO','tenant-two','available')",
+      )
+      .run();
+    const inventory = await fetchHosted(context, '/api/operator/slots', operator.cookie);
+    expect(await inventory.json()).toMatchObject({
+      configuredSlots: 2,
+      assignedSlots: 1,
+      availableSlots: 1,
+      heldSlots: 0,
+      quarantinedSlots: 0,
+    });
+    const patch = async (limit: number) =>
+      fetchHosted(
+        context,
+        '/api/operator/slots',
+        operator.cookie,
+        {},
+        { method: 'PATCH', body: JSON.stringify({ maxWorkspaces: limit }) },
+      );
+    expect((await patch(3)).status).toBe(400);
+    expect(await (await patch(1)).json()).toMatchObject({ maxWorkspaces: 1 });
+    const user = await authenticatedCookie(
+      context.control,
+      'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb',
+      'new.test',
+    );
+    expect(
+      await (await fetchHosted(context, '/api/auth/session', user.cookie)).json(),
+    ).toMatchObject({ workspace: { state: 'waiting_for_capacity' } });
+    const hold = async (binding: string, enabled: boolean) =>
+      fetchHosted(
+        context,
+        `/api/operator/slots/${binding}/admission`,
+        operator.cookie,
+        {},
+        { method: 'POST', body: JSON.stringify({ enabled }) },
+      );
+    expect(await (await hold('TENANT_TWO', false)).json()).toMatchObject({
+      availableSlots: 0,
+      heldSlots: 1,
+    });
+    await patch(2);
+    expect(
+      await (await fetchHosted(context, '/api/auth/session', user.cookie)).json(),
+    ).toMatchObject({ workspace: { state: 'waiting_for_capacity' } });
+    expect(await (await hold('TENANT_TWO', true)).json()).toMatchObject({
+      availableSlots: 1,
+      heldSlots: 0,
+    });
+    expect(
+      await (await fetchHosted(context, '/api/auth/session', user.cookie)).json(),
+    ).toMatchObject({ workspace: { state: 'active' } });
+    expect((await hold('TENANT_TWO', false)).status).toBe(409);
+    expect((await hold('TENANT_ONE', false)).status).toBe(409);
+    expect((await hold('CONTROL_DB', false)).status).toBe(409);
+    expect((await hold('UNBOUND', false)).status).toBe(409);
+    expect((await fetchHosted(context, '/api/operator/slots', user.cookie)).status).toBe(403);
+    expect(
+      (
+        await fetchHosted(
+          context,
+          '/api/operator/slots',
+          user.cookie,
+          {},
+          { method: 'PATCH', body: JSON.stringify({ maxWorkspaces: 1 }) },
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      context.control
+        .prepare("SELECT count(*) AS count FROM workspace_events WHERE event='slot_admission'")
+        .get(),
+    ).toEqual({ count: 2 });
+  });
+
+  it('keeps deleted database slots quarantined when the operator tries to reopen them', async () => {
+    const context = await createHostedContext();
+    const operator = await authenticatedCookie(
+      context.control,
+      'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+      'operator.test',
+    );
+    Object.assign(context.env, { OPERATOR_DIDS: operator.did });
+    await fetchHosted(context, '/api/auth/session', operator.cookie);
+    context.control
+      .prepare("UPDATE tenant_slots SET status='deleting' WHERE binding_name='TENANT_ONE'")
+      .run();
+    const response = await fetchHosted(
+      context,
+      '/api/operator/slots/TENANT_ONE/admission',
+      operator.cookie,
+      {},
+      { method: 'POST', body: JSON.stringify({ enabled: true }) },
+    );
+    expect(response.status).toBe(409);
+    expect(context.control.prepare('SELECT status FROM tenant_slots').get()).toEqual({
+      status: 'deleting',
+    });
+  });
+
+  it('lets the operator provision a waiting signup and resume a suspended workspace', async () => {
+    const context = await createHostedContext();
+    const operator = await authenticatedCookie(
+      context.control,
+      'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+      'operator.test',
+    );
+    Object.assign(context.env, { OPERATOR_DIDS: operator.did });
+    await fetchHosted(context, '/api/auth/session', operator.cookie);
+    const user = await authenticatedCookie(
+      context.control,
+      'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb',
+      'noz.am',
+    );
+    const signup = await fetchHosted(context, '/api/auth/session', user.cookie);
+    const workspace = ((await signup.json()) as { workspace: { id: string; state: string } })
+      .workspace;
+    expect(workspace.state).toBe('waiting_for_capacity');
+    const path = `/api/operator/workspaces/${workspace.id}/state`;
+    const activate = {
+      method: 'POST',
+      body: JSON.stringify({ state: 'active', reason: 'Operator restored' }),
+    };
+    expect((await fetchHosted(context, path, user.cookie, {}, activate)).status).toBe(403);
+    const noCapacity = await fetchHosted(context, path, operator.cookie, {}, activate);
+    expect(noCapacity.status).toBe(409);
+    expect(await noCapacity.json()).toMatchObject({ error: { code: 'capacity_unavailable' } });
+    const secondTenant = createTestDatabase();
+    databases.push(secondTenant);
+    Object.assign(context.env, { TENANT_TWO: createD1Adapter(secondTenant) });
+    context.control
+      .prepare(
+        "INSERT INTO tenant_slots(binding_name,database_id,status) VALUES('TENANT_TWO','tenant-two','available')",
+      )
+      .run();
+    context.control
+      .prepare(
+        'UPDATE service_controls SET admission_open=0, external_monthly_cost_usd=15 WHERE id=1',
+      )
+      .run();
+    expect((await fetchHosted(context, path, operator.cookie, {}, activate)).status).toBe(409);
+    expect(secondTenant.prepare('SELECT count(*) AS count FROM workspace_metadata').get()).toEqual({
+      count: 0,
+    });
+    context.control
+      .prepare('UPDATE service_controls SET external_monthly_cost_usd=10 WHERE id=1')
+      .run();
+    const activated = await fetchHosted(context, path, operator.cookie, {}, activate);
+    expect(activated.status).toBe(200);
+    expect(await activated.json()).toEqual({ id: workspace.id, state: 'active' });
+    expect(
+      context.control.prepare('SELECT admission_open FROM service_controls WHERE id=1').get(),
+    ).toEqual({ admission_open: 0 });
+    expect(
+      secondTenant.prepare('SELECT workspace_id FROM workspace_metadata WHERE id=1').get(),
+    ).toEqual({ workspace_id: workspace.id });
+    await fetchHosted(
+      context,
+      path,
+      operator.cookie,
+      {},
+      { method: 'POST', body: JSON.stringify({ state: 'suspended', reason: 'Operator action' }) },
+    );
+    const suspended = await fetchHosted(context, '/api/auth/session', user.cookie);
+    expect(await suspended.json()).toMatchObject({ workspace: { state: 'suspended' } });
+    expect((await fetchHosted(context, path, operator.cookie, {}, activate)).status).toBe(200);
+    expect(
+      await (await fetchHosted(context, '/api/auth/session', user.cookie)).json(),
+    ).toMatchObject({ workspace: { state: 'active' } });
+  });
+
   it('uses a DID-only principal DTO and ignores an inaccessible workspace header', async () => {
     const context = await createHostedContext();
     const owner = await authenticatedCookie(

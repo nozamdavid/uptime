@@ -78,6 +78,7 @@ database_id = "REPLACE_WITH_TENANT_009_DATABASE_ID"
 migrations_dir = "../../../packages/cloudflare/src/migrations"
 
 [vars]
+INTEREST_CHECK_ONLY = "true"
 ENVIRONMENT = "production"
 PUBLIC_ORIGIN = "https://REPLACE_WITH_PAGES_ORIGIN"
 WEB_ORIGIN = "https://REPLACE_WITH_PAGES_ORIGIN"

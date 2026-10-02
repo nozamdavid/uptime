@@ -116,6 +116,7 @@ export interface ProductUsage {
 export interface ProductBudget {
   ceilingUsd: number;
   baseUsd: number;
+  forecastUsd?: number;
   externalMonthlyCostUsd?: number;
   admissionOpen?: boolean;
   coverage?: string;
@@ -132,6 +133,33 @@ export interface OperatorWorkspace {
   storageBytes: number;
   lastSeenAt: string | null;
 }
+export interface OperatorSlot {
+  bindingName: string;
+  databaseId: string;
+  status: 'available' | 'assigned' | 'deleting';
+  admissionEnabled: boolean;
+  workspaceId: string | null;
+  ownerHandle: string | null;
+}
+export interface OperatorSlots {
+  maxWorkspaces: number;
+  configuredSlots: number;
+  assignedSlots: number;
+  availableSlots: number;
+  heldSlots: number;
+  quarantinedSlots: number;
+  slots: OperatorSlot[];
+}
+export interface InterestSignup {
+  did: string;
+  handle: string;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface OperatorInterest {
+  total: number;
+  signups: InterestSignup[];
+}
 export interface WorkspaceSummary {
   id: string;
   name: string;
@@ -145,7 +173,7 @@ export interface ProductSession {
     id: string;
     name: string;
     plan: 'free';
-    state: 'active' | 'waiting' | 'suspended' | string;
+    state: 'active' | 'waiting_for_capacity' | 'suspended' | 'deleting' | 'deleted' | string;
   };
   isOperator?: boolean;
   limits?: ProductLimits;
@@ -266,8 +294,12 @@ async function monitorDetail<TSummary>(path: string, range: string, isPublic = f
 
 export const api = {
   session: () => request<ProductSession>('/auth/session'),
-  startAtProto: (handle: string) =>
-    sendJson<{ authorizationUrl: string }>('/auth/atproto/start', 'POST', { handle }),
+  startAtProto: (handle: string, returnTo?: string) =>
+    sendJson<{ authorizationUrl: string }>('/auth/atproto/start', 'POST', {
+      handle,
+      ...(returnTo ? { returnTo } : {}),
+    }),
+  interestSession: () => request<{ signup: InterestSignup | null }>('/interest/session'),
   signIn: (password: string) =>
     sendJson<{ admin: { email: string } }>('/auth/login', 'POST', { password }),
   signOut: () => request<void>('/auth/logout', { method: 'POST' }),
@@ -302,6 +334,16 @@ export const api = {
     ),
   operatorWorkspaces: () =>
     request<{ workspaces: OperatorWorkspace[]; budget: ProductBudget }>('/operator/workspaces'),
+  operatorSlots: () => request<OperatorSlots>('/operator/slots'),
+  operatorInterest: () => request<OperatorInterest>('/operator/interest'),
+  updateOperatorSlots: (maxWorkspaces: number) =>
+    sendJson<OperatorSlots>('/operator/slots', 'PATCH', { maxWorkspaces }),
+  setSlotAdmission: (bindingName: string, enabled: boolean) =>
+    sendJson<OperatorSlots>(
+      `/operator/slots/${encodeURIComponent(bindingName)}/admission`,
+      'POST',
+      { enabled },
+    ),
   updateOperatorControls: (input: { admissionOpen: boolean; externalMonthlyCostUsd: number }) =>
     sendJson<{ budget: ProductBudget }>('/operator/controls', 'PATCH', input),
   setWorkspaceState: (id: string, state: 'active' | 'suspended', reason: string) =>

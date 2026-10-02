@@ -19,9 +19,11 @@ import { monitorDisplayName } from './monitor-format.js';
 import { MonitorList } from './monitor-list.js';
 import { NotificationsPage } from './notifications.js';
 import { PublicStatusPage, StatusPageEditor, StatusPagesIndex } from './status-pages.js';
+import { WorkspaceState } from './workspace-state.js';
 import './styles.css';
 import {
   AuthPage,
+  InterestSignupPage,
   LandingPage,
   OperatorPage,
   ProductSessionContext,
@@ -313,7 +315,7 @@ function Workspace({
         className={`workspace${session?.workspace?.state !== 'active' ? ' workspace--restricted' : ''}`}
       >
         {session?.workspace?.state !== 'active' && !allowRestrictedRoute ? (
-          <WorkspaceState state={session?.workspace?.state ?? 'waiting'} />
+          <WorkspaceState state={session?.workspace?.state ?? 'waiting_for_capacity'} />
         ) : (
           children
         )}
@@ -418,32 +420,6 @@ function Workspace({
   );
 }
 
-function WorkspaceState({ state }: { state: string }) {
-  const waiting = state === 'waiting';
-  const deleting = state === 'deleting' || state === 'deleted';
-  return (
-    <section className="workspace-state" role="status">
-      <p className="mono-label">
-        WORKSPACE {waiting ? 'WAITING' : deleting ? 'DELETION PENDING' : 'SUSPENDED'}
-      </p>
-      <h1>
-        {waiting
-          ? 'Your workspace is being prepared.'
-          : deleting
-            ? 'Workspace deletion is pending.'
-            : 'Your workspace is suspended.'}
-      </h1>
-      <p>
-        {waiting
-          ? 'Operational forms will be available when setup is complete.'
-          : deleting
-            ? 'New checks are stopped while workspace data is removed.'
-            : 'Operational forms are unavailable while this workspace is suspended.'}
-      </p>
-    </section>
-  );
-}
-
 function Overview() {
   const [formOpen, setFormOpen] = useState(false);
   const [reload, setReload] = useState(0);
@@ -532,14 +508,7 @@ function LoginRoute() {
   );
 }
 function SignupRoute() {
-  return (
-    <AuthPage
-      mode="signup"
-      onAuthenticated={() => {
-        window.location.assign('/app');
-      }}
-    />
-  );
+  return <InterestSignupPage />;
 }
 
 function DetailRoute() {
