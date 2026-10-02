@@ -30,6 +30,7 @@ jobs:
       - run: scripts/tests/provision-tenant-pool.sh
       - run: scripts/tests/deploy-hosted-workers.sh
       - run: scripts/tests/bootstrap-operator-workspace.sh
+      - run: scripts/tests/register-staging-import.sh
       - run: node --test deploy/cloudflare/staging/pages/gateway.test.mjs
       - run: scripts/tests/reset-admin.sh
       - name: Validate Docker Compose

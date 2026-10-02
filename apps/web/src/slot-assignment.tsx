@@ -3,10 +3,12 @@ import { api } from './api.js';
 
 export function SlotAssignment({
   bindingName,
+  imported = false,
   signups,
   onAssigned,
 }: {
   bindingName: string;
+  imported?: boolean;
   signups: { did: string; handle: string }[];
   onAssigned: () => Promise<void>;
 }) {
@@ -43,6 +45,11 @@ export function SlotAssignment({
           ))}
         </select>
       </label>
+      {imported && (
+        <p className="settings-note">
+          This existing staging monitor fleet and its history will belong to the assigned user.
+        </p>
+      )}
       <button className="button button--quiet" disabled={busy || !ownerDid}>
         {busy ? 'Assigning…' : 'Assign workspace'}
       </button>

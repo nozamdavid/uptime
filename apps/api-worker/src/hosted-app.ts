@@ -11,6 +11,10 @@ import {
   type CloudflareEnv,
   type D1Database,
   toBoolean,
+  isStagingImportedSlot,
+  isStagingImportedWorkspace,
+  resolveStagingImportedDatabase,
+  stagingImportedBindingName,
 } from '@uptime/cloudflare';
 import { z } from 'zod';
 import { createApiRouter, type LogSink } from './app.js';
@@ -158,6 +162,26 @@ export async function hostedFetch(
           user: { did: principal.did, handle: principal.handle },
           isOperator: operatorDids(env).includes(principal.did),
         });
+      } else if (path === '/api/auth/imported-identity' && request.method === 'GET') {
+        const principal = await auth.principal(request);
+        if (!principal) throw new HttpErrorLike(401, 'unauthorized', 'Sign in with AT Protocol');
+        const user = await first<{ state: string }>(
+          control,
+          'SELECT state FROM users WHERE did=?',
+          [principal.did],
+        );
+        if (user?.state !== 'active')
+          throw new HttpErrorLike(403, 'forbidden', 'Imported workspace access denied');
+        const workspaceId = uuid.parse(request.headers.get('x-uptime-workspace'));
+        const workspace = await accessibleWorkspace(control, principal.did, workspaceId);
+        if (workspace.state !== 'active' || !(await isStagingImportedWorkspace(env, workspaceId)))
+          throw new HttpErrorLike(403, 'forbidden', 'Imported workspace access denied');
+        await resolveStagingImportedDatabase(env, workspaceId);
+        response = json({
+          user: principal,
+          importedWorkspaceId: workspaceId,
+          role: workspace.role,
+        });
       } else if (
         /^\/api\/(monitors|status-pages)\/public\//.test(path) ||
         path.startsWith('/reports/public/')
@@ -168,10 +192,13 @@ export async function hostedFetch(
         await consumeBudget(control, 'public:global', 20_000, 86_400);
         const workspaceId = uuid.parse(url.searchParams.get('workspace'));
         const db = await activeDatabase(env, workspaceId);
-        await enforceHostedRequest(request, db);
+        const imported = await isStagingImportedWorkspace(env, workspaceId);
+        if (!imported) await enforceHostedRequest(request, db);
         response = path.startsWith('/reports/')
           ? await publicReport(request, env, workspaceId, db)
-          : await dispatch(request, url, db, config);
+          : imported
+            ? await importedRequest(request, env, workspaceId)
+            : await dispatch(request, url, db, config);
         response = await redactPublicUrls(response);
       } else {
         const principal = await auth.principal(request);
@@ -218,6 +245,7 @@ export async function hostedFetch(
             ],
           );
           if (path === '/api/auth/session' && request.method === 'GET') {
+            const imported = await isStagingImportedWorkspace(env, selected.id);
             response = json({
               user: principal,
               workspace: {
@@ -225,10 +253,11 @@ export async function hostedFetch(
                 name: selected.name,
                 state: selected.state,
                 plan: 'free',
+                ...(imported ? { kind: 'staging_import' } : {}),
               },
               role: selected.role,
               isOperator,
-              limits: hostedLimits,
+              limits: imported ? null : hostedLimits,
               usage: await workspaceUsage(env, selected),
               budget: await budgetSummary(control),
               workspaces: await all(
@@ -266,8 +295,12 @@ export async function hostedFetch(
                 3600,
               );
             }
-            await enforceHostedRequest(request, db);
-            const execute = () => dispatch(request, url, db, config, principal);
+            const imported = await isStagingImportedWorkspace(env, selected.id);
+            if (!imported) await enforceHostedRequest(request, db);
+            const execute = () =>
+              imported
+                ? importedRequest(request, env, selected.id)
+                : dispatch(request, url, db, config, principal);
             response = mutation(request)
               ? await withWorkspaceWriteLease(control, selected.id, execute)
               : await execute();
@@ -352,6 +385,23 @@ function requiredString(value: unknown, name: string) {
   if (typeof value !== 'string' || value.length < 1) throw new Error(`Missing ${name}`);
   return value;
 }
+
+async function importedRequest(
+  request: Request,
+  env: CloudflareEnv,
+  workspaceId: string,
+  report = false,
+) {
+  const binding = env[report ? 'IMPORTED_REPORTER' : 'IMPORTED_API'] as
+    { fetch(request: Request): Promise<Response> } | undefined;
+  if (env.ENVIRONMENT !== 'staging' || !binding || typeof binding.fetch !== 'function')
+    throw new HttpErrorLike(503, 'imported_unavailable', 'Imported staging service is unavailable');
+  const url = new URL(request.url);
+  url.searchParams.delete('workspace');
+  const headers = new Headers(request.headers);
+  headers.set('x-uptime-workspace', workspaceId);
+  return binding.fetch(new Request(new Request(url, request), { headers, redirect: 'manual' }));
+}
 async function assertBodyLimit(request: Request) {
   const reject = () => new HttpErrorLike(413, 'body_too_large', 'Request body exceeds 32 KiB');
   if (Number(request.headers.get('content-length') ?? 0) > 32_768) throw reject();
@@ -388,6 +438,7 @@ const stagingReservedSlotNames = [
   'STAGING_OPERATOR_DB',
   'STAGING_TEST_DB_001',
   'STAGING_TEST_DB_002',
+  stagingImportedBindingName,
 ] as const;
 function isStagingReservedSlot(env: CloudflareEnv, bindingName: string | undefined) {
   return (
@@ -402,6 +453,7 @@ async function activeDatabase(env: CloudflareEnv, id: string) {
     [id, 'active'],
   );
   if (!workspace) throw new HttpErrorLike(404, 'not_found', 'Workspace was not found');
+  if (await isStagingImportedWorkspace(env, id)) return resolveStagingImportedDatabase(env, id);
   return resolveWorkspaceDatabase(env, id);
 }
 async function accessibleWorkspace(control: D1Database, did: string, id: string) {
@@ -555,6 +607,21 @@ async function provisionWorkspace(
     if (slot) {
       const db = env[slot.binding_name] as D1Database | undefined;
       if (!db || typeof db.prepare !== 'function') throw new Error('Tenant binding is unavailable');
+      if (isStagingImportedSlot(env, slot.binding_name, slot.database_id)) {
+        await run(
+          db,
+          'INSERT INTO staging_workspace_identity(id,workspace_id,database_id) VALUES(1,?,?) ON CONFLICT(id) DO NOTHING',
+          [workspace.id, slot.database_id],
+        );
+        await resolveStagingImportedDatabase(env, workspace.id);
+        await run(
+          control,
+          "UPDATE workspaces SET state='active',updated_at=? WHERE id=? AND state='waiting_for_capacity'",
+          [timestamp, workspace.id],
+        );
+        workspace.state = 'active';
+        return workspace;
+      }
       // The identity guard also prevents exposing an incorrectly inventoried database.
       const metadata = await first<{ workspace_id: string }>(
         db,
@@ -663,7 +730,9 @@ export async function budgetSummary(control: D1Database) {
 async function workspaceUsage(env: CloudflareEnv, workspace: Workspace) {
   if (!['active', 'suspended'].includes(workspace.state))
     return { monitors: 0, statusPages: 0, notificationServices: 0 };
-  const db = await resolveWorkspaceDatabase(env, workspace.id);
+  const db = (await isStagingImportedWorkspace(env, workspace.id))
+    ? await resolveStagingImportedDatabase(env, workspace.id)
+    : await resolveWorkspaceDatabase(env, workspace.id);
   return await first<{ monitors: number; statusPages: number; notificationServices: number }>(
     db,
     `SELECT (SELECT count(*) FROM monitors) AS monitors, (SELECT count(*) FROM status_pages) AS statusPages, (SELECT count(*) FROM notification_services) AS notificationServices`,
@@ -711,6 +780,9 @@ async function slotInventory(env: CloudflareEnv) {
       admissionEnabled: slot.admission_enabled === 1,
       workspaceId: slot.workspace_id,
       ownerHandle: slot.owner_handle,
+      ...(isStagingImportedSlot(env, slot.binding_name, slot.database_id)
+        ? { kind: 'staging_import' }
+        : {}),
     })),
   };
 }
@@ -886,6 +958,16 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
   if (slotAdmission && request.method === 'POST') {
     const bindingName = slotAdmission[1]!;
     const input = z.object({ enabled: z.boolean() }).parse(await readJson(request));
+    if (
+      env.ENVIRONMENT === 'staging' &&
+      bindingName === stagingImportedBindingName &&
+      input.enabled
+    )
+      throw new HttpErrorLike(
+        409,
+        'explicit_assignment_required',
+        'Imported data can only be assigned explicitly',
+      );
     const binding = env[bindingName] as D1Database | undefined;
     if (!binding || typeof binding.prepare !== 'function')
       throw new HttpErrorLike(409, 'slot_unavailable', 'Slot is not bound to this deployment');
@@ -1014,7 +1096,7 @@ async function workspaceRequest(
   if (path === '/api/workspace/usage' && request.method === 'GET')
     return json({
       usage: await workspaceUsage(env, workspace),
-      limits: hostedLimits,
+      limits: (await isStagingImportedWorkspace(env, workspace.id)) ? null : hostedLimits,
       budget: await budgetSummary(control),
     });
   if (path === '/api/workspace/members' && request.method === 'GET')
@@ -1124,6 +1206,12 @@ async function workspaceRequest(
   }
   if (path === '/api/workspace' && request.method === 'DELETE') {
     ownerOnly(workspace);
+    if (await isStagingImportedWorkspace(env, workspace.id))
+      throw new HttpErrorLike(
+        409,
+        'imported_data_protected',
+        'Imported staging history cannot be deleted through workspace settings',
+      );
     await run(
       control,
       "UPDATE workspaces SET state = 'deleting', updated_at = ? WHERE id = ? AND state <> 'deleted'",
@@ -1137,20 +1225,21 @@ async function workspaceRequest(
   const db = await activeDatabase(env, workspace.id);
   if (path === '/api/workspace/export' && request.method === 'GET') {
     ownerOnly(workspace);
+    const imported = await isStagingImportedWorkspace(env, workspace.id);
     // Credential material, OAuth tokens and private delivery payloads never leave through exports.
     return json({
       version: 1,
       exportedAt: new Date().toISOString(),
       workspace: { id: workspace.id, name: workspace.name },
-      monitors: await all(db, 'SELECT * FROM monitors LIMIT 3'),
+      monitors: await all(db, `SELECT * FROM monitors LIMIT ${imported ? 1000 : 3}`),
       regions: await all(db, 'SELECT * FROM monitor_regions'),
-      statusPages: await all(db, 'SELECT * FROM status_pages LIMIT 1'),
+      statusPages: await all(db, `SELECT * FROM status_pages LIMIT ${imported ? 100 : 1}`),
       groups: await all(db, 'SELECT * FROM status_page_groups'),
       pageMonitors: await all(db, 'SELECT * FROM status_page_monitors'),
       uptime: await all(db, 'SELECT * FROM monitor_daily_uptime ORDER BY day DESC LIMIT 90'),
       destinations: await all(
         db,
-        'SELECT id,name,provider,enabled FROM notification_services LIMIT 3',
+        `SELECT id,name,provider,enabled FROM notification_services LIMIT ${imported ? 100 : 3}`,
       ),
     });
   }
@@ -1353,7 +1442,10 @@ async function publicReport(
 ) {
   if (!env.REPORTS) throw new HttpErrorLike(503, 'reports_unavailable', 'Reports are unavailable');
   const url = new URL(request.url);
-  const bucket = tenantReportsBucket(env.REPORTS, workspaceId);
+  const imported = await isStagingImportedWorkspace(env, workspaceId);
+  if (imported && /^\/reports\/public\/monitors\//.test(url.pathname))
+    return importedRequest(request, env, workspaceId, true);
+  const bucket = imported ? env.REPORTS : tenantReportsBucket(env.REPORTS, workspaceId);
   const cohortKey = async (suffix: string) => {
     const pointer = await bucket.get('public/cohort.json');
     if (!pointer) throw new HttpErrorLike(503, 'report_pending', 'First report is being prepared');

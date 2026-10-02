@@ -28,6 +28,7 @@ const context = {
 afterEach(() => {
   vi.unstubAllGlobals();
   delete (env as Record<string, unknown>).OAUTH;
+  env.ENVIRONMENT = 'test';
   env.DB.close();
   env.DB = createD1Adapter(createTestDatabase());
 });
@@ -121,6 +122,88 @@ describe('worker entry point', () => {
     );
     expect(monitors.status).toBe(200);
     expect(fetchIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  it('bridges an imported staging workspace for private monitors without granting operator access', async () => {
+    env.ENVIRONMENT = 'staging';
+    const cookie = 'uptime_atproto_session=opaque-token';
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const fetchIdentity = vi.fn(async (request: Request) => {
+      expect(new URL(request.url).pathname).toBe('/api/auth/imported-identity');
+      expect(request.headers.get('cookie')).toBe(cookie);
+      expect(request.headers.get('x-uptime-workspace')).toBe(workspaceId);
+      return Response.json({
+        user: { did: 'did:plc:cccccccccccccccccccccccc', handle: 'imported.test' },
+        importedWorkspaceId: workspaceId,
+        role: 'owner',
+      });
+    });
+    (env as Record<string, unknown>).OAUTH = { fetch: fetchIdentity };
+
+    const session = await worker.fetch(
+      new Request('https://api.test/api/auth/session', {
+        headers: { cookie, 'x-uptime-workspace': workspaceId },
+      }),
+      env,
+      context,
+    );
+    expect(session.status).toBe(200);
+    expect(await session.json()).toMatchObject({
+      user: { did: 'did:plc:cccccccccccccccccccccccc', handle: 'imported.test' },
+      isOperator: false,
+    });
+
+    const monitors = await worker.fetch(
+      new Request('https://api.test/api/monitors', {
+        headers: { cookie, 'x-uptime-workspace': workspaceId },
+      }),
+      env,
+      context,
+    );
+    expect(monitors.status).toBe(200);
+    expect(fetchIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects an imported identity workspace mismatch and never uses the imported bridge in production', async () => {
+    const cookie = 'uptime_atproto_session=opaque-token';
+    const workspaceId = '22222222-2222-4222-8222-222222222222';
+    const fetchIdentity = vi.fn(async (request: Request) => {
+      expect(new URL(request.url).pathname).toBe('/api/auth/imported-identity');
+      return Response.json({
+        user: { did: 'did:plc:dddddddddddddddddddddddd', handle: 'wrong.test' },
+        importedWorkspaceId: '33333333-3333-4333-8333-333333333333',
+        role: 'owner',
+      });
+    });
+    env.ENVIRONMENT = 'staging';
+    (env as Record<string, unknown>).OAUTH = { fetch: fetchIdentity };
+    const mismatch = await worker.fetch(
+      new Request('https://api.test/api/monitors', {
+        headers: { cookie, 'x-uptime-workspace': workspaceId },
+      }),
+      env,
+      context,
+    );
+    expect(mismatch.status).toBe(403);
+
+    env.ENVIRONMENT = 'production';
+    const operatorFetch = vi.fn(async (request: Request) => {
+      expect(new URL(request.url).pathname).toBe('/api/auth/identity');
+      return Response.json({
+        user: { did: 'did:plc:eeeeeeeeeeeeeeeeeeeeeeee', handle: 'operator.test' },
+        isOperator: true,
+      });
+    });
+    (env as Record<string, unknown>).OAUTH = { fetch: operatorFetch };
+    const production = await worker.fetch(
+      new Request('https://api.test/api/monitors', {
+        headers: { cookie, 'x-uptime-workspace': workspaceId },
+      }),
+      env,
+      context,
+    );
+    expect(production.status).toBe(200);
+    expect(operatorFetch).toHaveBeenCalledOnce();
   });
 
   it('rejects nonoperators and malformed identity responses without trusting headers', async () => {

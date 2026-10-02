@@ -1,7 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { hashPassword, hashSessionToken, type R2Bucket } from '@uptime/cloudflare';
+import {
+  hashPassword,
+  hashSessionToken,
+  purgeWorkspaceData,
+  stagingImportedDatabaseId,
+  type R2Bucket,
+} from '@uptime/cloudflare';
 import { createD1Adapter, createTestDatabase } from '@uptime/cloudflare/testing';
 
 import { consumeBudget, ensureWorkspace, hostedFetch } from './hosted-app.js';
@@ -23,6 +29,179 @@ afterEach(() => {
 });
 
 describe('hosted control plane', () => {
+  it('assigns the imported fleet without free metadata, proxies authorized edits, and protects its history', async () => {
+    const context = await createHostedContext();
+    const imported = createTestDatabase();
+    databases.push(imported);
+    imported.exec(
+      'CREATE TABLE staging_workspace_identity(id INTEGER PRIMARY KEY CHECK(id=1),workspace_id TEXT NOT NULL,database_id TEXT NOT NULL)',
+    );
+    const insert =
+      imported.prepare(`INSERT INTO monitors(id,name,url,interval_seconds,timeout_ms,enabled,next_check_at)
+      VALUES(?,?,'https://example.com',60,20000,1,?)`);
+    for (let i = 0; i < 107; i++)
+      insert.run(`00000000-0000-4000-8000-${String(i).padStart(12, '0')}`, `Imported ${i}`, now());
+    imported
+      .prepare('INSERT INTO monitor_regions(monitor_id,region_id) VALUES(?,?)')
+      .run('00000000-0000-4000-8000-000000000000', 'us-east');
+    imported
+      .prepare('INSERT INTO status_pages(id,title,public_slug) VALUES(?,?,?)')
+      .run('11111111-1111-4111-8111-111111111114', 'Imported services', 'services');
+    Object.assign(context.env, {
+      ENVIRONMENT: 'staging',
+      INTEREST_CHECK_ONLY: 'true',
+      STAGING_IMPORTED_DB: createD1Adapter(imported),
+    });
+    context.control
+      .prepare(
+        "INSERT INTO tenant_slots(binding_name,database_id,status) VALUES('STAGING_IMPORTED_DB',?,'available')",
+      )
+      .run(stagingImportedDatabaseId);
+    context.control
+      .prepare(
+        "INSERT INTO tenant_slot_controls(binding_name,admission_enabled) VALUES('STAGING_IMPORTED_DB',0)",
+      )
+      .run();
+    const operator = await authenticatedCookie(
+      context.control,
+      'did:plc:lmkzmvv6sdxntwtyxpg7fqqq',
+      'noz.am',
+    );
+    const owner = await authenticatedCookie(
+      context.control,
+      'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb',
+      'import.test',
+    );
+    await recordInterest(context.controlDb, { did: owner.did, handle: 'import.test' });
+    const legacyEnv = {
+      DB: createD1Adapter(imported),
+      ENVIRONMENT: 'staging',
+      ADMIN_EMAIL: 'admin@example.com',
+      ADMIN_PASSWORD_HASH: await hashPassword('test-password-only'),
+      SESSION_SECRET: 'l'.repeat(32),
+      CREDENTIAL_ENCRYPTION_SECRET: 'original-secret'.repeat(4),
+      REGIONS_LIST: 'eu-west,us-east,asia',
+      WEB_ORIGIN: 'https://api.example.com',
+      OAUTH: {
+        fetch: (request: Request) =>
+          hostedFetch(request, context.env, {
+            waitUntil: () => undefined,
+          } as unknown as ExecutionContext),
+      },
+    };
+    Object.assign(context.env, {
+      IMPORTED_API: {
+        fetch: (request: Request) =>
+          worker.fetch(request, legacyEnv, {
+            waitUntil: () => undefined,
+          } as unknown as ExecutionContext),
+      },
+    });
+    const assign = () =>
+      fetchHosted(
+        context,
+        '/api/operator/slots/STAGING_IMPORTED_DB/assignment',
+        operator.cookie,
+        {},
+        { method: 'POST', body: JSON.stringify({ ownerDid: owner.did }) },
+      );
+    const response = await assign();
+    expect(response.status).toBe(200);
+    const workspaceId = ((await response.json()) as { workspaceId: string }).workspaceId;
+    expect((await assign()).status).toBe(200);
+    expect(imported.prepare('SELECT count(*) AS n FROM workspace_metadata').get()).toEqual({
+      n: 0,
+    });
+    expect(
+      await (await fetchHosted(context, '/api/auth/session', owner.cookie)).json(),
+    ).toMatchObject({
+      workspace: { kind: 'staging_import' },
+      usage: { monitors: 107, statusPages: 1 },
+      limits: null,
+    });
+    const monitors = await fetchHosted(context, '/api/monitors', owner.cookie);
+    expect(monitors.status).toBe(200);
+    expect(((await monitors.json()) as { monitors: unknown[] }).monitors).toHaveLength(107);
+    const keys: string[] = [];
+    Object.assign(context.env, {
+      REPORTS: {
+        get: async (key: string) => {
+          keys.push(key);
+          return {
+            json: async () =>
+              key === 'public/cohort.json'
+                ? { generation: '123' }
+                : {
+                    statusPages: [
+                      { id: '11111111-1111-4111-8111-111111111114', publicSlug: 'services' },
+                    ],
+                  },
+          };
+        },
+      } as unknown as R2Bucket,
+    });
+    const index = await fetchHosted(
+      context,
+      `/reports/public/status-pages.json?workspace=${workspaceId}`,
+      '',
+    );
+    expect(index.status).toBe(200);
+    expect(keys).toEqual(['public/cohort.json', 'public/cohorts/123/status-pages.json']);
+    const update = await fetchHosted(
+      context,
+      '/api/monitors/00000000-0000-4000-8000-000000000000',
+      owner.cookie,
+      {},
+      { method: 'PATCH', body: JSON.stringify({ name: 'Updated imported monitor' }) },
+    );
+    expect(update.status, JSON.stringify(await update.clone().json())).toBe(200);
+    expect(
+      imported
+        .prepare('SELECT name,interval_seconds,timeout_ms FROM monitors WHERE id=?')
+        .get('00000000-0000-4000-8000-000000000000'),
+    ).toEqual({ name: 'Updated imported monitor', interval_seconds: 60, timeout_ms: 20000 });
+    expect(
+      (await fetchHosted(context, '/api/workspace', owner.cookie, {}, { method: 'DELETE' })).status,
+    ).toBe(409);
+    expect(imported.prepare('SELECT count(*) AS n FROM monitors').get()).toEqual({ n: 107 });
+    expect(
+      context.control.prepare('SELECT state FROM workspaces WHERE id=?').get(workspaceId),
+    ).toEqual({ state: 'active' });
+    await expect(
+      purgeWorkspaceData({ ...context.env, CONTROL_DB: context.controlDb }, workspaceId),
+    ).rejects.toThrow('cannot be purged');
+    const stranger = await authenticatedCookie(
+      context.control,
+      'did:plc:cccccccccccccccccccccccc',
+      'stranger.test',
+    );
+    expect(
+      (
+        await fetchHosted(context, '/api/auth/imported-identity', stranger.cookie, {
+          'x-uptime-workspace': workspaceId,
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await fetchHosted(
+          context,
+          '/api/operator/slots/STAGING_IMPORTED_DB/admission',
+          operator.cookie,
+          {},
+          { method: 'POST', body: JSON.stringify({ enabled: true }) },
+        )
+      ).status,
+    ).toBe(409);
+    context.control.prepare("UPDATE workspaces SET state='suspended' WHERE id=?").run(workspaceId);
+    expect(
+      (
+        await fetchHosted(context, '/api/auth/imported-identity', owner.cookie, {
+          'x-uptime-workspace': workspaceId,
+        })
+      ).status,
+    ).toBe(403);
+  });
   it('recognizes the default operator when no allowlist is configured', async () => {
     const context = await createHostedContext();
     const operator = await authenticatedCookie(
