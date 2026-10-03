@@ -44,7 +44,7 @@ export function LandingPage() {
       </header>
       <section className="landing__hero">
         <h1>Simple uptime monitoring</h1>
-        <p className="landing__lede">Let me know if you are interested</p>
+        <p className="landing__lede">Free early access soon</p>
         {interestState === 'confirmed' ? (
           <p role="status">Thanks, @{interestSignup?.handle} is on the interest list.</p>
         ) : interestState === 'loading' ? (
@@ -70,7 +70,9 @@ export function LandingPage() {
         </details>
       </section>
       <footer className="landing__footer">
-        <span>Built for independent builders.</span>
+        <span>
+          Built by <a href="https://bsky.app/profile/noz.am">@noz.am</a>
+        </span>
         <a href="/operator">Operator</a>
       </footer>
     </main>
@@ -117,7 +119,7 @@ export function InterestForm() {
         </p>
       )}
       <button className="button button--primary" disabled={busy || !handle.trim()}>
-        {busy ? 'Connecting…' : 'Join interest list'}
+        {busy ? 'Connecting…' : "I'm interested!"}
       </button>
     </form>
   );

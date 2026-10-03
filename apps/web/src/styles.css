@@ -275,6 +275,8 @@ small {
 }
 .landing__hero .auth-card .button {
   width: 100%;
+  /* Keep the theme's accessible color pair even before a handle is entered. */
+  opacity: 1;
 }
 .landing__note {
   margin-top: var(--space-sm);
