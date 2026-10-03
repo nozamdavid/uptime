@@ -219,8 +219,9 @@ small {
   min-height: 100dvh;
 }
 .landing {
-  width: min(100% - var(--space-lg), 76rem);
+  width: 100%;
   margin-inline: auto;
+  padding-inline: calc(var(--space-lg) / 2);
   padding-block: var(--space-md) var(--space-xl);
 }
 .landing__nav,
