@@ -2426,6 +2426,281 @@ td {
   color: var(--color-paper-raised);
   font-weight: 700;
 }
+
+/* Product shell spacing and account/operator layouts. Keep this block scoped
+   to the application shell so the landing composition can keep its rhythm. */
+.topbar__inner,
+.workspace,
+.footer-line {
+  width: min(100% - var(--space-lg), 86rem);
+}
+
+.topbar__inner {
+  min-height: 3.75rem;
+  gap: var(--space-xs);
+}
+
+.topbar__nav {
+  min-width: 0;
+  gap: var(--space-2xs);
+}
+
+.topbar__nav .brand {
+  padding: var(--space-2xs) var(--space-xs);
+  border-radius: var(--radius-control);
+  font-size: var(--text-sm);
+}
+
+.topbar__nav .brand[aria-current='page'],
+.topbar__nav .brand[data-status='active'] {
+  background: var(--color-paper-raised);
+  color: var(--color-ink);
+}
+
+.topbar__divider {
+  height: 0.9rem;
+  margin-inline: var(--space-3xs);
+}
+
+.search-pill,
+.button,
+input,
+select {
+  min-height: 2.5rem;
+}
+
+.search-pill {
+  padding-inline: var(--space-xs);
+}
+
+.workspace {
+  padding-block: var(--space-lg) var(--space-xl);
+}
+
+.page-head {
+  gap: var(--space-sm);
+  padding-bottom: var(--space-md);
+}
+
+.page-head > div,
+.region-group {
+  gap: var(--space-2xs);
+}
+
+.settings-page {
+  width: min(100%, 70rem);
+  max-width: none;
+  gap: var(--space-md);
+}
+
+.settings-card {
+  padding: var(--space-sm) var(--space-md);
+  gap: var(--space-xs);
+}
+
+.settings-page--account {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.settings-page--account > .page-head,
+.settings-page--account > .field-error {
+  grid-column: 1 / -1;
+}
+
+.settings-page--account > .settings-card:nth-of-type(2),
+.settings-page--account > .settings-card:nth-of-type(3) {
+  min-width: 0;
+}
+
+.settings-page--account > .settings-card--actions {
+  grid-column: 1 / -1;
+}
+
+.settings-page--account .member-invite {
+  margin-top: var(--space-sm);
+}
+
+.settings-page--account .member-row {
+  padding-block: var(--space-2xs);
+}
+
+.settings-page--account .member-row small,
+.settings-page--operator .operator-row small,
+.settings-page--operator .operator-row .tnum {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.settings-page.operator-page {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.settings-page.operator-page > .page-head,
+.settings-page.operator-page > .field-error,
+.settings-page.operator-page > .operator-slot-list,
+.settings-page.operator-page > .operator-list {
+  grid-column: 1 / -1;
+}
+
+.settings-page.operator-page > .operator-budget {
+  min-width: 0;
+}
+
+.settings-page.operator-page > .settings-card:has(> .operator-slot-list),
+.settings-page.operator-page > details:has(.operator-slot-list),
+.settings-page.operator-page > .operator-list {
+  grid-column: 1 / -1;
+}
+
+.operator-budget__summary,
+.operator-budget__coverage {
+  margin-block: var(--space-2xs);
+}
+
+.operator-controls {
+  grid-template-columns: auto minmax(10rem, 1fr) auto;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+}
+
+.operator-row {
+  min-width: 0;
+  gap: var(--space-sm);
+}
+
+.operator-row > div:first-child {
+  min-width: 0;
+}
+
+.operator-row > div:first-child > small {
+  display: block;
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+}
+
+.operator-slot-list {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.operator-slot-list .operator-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  padding-block: var(--space-xs);
+  border-top: var(--rule);
+}
+
+.operator-slot-list .operator-row > .operator-controls {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin-top: 0;
+}
+
+.operator-slot-list .operator-row > .button {
+  justify-self: end;
+}
+
+.settings-page details {
+  min-width: 0;
+}
+
+.settings-page details > summary {
+  cursor: pointer;
+  color: var(--color-ink);
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  font-weight: 600;
+  list-style-position: outside;
+}
+
+.settings-page details[open] > summary {
+  margin-bottom: var(--space-xs);
+}
+
+.notification-card,
+.status-page-list__row {
+  gap: var(--space-sm);
+  padding-block: var(--space-sm);
+}
+
+.notification-card__actions,
+.status-page-list__details {
+  gap: var(--space-sm);
+}
+
+@media (min-width: 64rem) {
+  .operator-slot-list .operator-row > .operator-controls {
+    grid-column: 2;
+    grid-row: 1;
+    grid-template-columns: minmax(12rem, 1fr) auto;
+    align-items: end;
+    width: min(100%, 34rem);
+    justify-self: end;
+  }
+
+  .operator-slot-list .operator-row > .operator-controls > .settings-note,
+  .operator-slot-list .operator-row > .operator-controls > .field-error {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 63.99rem) {
+  .settings-page--account,
+  .settings-page.operator-page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-page--account > .page-head,
+  .settings-page--account > .field-error,
+  .settings-page--account > .settings-card--actions,
+  .settings-page.operator-page > .page-head,
+  .settings-page.operator-page > .field-error,
+  .settings-page.operator-page > .operator-slot-list,
+  .settings-page.operator-page > .operator-list {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 39.99rem) {
+  .topbar__inner {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .topbar__nav {
+    display: flex;
+    flex-wrap: wrap;
+    grid-column: 1 / -1;
+    overflow: hidden;
+    padding-bottom: 0;
+    row-gap: var(--space-3xs);
+  }
+
+  .topbar__nav .brand {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .topbar__divider {
+    display: none;
+  }
+
+  .operator-slot-list .operator-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .operator-slot-list .operator-row > .button {
+    justify-self: start;
+  }
+
+  .operator-slot-list .operator-row > .operator-controls {
+    grid-column: 1;
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .status-problem-summary__list {
   display: grid;
   gap: var(--space-xs);
@@ -2830,5 +3105,111 @@ td {
   }
   .uptime-days {
     gap: 2px;
+  }
+}
+
+/* Keep compact admin controls inside narrow cards and let the two secondary
+   monitor filters share one row on phones. */
+@media (max-width: 55.99rem) {
+  .topbar__inner {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .topbar__nav {
+    display: flex;
+    flex-wrap: wrap;
+    grid-column: 1 / -1;
+    row-gap: var(--space-3xs);
+  }
+}
+
+.settings-page.operator-page .operator-budget,
+.settings-page.operator-page .operator-controls,
+.settings-page.operator-page .operator-controls > *,
+.settings-page.operator-page .operator-capacity-details {
+  min-width: 0;
+}
+
+.settings-page.operator-page .operator-capacity {
+  grid-column: 1 / -1;
+}
+
+.settings-page.operator-page .operator-capacity > .operator-controls {
+  grid-template-columns: minmax(10rem, 16rem) auto;
+  justify-content: start;
+}
+
+.monitor-row {
+  padding-block: var(--space-sm);
+}
+
+.settings-page.operator-page .operator-budget__coverage {
+  overflow-wrap: anywhere;
+}
+
+.settings-page.operator-page .operator-capacity-details {
+  width: 100%;
+}
+
+.settings-page.operator-page .operator-controls input:not([type='checkbox']),
+.settings-page.operator-page .operator-controls select {
+  width: 100%;
+}
+
+@media (max-width: 39.99rem) {
+  .settings-page.operator-page .operator-controls {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .monitor-row {
+    grid-template-columns: auto repeat(2, minmax(0, 1fr));
+  }
+
+  .monitor-row__identity,
+  .monitor-row__schedule {
+    grid-column: 2 / -1;
+  }
+
+  .monitor-row__regions {
+    grid-column: 2;
+  }
+
+  .monitor-row > .tnum {
+    grid-column: 3;
+    text-align: right;
+  }
+
+  .page-head__actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .page-head__actions > .button {
+    min-width: 0;
+  }
+
+  .settings-page.operator-page .operator-capacity > .operator-controls {
+    grid-template-columns: minmax(0, 1fr);
+    justify-content: stretch;
+  }
+
+  .settings-page.operator-page .operator-controls__admission {
+    min-height: 2.5rem;
+    padding-bottom: 0;
+  }
+
+  .monitor-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .monitor-filters > .field:first-child,
+  .monitor-filters > .button {
+    grid-column: 1 / -1;
+  }
+
+  .monitor-filters > .button {
+    justify-self: start;
   }
 }

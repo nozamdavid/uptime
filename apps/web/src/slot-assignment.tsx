@@ -29,7 +29,7 @@ export function SlotAssignment({
     }
   }
   return (
-    <form className="operator-controls" onSubmit={submit}>
+    <form className="operator-controls slot-assignment" onSubmit={submit}>
       <label>
         Assign {bindingName} to
         <select
