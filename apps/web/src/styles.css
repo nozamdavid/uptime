@@ -2631,6 +2631,14 @@ select {
   gap: var(--space-sm);
 }
 
+.notifications-page .state {
+  padding-block: var(--space-lg);
+}
+
+.notifications-page > .state > .button {
+  justify-self: start;
+}
+
 @media (min-width: 64rem) {
   .operator-slot-list .operator-row > .operator-controls {
     grid-column: 2;
