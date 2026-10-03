@@ -59,7 +59,6 @@ export function LandingPage() {
             <InterestForm />
           </>
         )}
-        <p className="landing__note">Only identification is requested</p>
         <details className="landing__disclosure">
           <summary>What we store</summary>
           <p>

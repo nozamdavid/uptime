@@ -56,7 +56,7 @@ describe('free product shell', () => {
     expect(html).toContain('I&#x27;m interested!');
     expect(html).toContain('href="https://bsky.app/profile/noz.am"');
     expect(html).toContain('@noz.am');
-    expect(html).toContain('Only identification is requested');
+    expect(html).not.toContain('Only identification is requested');
     expect(html).not.toContain('Sign-in tokens are encrypted');
   });
 
