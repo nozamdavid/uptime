@@ -43,12 +43,8 @@ export function LandingPage() {
         <span className="mono-label">COMING SOON</span>
       </header>
       <section className="landing__hero">
-        <p className="mono-label">UPTIME FOR SMALL SYSTEMS</p>
-        <h1>Simple uptime monitoring for indie developers and small teams.</h1>
-        <p className="landing__lede">
-          We’re shaping a focused way to watch the services that matter. Join the interest list for
-          early access.
-        </p>
+        <h1>Simple uptime monitoring</h1>
+        <p className="landing__lede">Let me know if you are interested</p>
         {interestState === 'confirmed' ? (
           <p role="status">Thanks, @{interestSignup?.handle} is on the interest list.</p>
         ) : interestState === 'loading' ? (
@@ -63,27 +59,19 @@ export function LandingPage() {
             <InterestForm />
           </>
         )}
-        <p className="landing__note">
-          Identity only: we record your DID and handle. No password, posts, follows, or write
-          permission.
-        </p>
-      </section>
-      <section className="landing__policies" aria-label="Policies">
-        <p id="privacy">
-          <strong>Privacy.</strong> We save your verified AT Protocol DID, handle, and signup date
-          for this interest check. Sign-in tokens are encrypted. The list is visible to the service
-          owner. Joining does not create a monitoring workspace.
-        </p>
-        <p id="terms">
-          <strong>Coming soon.</strong> This is an interest list while we prepare the release.
-          Joining is free and does not guarantee a launch date or early access.
-        </p>
+        <p className="landing__note">Only identification is requested</p>
+        <details className="landing__disclosure">
+          <summary>What we store</summary>
+          <p>
+            Your verified AT Protocol DID, handle, and signup date, for this interest check only.
+            The list is visible to the service owner. Joining is free, creates no monitoring
+            workspace, and does not guarantee a launch date or early access.
+          </p>
+        </details>
       </section>
       <footer className="landing__footer">
         <span>Built for independent builders.</span>
-        <span>
-          <a href="#privacy">Privacy</a> · <a href="/operator">Operator</a>
-        </span>
+        <a href="/operator">Operator</a>
       </footer>
     </main>
   );
