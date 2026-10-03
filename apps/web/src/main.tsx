@@ -2,6 +2,7 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  Link,
   Outlet,
   RouterProvider,
   useNavigate,
@@ -116,28 +117,48 @@ export function isPublicMonitorPath(pathname: string) {
   return pathname.startsWith('/monitors/public/') || pathname.startsWith('/status/');
 }
 
-function AppShell() {
+export function AppShell() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const isPublicRoute = isPublicMonitorPath(pathname);
   const isPublicStatusPage = pathname.startsWith('/status/');
   const isLanding = pathname === '/';
   const isAuthRoute = pathname === '/login' || pathname === '/signup';
   const [session, setSession] = useState<ProductSession | null>(null);
+  const sessionGeneration = useRef(0);
   const [authenticated, setAuthenticated] = useState<boolean | null>(
     isLanding || isAuthRoute ? false : null,
   );
+  const clearSession = () => {
+    sessionGeneration.current += 1;
+    window.sessionStorage.removeItem('uptime.workspaceId');
+    setSession(null);
+    setAuthenticated(false);
+  };
   useEffect(() => {
     if (isPublicRoute || isLanding || isAuthRoute) return;
+    let active = true;
+    const generation = sessionGeneration.current;
+    setAuthenticated(null);
     api
       .session()
       .then((result) => {
+        if (!active || generation !== sessionGeneration.current) return;
         setSession(result);
         if (result.workspace?.id)
           window.sessionStorage.setItem('uptime.workspaceId', result.workspace.id);
         setAuthenticated(true);
       })
-      .catch(() => setAuthenticated(false));
+      .catch(() => {
+        if (active && generation === sessionGeneration.current) clearSession();
+      });
+    return () => {
+      active = false;
+    };
   }, [isPublicRoute, isLanding, isAuthRoute]);
+  useEffect(() => {
+    window.addEventListener('uptime:session-expired', clearSession);
+    return () => window.removeEventListener('uptime:session-expired', clearSession);
+  }, []);
   if (isLanding)
     return (
       <main className="public-workspace">
@@ -165,18 +186,33 @@ function AppShell() {
       </div>
     );
   if (!authenticated)
-    return <AuthPage mode="login" onAuthenticated={() => setAuthenticated(true)} />;
+    return (
+      <AuthPage
+        mode="login"
+        onAuthenticated={() => {
+          const generation = sessionGeneration.current;
+          void api
+            .session()
+            .then((result) => {
+              if (generation !== sessionGeneration.current) return;
+              setSession(result);
+              if (result.workspace?.id)
+                window.sessionStorage.setItem('uptime.workspaceId', result.workspace.id);
+              setAuthenticated(true);
+            })
+            .catch(() => {
+              if (generation === sessionGeneration.current) clearSession();
+            });
+        }}
+      />
+    );
   const allowRestrictedRoute = pathname === '/settings' || pathname === '/operator';
   return (
     <ProductSessionContext.Provider value={session}>
       <Workspace
         allowRestrictedRoute={allowRestrictedRoute}
         session={session}
-        onSignOut={() => {
-          window.sessionStorage.removeItem('uptime.workspaceId');
-          setSession(null);
-          setAuthenticated(false);
-        }}
+        onSignOut={clearSession}
       >
         <Outlet />
       </Workspace>
@@ -248,9 +284,7 @@ function Workspace({
       <header className="topbar">
         <div className="topbar__inner">
           <nav className="topbar__nav" aria-label="Admin sections">
-            <a className="brand" href="/app">
-              Monitors
-            </a>
+            <SectionLink to="/app">Monitors</SectionLink>
             {session?.workspaces && session.workspaces.length > 1 && (
               <label className="workspace-switcher">
                 <span className="sr-only">Workspace</span>
@@ -270,23 +304,15 @@ function Workspace({
               </label>
             )}
             <span className="topbar__divider" aria-hidden="true" />
-            <a className="brand" href="/status-pages">
-              Status pages
-            </a>
+            <SectionLink to="/status-pages">Status pages</SectionLink>
             <span className="topbar__divider" aria-hidden="true" />
-            <a className="brand" href="/notifications">
-              Notifications
-            </a>
+            <SectionLink to="/notifications">Notifications</SectionLink>
             <span className="topbar__divider" aria-hidden="true" />
-            <a className="brand" href="/settings">
-              Settings
-            </a>
+            <SectionLink to="/settings">Settings</SectionLink>
             {session?.isOperator && (
               <>
                 <span className="topbar__divider" aria-hidden="true" />
-                <a className="brand" href="/operator">
-                  Operator
-                </a>
+                <SectionLink to="/operator">Operator</SectionLink>
               </>
             )}
           </nav>
@@ -420,6 +446,31 @@ function Workspace({
   );
 }
 
+function SectionLink({
+  to,
+  children,
+}: {
+  to: '/app' | '/status-pages' | '/notifications' | '/settings' | '/operator';
+  children: React.ReactNode;
+}) {
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const isActive =
+    to === '/app'
+      ? pathname === '/app' || pathname.startsWith('/monitors/')
+      : pathname === to || pathname.startsWith(`${to}/`);
+  return (
+    <Link
+      className="brand"
+      to={to}
+      activeOptions={{ exact: false }}
+      activeProps={{ 'aria-current': 'page' }}
+      aria-current={isActive ? 'page' : undefined}
+    >
+      {children}
+    </Link>
+  );
+}
+
 function Overview() {
   const [formOpen, setFormOpen] = useState(false);
   const [reload, setReload] = useState(0);
@@ -550,4 +601,7 @@ function State({
     </div>
   );
 }
-createRoot(document.getElementById('root')!).render(<RouterProvider router={router} />);
+export { router };
+
+const rootElement = document.getElementById('root');
+if (rootElement) createRoot(rootElement).render(<RouterProvider router={router} />);

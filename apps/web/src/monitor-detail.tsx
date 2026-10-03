@@ -1,4 +1,5 @@
 import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { AppLink } from './app-link.js';
 import {
   Bar,
   BarChart,
@@ -299,13 +300,13 @@ export function MonitorDetail({
       <div className="page-head">
         <div>
           {publicMode && statusPageId ? (
-            <a href={`/status/${encodeURIComponent(statusPageId)}`} className="back-link">
+            <AppLink href={`/status/${encodeURIComponent(statusPageId)}`} className="back-link">
               ← Back to status page
-            </a>
+            </AppLink>
           ) : !publicMode ? (
-            <a href="/" className="back-link">
+            <AppLink href="/app" className="back-link">
               ← Monitors
-            </a>
+            </AppLink>
           ) : null}
           <p className="mono-label">
             {status === 'unknown' ? 'AWAITING CURRENT RESULT' : status.toUpperCase()}

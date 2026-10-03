@@ -89,9 +89,9 @@ export function StatusPagesIndex() {
           <p>Group monitors into a public, ninety-day service history.</p>
         </div>
         {canWrite && (
-          <a className="button button--primary" href="/status-pages/new">
+          <AppLink className="button button--primary" href="/status-pages/new">
             Add status page
-          </a>
+          </AppLink>
         )}
       </div>
       {error ? (
@@ -104,11 +104,11 @@ export function StatusPagesIndex() {
         <div className="status-page-list">
           {pages.map((page) => (
             <div className="status-page-list__row" key={page.id}>
-              <a className="status-page-list__details" href={`/status-pages/${page.id}`}>
+              <AppLink className="status-page-list__details" href={`/status-pages/${page.id}`}>
                 <strong>{page.title}</strong>
                 <span>{page.monitorCount} monitors</span>
                 <small>Updated {new Date(page.updatedAt).toLocaleString()}</small>
-              </a>
+              </AppLink>
               <a
                 className="status-page-list__external"
                 href={`/status/${page.publicSlug ?? page.id}${workspaceSearch(session)}`}
@@ -932,3 +932,4 @@ function reorder<T>(items: T[], source: number, target: number) {
   if (item !== undefined) next.splice(target, 0, item);
   return next;
 }
+import { AppLink } from './app-link.js';

@@ -265,6 +265,13 @@ async function request<T>(
     ...(requestHeaders ? { headers: requestHeaders } : {}),
   });
   if (!response.ok) {
+    if (
+      response.status === 401 &&
+      credentials !== 'omit' &&
+      !path.startsWith('/auth/') &&
+      typeof window !== 'undefined'
+    )
+      window.dispatchEvent(new Event('uptime:session-expired'));
     const error = (await response.json().catch(() => undefined)) as ApiError | undefined;
     throw new RequestError(
       error?.error.message ?? `Request failed (${response.status})`,
