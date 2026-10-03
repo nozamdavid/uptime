@@ -146,6 +146,12 @@ the status-page cohort. Monitor refresh uses the `MONITOR_REFRESH` Workflow bind
 The `reports` row in the D1 `jobs` table records duration, statement count, and
 native query metrics. Report publication has a 100-statement ceiling.
 
+Migration `0013` retires the unused observation changefeed triggers. Reporting
+no longer reads or cleans that feed; its table remains for rollback compatibility.
+Hourly dirty keys still drive latency aggregation. `REPORT_SCHEDULE_DISABLED=true`
+skips publication without claiming the separate reporter's lease or changing its
+metrics.
+
 ## On-demand monitor reports
 
 Public monitor snapshots use persisted hourly latency aggregates for closed
