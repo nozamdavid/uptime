@@ -3,6 +3,7 @@ import type { FormEvent } from 'react';
 import { api } from './api.js';
 import type { ProductSession } from './api.js';
 import { SlotAssignment } from './slot-assignment.js';
+import { AppLink } from './app-link.js';
 
 export const ProductSessionContext = createContext<ProductSession | null>(null);
 export function useProductSession() {
@@ -312,7 +313,7 @@ export function SettingsPage() {
     }
   }
   return (
-    <section className="settings-page">
+    <section className="settings-page settings-page--account">
       <div className="page-head">
         <div>
           <p className="mono-label">ACCOUNT</p>
@@ -396,9 +397,9 @@ export function SettingsPage() {
                 </span>
                 <span>
                   {invitation.role} · expires in 7 days{' '}
-                  <a href={`/settings?invite=${encodeURIComponent(invitation.id)}`}>
+                  <AppLink href={`/settings?invite=${encodeURIComponent(invitation.id)}`}>
                     Share accept link
-                  </a>
+                  </AppLink>
                 </span>
               </div>
             ))}
@@ -512,7 +513,7 @@ export function OperatorPage() {
       </section>
     );
   return (
-    <section className="settings-page">
+    <section className="settings-page operator-page">
       <div className="page-head">
         <div>
           <p className="mono-label">FOUNDER VIEW</p>
@@ -600,20 +601,23 @@ export function OperatorPage() {
             {interest.signups.length === 0 ? (
               <p>No signups yet.</p>
             ) : (
-              <div className="operator-list">
-                {interest.signups.map((signup) => (
-                  <div className="operator-row" key={signup.did}>
-                    <div>
-                      <strong>@{signup.handle}</strong>
-                      <small>{signup.did}</small>
+              <details className="operator-interest">
+                <summary>View {interest.signups.length} recent signups</summary>
+                <div className="operator-list">
+                  {interest.signups.map((signup) => (
+                    <div className="operator-row" key={signup.did}>
+                      <div>
+                        <strong>@{signup.handle}</strong>
+                        <small>{signup.did}</small>
+                      </div>
+                      <small>{new Date(signup.createdAt).toLocaleDateString()}</small>
                     </div>
-                    <small>{new Date(signup.createdAt).toLocaleDateString()}</small>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              </details>
             )}
           </article>
-          <article className="settings-card operator-budget">
+          <article className="settings-card operator-budget operator-capacity">
             <h2>Capacity pool</h2>
             <p>
               {slots.availableSlots} available · {slots.assignedSlots} assigned · {slots.heldSlots}{' '}
@@ -657,72 +661,75 @@ export function OperatorPage() {
                 {savingControls ? 'Saving…' : 'Save limit'}
               </button>
             </form>
-            <div className="operator-list">
-              {slots.slots.map((slot) => (
-                <div className="operator-row" key={slot.bindingName}>
-                  <div>
-                    <strong>
-                      {slot.kind === 'staging_import'
-                        ? 'Imported staging monitors'
-                        : slot.bindingName}
-                    </strong>
-                    <small>
-                      {slot.status === 'assigned'
-                        ? `Assigned to ${slot.ownerHandle ?? slot.workspaceId ?? 'workspace'}`
-                        : slot.status === 'deleting'
-                          ? 'Deleting'
-                          : slot.admissionEnabled
-                            ? 'Available'
-                            : 'Held'}
-                    </small>
-                  </div>
-                  {slot.kind !== 'staging_import' &&
-                    slot.status === 'available' &&
-                    slot.workspaceId === null && (
-                      <button
-                        className="button button--quiet"
-                        disabled={savingControls}
-                        onClick={() => {
-                          setSavingControls(true);
-                          setControlError('');
-                          void api
-                            .setSlotAdmission(slot.bindingName, !slot.admissionEnabled)
-                            .then(setSlots)
-                            .catch((reason) =>
-                              setControlError(
-                                reason instanceof Error
-                                  ? reason.message
-                                  : 'Could not update slot admission',
-                              ),
-                            )
-                            .finally(() => setSavingControls(false));
-                        }}
-                      >
-                        {slot.admissionEnabled ? 'Hold' : 'Make available'}
-                      </button>
-                    )}
-                  {slot.status === 'available' && slot.workspaceId === null && (
-                    <SlotAssignment
-                      bindingName={slot.bindingName}
-                      imported={slot.kind === 'staging_import'}
-                      signups={interest.signups.filter(
-                        (signup) => signup.did !== session?.user?.did,
+            <details className="operator-capacity-details">
+              <summary>Manage {slots.configuredSlots} database slots</summary>
+              <div className="operator-list operator-slot-list">
+                {slots.slots.map((slot) => (
+                  <div className="operator-row" key={slot.bindingName}>
+                    <div>
+                      <strong>
+                        {slot.kind === 'staging_import'
+                          ? 'Imported staging monitors'
+                          : slot.bindingName}
+                      </strong>
+                      <small>
+                        {slot.status === 'assigned'
+                          ? `Assigned to ${slot.ownerHandle ?? slot.workspaceId ?? 'workspace'}`
+                          : slot.status === 'deleting'
+                            ? 'Deleting'
+                            : slot.admissionEnabled
+                              ? 'Available'
+                              : 'Held'}
+                      </small>
+                    </div>
+                    {slot.kind !== 'staging_import' &&
+                      slot.status === 'available' &&
+                      slot.workspaceId === null && (
+                        <button
+                          className="button button--quiet"
+                          disabled={savingControls}
+                          onClick={() => {
+                            setSavingControls(true);
+                            setControlError('');
+                            void api
+                              .setSlotAdmission(slot.bindingName, !slot.admissionEnabled)
+                              .then(setSlots)
+                              .catch((reason) =>
+                                setControlError(
+                                  reason instanceof Error
+                                    ? reason.message
+                                    : 'Could not update slot admission',
+                                ),
+                              )
+                              .finally(() => setSavingControls(false));
+                          }}
+                        >
+                          {slot.admissionEnabled ? 'Hold' : 'Make available'}
+                        </button>
                       )}
-                      onAssigned={async () => {
-                        const [inventory, workspaces] = await Promise.all([
-                          api.operatorSlots(),
-                          api.operatorWorkspaces(),
-                        ]);
-                        setSlots(inventory);
-                        setData(workspaces);
-                      }}
-                    />
-                  )}
-                </div>
-              ))}
-            </div>
+                    {slot.status === 'available' && slot.workspaceId === null && (
+                      <SlotAssignment
+                        bindingName={slot.bindingName}
+                        imported={slot.kind === 'staging_import'}
+                        signups={interest.signups.filter(
+                          (signup) => signup.did !== session?.user?.did,
+                        )}
+                        onAssigned={async () => {
+                          const [inventory, workspaces] = await Promise.all([
+                            api.operatorSlots(),
+                            api.operatorWorkspaces(),
+                          ]);
+                          setSlots(inventory);
+                          setData(workspaces);
+                        }}
+                      />
+                    )}
+                  </div>
+                ))}
+              </div>
+            </details>
           </article>
-          <div className="operator-list">
+          <div className="operator-list operator-workspaces">
             {data.workspaces?.map((workspace) => {
               const canSuspend =
                 workspace.state === 'active' ||
@@ -737,9 +744,16 @@ export function OperatorPage() {
                       {workspace.ownerHandle} · {workspace.ownerDid} · {workspace.state}
                     </p>
                     <small>
-                      {workspace.monitorCount} monitors · {workspace.rowsRead} rows read ·{' '}
-                      {workspace.rowsWritten} rows written · {workspace.storageBytes} bytes · last
-                      seen {workspace.lastSeenAt ?? 'never'}
+                      {workspace.monitorCount.toLocaleString()} monitors ·{' '}
+                      {workspace.rowsRead.toLocaleString()} rows read ·{' '}
+                      {workspace.rowsWritten.toLocaleString()} rows written ·{' '}
+                      {(workspace.storageBytes / 1_048_576).toLocaleString(undefined, {
+                        maximumFractionDigits: 2,
+                      })}{' '}
+                      MiB · last seen{' '}
+                      {workspace.lastSeenAt
+                        ? new Date(workspace.lastSeenAt).toLocaleString()
+                        : 'never'}
                     </small>
                   </div>
                   {canSuspend && (

@@ -310,7 +310,7 @@ export function MonitorList({
                   }
                 />
               )}
-              <a className="monitor-row" href={`/monitors/${item.monitor.id}`}>
+              <AppLink className="monitor-row" href={`/monitors/${item.monitor.id}`}>
                 <span
                   className={`status-dot status-dot--${item.status}`}
                   role="img"
@@ -332,7 +332,7 @@ export function MonitorList({
                   {item.monitor.regionIds.length === 1 ? '' : 's'}
                 </span>
                 <span className="tnum">{item.targetChecksPerDay.toLocaleString()} / day</span>
-              </a>
+              </AppLink>
             </div>
           );
         })}
@@ -341,3 +341,4 @@ export function MonitorList({
     </div>
   );
 }
+import { AppLink } from './app-link.js';
