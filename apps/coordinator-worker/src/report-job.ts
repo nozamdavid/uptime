@@ -1,7 +1,7 @@
 import { nowIso } from '@uptime/cloudflare';
 
 import type { ReportConfig } from './env.js';
-import { maintainLatencyChangefeed, publishDueReports } from './publisher.js';
+import { publishDueReports } from './publisher.js';
 import { meterDatabase, type QueryWorkByStage } from './query-metrics.js';
 import { refreshDirtyLatencyHours } from './hourly-latency.js';
 
@@ -70,11 +70,6 @@ export async function runReportJob(
   meter.setStatementLimit(100);
   try {
     if (dependencies.publicationDisabled) {
-      await maintainLatencyChangefeed(
-        { ...inputConfig, db: meter.db },
-        startedAt,
-        dependencies.jobLeaseToken,
-      );
       return metricsAt(startedAt, dependencies.now?.() ?? new Date(), meter, {
         scheduled: 0,
         published: 0,

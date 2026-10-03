@@ -37,7 +37,7 @@ function seedFleet(sqlite: ReturnType<typeof makeDatabase>['sqlite'], size: numb
   }
 }
 
-describe('report job status publication and obsolete feed maintenance', () => {
+describe('report job status publication', () => {
   it('compacts at most four completed monitor-hours separately from publication metrics', async () => {
     const { sqlite, db } = makeDatabase();
     seedFleet(sqlite, 6);
@@ -82,7 +82,7 @@ describe('report job status publication and obsolete feed maintenance', () => {
     expect(warm.queryWork.reports!.statements).toBeLessThan(25);
   });
 
-  it('cleans obsolete input in batches of at most 2000 even when publication is disabled', async () => {
+  it('does not read or delete retired feed rows when publication is disabled', async () => {
     const { sqlite, db } = makeDatabase();
     seedFleet(sqlite, 1);
     for (let index = 0; index < 2500; index += 1)
@@ -93,48 +93,26 @@ describe('report job status publication and obsolete feed maintenance', () => {
         .run('obsolete', `observation-${index}`);
     const before = count(sqlite, 'report_latency_changes');
     await runReportJob(config(db, null), { log, now: () => now, publicationDisabled: true });
-    expect(count(sqlite, 'report_latency_changes')).toBe(before - 2000);
-  });
-
-  it('preserves data under another report lease and fences an obsolete owner', async () => {
-    const { sqlite, db } = makeDatabase();
-    seedFleet(sqlite, 1);
-    sqlite
-      .prepare(
-        "INSERT INTO jobs (name, lease_token, lease_until) VALUES ('reports', 'active', '2099-01-01T00:00:00.000Z')",
-      )
-      .run();
-    const before = count(sqlite, 'report_latency_changes');
-    await runReportJob(config(db, null), { log, now: () => now });
     expect(count(sqlite, 'report_latency_changes')).toBe(before);
-    await expect(
-      runReportJob(config(db, null), { log, now: () => now, jobLeaseToken: 'obsolete' }),
-    ).rejects.toThrow('lease expired or changed');
-    await runReportJob(config(db, null), { log, now: () => now, jobLeaseToken: 'active' });
-    expect(count(sqlite, 'report_latency_changes')).toBe(0);
   });
 
-  it('fences cleanup when ownership changes immediately before mutation', async () => {
+  it('publishes and handles missing storage without the retired feed table', async () => {
     const { sqlite, db } = makeDatabase();
     seedFleet(sqlite, 1);
-    sqlite
-      .prepare(
-        "INSERT INTO jobs (name, lease_token, lease_until) VALUES ('reports', 'active', '2099-01-01T00:00:00.000Z')",
-      )
-      .run();
+    sqlite.exec('DROP TABLE report_latency_changes');
     const guarded = {
       ...db,
       prepare(query: string) {
-        if (query.includes('DELETE FROM report_latency_changes'))
-          sqlite
-            .prepare("UPDATE jobs SET lease_token = 'replacement' WHERE name = 'reports'")
-            .run();
+        if (query.includes('report_latency_changes')) throw new Error('Retired feed queried');
         return db.prepare(query);
       },
     };
-    const before = count(sqlite, 'report_latency_changes');
-    await runReportJob(config(guarded, null), { log, now: () => now, jobLeaseToken: 'active' });
-    expect(count(sqlite, 'report_latency_changes')).toBe(before);
+    const reports = new FakeR2();
+    expect((await runReportJob(config(guarded, reports), { log, now: () => now })).published).toBe(
+      1,
+    );
+    expect((await runReportJob(config(guarded, reports), { log, now: () => now })).skipped).toBe(1);
+    expect((await runReportJob(config(guarded, null), { log, now: () => now })).failed).toBe(0);
   });
 
   it('does not write public objects during disabled maintenance', async () => {

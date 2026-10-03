@@ -227,7 +227,6 @@ export async function publishDueReports(
 ): Promise<PublishResult> {
   if (!config.reports) {
     log.warn({ event: 'reports_binding_missing' });
-    await maintainLatencyChangefeed(config, now, jobLeaseToken);
     return { scheduled: 0, published: 0, removed: 0, skipped: 0, failed: 0 };
   }
   const reports = config.reports;
@@ -248,7 +247,6 @@ export async function publishDueReports(
     Math.floor(now.getTime() / (config.reportIntervalSeconds * 1_000)) <=
       Math.floor(Date.parse(pointer.generatedAt) / (config.reportIntervalSeconds * 1_000))
   ) {
-    await maintainLatencyChangefeed(config, now, jobLeaseToken);
     return { scheduled: 0, published: 0, removed: 0, skipped: desired.length, failed: 0 };
   }
   await maintainPublicationLease(true);
@@ -367,7 +365,6 @@ export async function publishDueReports(
       generatedAt,
     ],
   );
-  await maintainLatencyChangefeed(config, now, jobLeaseToken);
   if (config.monitorRefresh) {
     // Only committed page content may trigger refreshes. Recovery overrides the
     // summary in the public UI; historical affected regions alone are not issues.
@@ -410,23 +407,4 @@ export async function publishDueReports(
     skipped: 0,
     failed: 0,
   };
-}
-
-/** No scheduled raw-sample consumer remains; discard its obsolete feed in bounded batches. */
-export async function maintainLatencyChangefeed(
-  config: ReportConfig,
-  _now: Date,
-  jobLeaseToken?: string,
-): Promise<void> {
-  await renewReportLease(config.db, jobLeaseToken);
-  await run(
-    config.db,
-    `DELETE FROM report_latency_changes WHERE sequence IN (
-    SELECT sequence FROM report_latency_changes ORDER BY sequence LIMIT 2000
-  ) AND ((? IS NULL AND NOT EXISTS (
-    SELECT 1 FROM jobs WHERE name = 'reports' AND lease_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-  )) OR EXISTS (SELECT 1 FROM jobs WHERE name = 'reports' AND lease_token = ?
-    AND lease_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))`,
-    [jobLeaseToken ?? null, jobLeaseToken ?? null],
-  );
 }

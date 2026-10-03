@@ -109,7 +109,6 @@ The current publisher:
 
 - caches 89 closed UTC days in R2 and reads the current day from D1;
 - invalidates cached days after historical writes through migration `0007`;
-- consumes the observation changefeed added by migration `0008`;
 - publishes standalone monitors and status pages through the same atomic cohort;
 - keeps up to the configured sample limit (5,000 by default) per monitor in eight
   private R2 shards, with a 50,000-row limit per shard; dense shards retain fewer
@@ -121,7 +120,6 @@ The current publisher:
   up to five indexed monitor scans per D1 statement while retaining each monitor's
   row limit; recovery uses stored observations and completes in the same run;
 - refreshes latency ranges and percentiles at each monitor's configured cadence;
-- processes at most 2,000 ordered change events per report job;
 - renews the owning report lease at publication boundaries, only while its token
   still owns an unexpired lease, so slow storage reads do not abort progressing work; and
 - commits one cohort pointer only after every public object is ready.
@@ -129,14 +127,11 @@ The current publisher:
 The `reports` row in the D1 `jobs` table records duration, statement count, and
 native query metrics. Report publication has a 100-statement ceiling.
 
-Disabled publication still maintains the changefeed in batches of at most 2,000
-rows. `REPORT_SCHEDULE_DISABLED=true` runs maintenance without claiming the
-separate reporter's lease or changing its metrics. A recent consumer retains its
-unapplied input: maintenance uses its durable R2 sample cursor, or preserves its
-input when R2 is unavailable. After 24 hours without a cohort commit (or the
-configured interval plus 120 seconds, if longer), maintenance can discard an
-inactive consumer's feed. Live leases and a consumer timestamp check fence the
-deletion; sequence gaps force bounded graph bootstrapping when reports resume.
+Migration `0013` retires the unused observation changefeed triggers. Reporting
+no longer reads or cleans that feed; its table remains for rollback compatibility.
+Hourly dirty keys still drive latency aggregation. `REPORT_SCHEDULE_DISABLED=true`
+skips publication without claiming the separate reporter's lease or changing its
+metrics.
 
 ## On-demand monitor reports
 

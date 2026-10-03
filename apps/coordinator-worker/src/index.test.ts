@@ -215,7 +215,7 @@ describe('coordinator runtime dependencies', () => {
       startedAt: now.toISOString(),
       success: true,
     });
-    expect(count(sqlite, 'report_latency_changes')).toBeGreaterThan(0);
+    expect(count(sqlite, 'report_latency_changes')).toBe(0);
     sqlite
       .prepare(
         "INSERT INTO jobs (name, state_json) VALUES ('reports', '{\"reporterMetrics\":true}')",
