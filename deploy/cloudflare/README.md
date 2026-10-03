@@ -133,6 +133,11 @@ Hourly dirty keys still drive latency aggregation. `REPORT_SCHEDULE_DISABLED=tru
 skips publication without claiming the separate reporter's lease or changing its
 metrics.
 
+Migration `0014` removes redundant observation indexes on check-run ID and error
+code. The unique check-run/region index supports round lookups. Monitor-wide
+history, regional history, retention, and failed-result recovery retain their
+dedicated indexes; observation identity and duplicate protection remain intact.
+
 ## On-demand monitor reports
 
 Public monitor snapshots use persisted hourly latency aggregates for closed

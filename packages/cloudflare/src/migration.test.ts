@@ -244,7 +244,8 @@ describe('D1 initial migration', () => {
       (plan as { detail: string }[]).map((row) => row.detail).join('\n'),
     );
     expect(details[0]).toContain('check_runs_retention_idx');
-    expect(details[0]).toContain('observations_check_run_idx');
+    expect(details[0]).toContain('SEARCH o USING COVERING INDEX');
+    expect(details[0]).toContain('(check_run_id=?)');
     expect(details[1]).toContain('network_diagnostics_retention_idx');
     expect(details[2]).toContain('notification_deliveries_retention_idx');
     db.close();
@@ -310,6 +311,73 @@ describe('D1 initial migration', () => {
     for (const [name, detail] of Object.entries(details)) {
       if (name !== 'missingUptimeDays') expect(detail).not.toContain('USE TEMP B-TREE');
     }
+    db.close();
+  });
+
+  it('simplifies observation indexes without regressing lookup or uniqueness plans', () => {
+    const db = createTestDatabase();
+    const indexNames = db
+      .prepare(
+        `SELECT name FROM sqlite_schema
+         WHERE type = 'index' AND name IN ('observations_check_run_idx', 'observations_error_time_idx')`,
+      )
+      .all();
+    expect(indexNames).toEqual([]);
+
+    const checkRunPlan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN SELECT check_run_id, region_id FROM observations
+         WHERE check_run_id = ?`,
+      )
+      .all('run-1') as { detail: string }[];
+    const checkRunDetails = checkRunPlan.map((row) => row.detail).join('\n');
+    expect(checkRunDetails).toContain('SEARCH observations USING COVERING INDEX');
+    expect(checkRunDetails).toContain('(check_run_id=?)');
+    expect(checkRunDetails).not.toContain('SCAN observations');
+
+    const monitorId = insertMonitor(db);
+    db.prepare(
+      `INSERT INTO check_runs
+         (id, monitor_id, window_started_at, expected_region_count, monitor_url, timeout_ms, deadline_at)
+       VALUES ('run-unique-1', ?, '2026-09-20T10:00:00.000Z', 1,
+         'https://example.com/health', 1000, '2026-09-20T10:01:00.000Z')`,
+    ).run(monitorId);
+    db.prepare(
+      `INSERT INTO check_runs
+         (id, monitor_id, window_started_at, expected_region_count, monitor_url, timeout_ms, deadline_at)
+       VALUES ('run-unique-2', ?, '2026-09-20T11:00:00.000Z', 1,
+         'https://example.com/health', 1000, '2026-09-20T11:01:00.000Z')`,
+    ).run(monitorId);
+    const observation = db.prepare(
+      `INSERT INTO observations
+         (id, check_run_id, monitor_id, region_id, scheduled_window, status, success, started_at)
+       VALUES (?, ?, ?, 'us-east', ?, 'success', 1, ?)`,
+    );
+    observation.run(
+      'observation-unique-1',
+      'run-unique-1',
+      monitorId,
+      '2026-09-20T10:00:00.000Z',
+      '2026-09-20T10:00:05.000Z',
+    );
+    expect(() =>
+      observation.run(
+        'observation-unique-2',
+        'run-unique-2',
+        monitorId,
+        '2026-09-20T10:00:00.000Z',
+        '2026-09-20T11:00:05.000Z',
+      ),
+    ).toThrow(/UNIQUE constraint failed/);
+    expect(() =>
+      observation.run(
+        'observation-unique-3',
+        'run-unique-1',
+        monitorId,
+        '2026-09-20T10:01:00.000Z',
+        '2026-09-20T10:01:05.000Z',
+      ),
+    ).toThrow(/UNIQUE constraint failed/);
     db.close();
   });
 
