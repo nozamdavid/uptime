@@ -51,9 +51,20 @@ beforeEach(() => {
 describe('free product shell', () => {
   it('presents a modest identity-only interest signup', () => {
     const html = renderToStaticMarkup(createElement(LandingPage));
-    expect(html).toContain('Simple uptime monitoring for indie developers and small teams.');
+    expect(html).toContain('Simple uptime monitoring');
+    expect(html).toContain('Let me know if you are interested');
     expect(html).toContain('Join interest list');
-    expect(html).toContain('No password, posts, follows, or write permission.');
+    expect(html).toContain('Only identification is requested');
+    expect(html).not.toContain('Sign-in tokens are encrypted');
+  });
+
+  it('keeps the landing page in one viewport with the storage policy collapsed', () => {
+    const html = renderToStaticMarkup(createElement(LandingPage));
+    expect(html).toContain('landing__disclosure');
+    expect(html).toContain('<summary>What we store</summary>');
+    // The landing page must not render the old always-expanded policy section.
+    expect(html).not.toContain('landing__policies');
+    expect(html).not.toContain('id="privacy"');
   });
 
   it('starts an AT Protocol authorization request with the entered handle', async () => {
