@@ -91,10 +91,19 @@ describe('hosted control plane', () => {
     };
     Object.assign(context.env, {
       IMPORTED_API: {
+        prepare: () => {
+          throw new Error('service binding must not be treated as D1');
+        },
         fetch: (request: Request) =>
           worker.fetch(request, legacyEnv, {
             waitUntil: () => undefined,
           } as unknown as ExecutionContext),
+      },
+      IMPORTED_REPORTER: {
+        prepare: () => {
+          throw new Error('service binding must not be treated as D1');
+        },
+        fetch: async () => new Response('report', { status: 200 }),
       },
     });
     const assign = () =>
@@ -140,6 +149,13 @@ describe('hosted control plane', () => {
         },
       } as unknown as R2Bucket,
     });
+    const monitorReport = await fetchHosted(
+      context,
+      `/reports/public/monitors/imported.json?workspace=${workspaceId}`,
+      '',
+    );
+    expect(monitorReport.status).toBe(200);
+    expect(await monitorReport.text()).toBe('report');
     const index = await fetchHosted(
       context,
       `/reports/public/status-pages.json?workspace=${workspaceId}`,

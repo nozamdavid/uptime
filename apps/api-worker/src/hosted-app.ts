@@ -83,7 +83,12 @@ export async function hostedFetch(
   const meters = new Map<string, MeteredDatabase>();
   const scopedEnv = { ...env };
   for (const [name, binding] of Object.entries(env)) {
-    if (binding && typeof (binding as D1Database).prepare === 'function') {
+    // Service RPC bindings also expose callable `prepare` properties. Keep fetchers intact.
+    if (
+      binding &&
+      typeof (binding as { fetch?: unknown }).fetch !== 'function' &&
+      typeof (binding as D1Database).prepare === 'function'
+    ) {
       const meter = meterDatabase(binding as D1Database);
       meters.set(name, meter);
       scopedEnv[name] = meter.db;
