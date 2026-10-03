@@ -52,8 +52,10 @@ describe('free product shell', () => {
   it('presents a modest identity-only interest signup', () => {
     const html = renderToStaticMarkup(createElement(LandingPage));
     expect(html).toContain('Simple uptime monitoring');
-    expect(html).toContain('Let me know if you are interested');
-    expect(html).toContain('Join interest list');
+    expect(html).toContain('Free early access soon');
+    expect(html).toContain('I&#x27;m interested!');
+    expect(html).toContain('href="https://bsky.app/profile/noz.am"');
+    expect(html).toContain('@noz.am');
     expect(html).toContain('Only identification is requested');
     expect(html).not.toContain('Sign-in tokens are encrypted');
   });
