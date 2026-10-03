@@ -29,6 +29,56 @@ function insertMonitor(
 }
 
 describe('D1 initial migration', () => {
+  it('retires report changefeed writes while retaining hourly latency dirtiness', () => {
+    const db = createTestDatabase();
+    const monitorId = insertMonitor(db);
+    db.prepare(
+      `INSERT INTO check_runs
+         (id, monitor_id, window_started_at, expected_region_count, monitor_url, timeout_ms, deadline_at)
+       VALUES ('run-feed-retirement', ?, '2026-09-20T10:00:00.000Z', 1,
+         'https://example.com/health', 1000, '2026-09-20T10:01:00.000Z')`,
+    ).run(monitorId);
+
+    db.prepare(
+      `INSERT INTO observations
+         (id, check_run_id, monitor_id, region_id, scheduled_window, status, success,
+          response_ms, started_at)
+       VALUES ('observation-feed-retirement', 'run-feed-retirement', ?, 'us-east',
+         '2026-09-20T10:00:00.000Z', 'success', 1, 42, '2026-09-20T10:00:03.000Z')`,
+    ).run(monitorId);
+
+    expect(db.prepare('SELECT COUNT(*) AS count FROM report_latency_changes').get()).toEqual({
+      count: 0,
+    });
+    expect(db.prepare('SELECT monitor_id, hour FROM monitor_latency_dirty').all()).toEqual([
+      { monitor_id: monitorId, hour: '2026-09-20T10:00:00.000Z' },
+    ]);
+
+    db.prepare(
+      `INSERT INTO monitor_latency_hourly (monitor_id, hour, region_id, payload)
+       VALUES (?, '2026-09-20T09:00:00.000Z', 'us-east', '{}')`,
+    ).run(monitorId);
+    db.prepare('DELETE FROM observations WHERE id = ?').run('observation-feed-retirement');
+
+    expect(db.prepare('SELECT COUNT(*) AS count FROM report_latency_changes').get()).toEqual({
+      count: 0,
+    });
+    expect(
+      db.prepare('SELECT monitor_id, hour FROM monitor_latency_dirty ORDER BY hour').all(),
+    ).toEqual([{ monitor_id: monitorId, hour: '2026-09-20T10:00:00.000Z' }]);
+    expect(
+      db.prepare('SELECT monitor_id, hour, region_id, payload FROM monitor_latency_hourly').all(),
+    ).toEqual([
+      {
+        monitor_id: monitorId,
+        hour: '2026-09-20T09:00:00.000Z',
+        region_id: 'us-east',
+        payload: '{}',
+      },
+    ]);
+    db.close();
+  });
+
   it('validates badge colors without exceeding the D1 GLOB pattern limit', () => {
     const db = createTestDatabase();
     db.prepare('INSERT INTO badges (name, color) VALUES (?, ?)').run('Valid', '#a1B2c3');
