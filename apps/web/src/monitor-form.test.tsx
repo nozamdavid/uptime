@@ -80,6 +80,8 @@ describe('nine-region monitor form', () => {
     expect(html).toContain(
       'Shared workspace quota: 1 of 3 saved monitors. Up to 2 regions per monitor.',
     );
+    expect(html).not.toContain('Public sharing is unavailable on the Free plan.');
+    expect(html).toContain('The Free plan fixes check frequency at every 5 minutes.');
     expect(html).not.toContain('Verify this origin before monitoring it.');
   });
 
@@ -704,7 +706,7 @@ describe('nine-region monitor form', () => {
     expect(html).toContain('Monitor limit reached');
   });
 
-  it('submits a public HTTPS URL without hostname ownership proof', async () => {
+  it('submits public sharing on a hosted free monitor without hostname ownership proof', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const payload = url.endsWith('/api/regions')
@@ -778,6 +780,14 @@ describe('nine-region monitor form', () => {
     await act(async () => {
       urlInput.dispatchEvent(new Event('input', { bubbles: true }));
     });
+    const sharingCheckbox = [
+      ...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+    ].find((input) => input.parentElement?.textContent?.includes('Share this monitor publicly'))!;
+    expect(sharingCheckbox.disabled).toBe(false);
+    await act(async () => {
+      sharingCheckbox.click();
+    });
+    expect(sharingCheckbox.checked).toBe(true);
     await act(async () => {
       container
         .querySelector('.monitor-form')!
@@ -792,6 +802,7 @@ describe('nine-region monitor form', () => {
     expect(JSON.parse(String(createRequest?.[1]?.body))).toMatchObject({
       url: 'https://public-site.example.test/health',
       regionIds: ['us-east'],
+      isPublic: true,
     });
     expect(onSaved).toHaveBeenCalledOnce();
     expect(container.textContent).not.toContain('Verify this origin');

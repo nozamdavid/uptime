@@ -593,7 +593,11 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
                 </span>
               ))}
             </span>
-            <small>Schedules are aligned to UTC interval boundaries.</small>
+            <small>
+              {hostedFree
+                ? 'The Free plan fixes check frequency at every 5 minutes.'
+                : 'Schedules are aligned to UTC interval boundaries.'}
+            </small>
           </label>
           <label className="field">
             <span>Request timeout</span>
@@ -809,7 +813,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
             <input
               type="checkbox"
               checked={value.isPublic}
-              disabled={hostedFree || busy}
+              disabled={busy}
               onChange={(event) => set('isPublic', event.target.checked)}
               aria-describedby="public-sharing-help"
             />
