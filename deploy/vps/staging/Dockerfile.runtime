@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+# Minimal runtime image for pre-bundled Node server artifact.
+#
+# Build from this directory after copying server.mjs:
+#   docker build -t uptime-staging-api:vps-20261005 -f Dockerfile.runtime .
+# Or via docker compose:
+#   docker compose build
+FROM node:24-bookworm-slim
+
+ENV NODE_ENV=production
+WORKDIR /app
+
+# The bundled application artifact (produced by `pnpm --filter @uptime/api-worker build:node`).
+# It is self-contained JavaScript with no node_modules dependencies.
+COPY server.mjs ./server.mjs
+
+USER node
+EXPOSE 3001
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=5 \
+    CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.API_PORT||3001)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+
+STOPSIGNAL SIGTERM
+CMD ["node", "server.mjs"]

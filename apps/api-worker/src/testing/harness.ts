@@ -1,17 +1,17 @@
 import { createApiRouter, type AppDependencies } from '../app.js';
 import type { ApiConfig } from '../env.js';
 import { UrlPolicyError } from '../security.js';
+import { isPostgresUniqueViolation, type Database } from '@uptime/cloudflare/postgres';
 
 import type { CloudflareEnv } from '@uptime/cloudflare';
-import type { D1Database } from '@uptime/cloudflare';
 
 /**
- * Test harness that drives the Worker's router directly with the shared
- * `node:sqlite` D1 adapter, so tests exercise the real migration and queries.
+ * Test harness that drives the Worker's router directly with the PostgreSQL
+ * `Database` adapter, so tests exercise the real migration and queries.
  */
 
 export interface TestHarnessOptions extends AppDependencies {
-  db: D1Database;
+  db: Database;
   config?: Partial<ApiConfig>;
 }
 
@@ -72,7 +72,12 @@ export function buildTestApp(options: TestHarnessOptions): TestApp {
     async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
       const method = request.method.toUpperCase() as
-        'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS';
+        | 'GET'
+        | 'POST'
+        | 'PUT'
+        | 'PATCH'
+        | 'DELETE'
+        | 'OPTIONS';
       const matched = router.match(method, url.pathname);
       if (!matched) {
         if (router.hasPath(url.pathname)) {
@@ -127,6 +132,9 @@ function errorToResponse(error: unknown): Response {
   }
   if (error instanceof UrlPolicyError) {
     return errorJson(400, error.code, error.message);
+  }
+  if (isPostgresUniqueViolation(error)) {
+    return errorJson(409, 'slug_conflict', 'A unique constraint was violated');
   }
   console.error(error);
   return errorJson(500, 'internal_error', 'Unexpected server error');

@@ -1,6 +1,21 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseCoordinatorEnv } from './env.js';
+import { parseCoordinatorEnv as parseEnv, type CoordinatorEnv } from './env.js';
+import type { Database } from '@uptime/cloudflare/postgres';
+
+const database: Database = {
+  schema: 'env-test',
+  table: () => {
+    throw new Error('Environment parsing must not query tables');
+  },
+  query: async () => {
+    throw new Error('Environment parsing must not query PostgreSQL');
+  },
+  transaction: async () => {
+    throw new Error('Environment parsing must not open transactions');
+  },
+};
+const parseCoordinatorEnv = (source: CoordinatorEnv) => parseEnv(source, database);
 
 function baseEnv(overrides: Record<string, unknown> = {}) {
   return {
@@ -16,6 +31,10 @@ function baseEnv(overrides: Record<string, unknown> = {}) {
 }
 
 describe('coordinator env', () => {
+  it('requires an explicitly resolved PostgreSQL database', () => {
+    expect(() => parseEnv(baseEnv())).toThrow(/explicitly resolved PostgreSQL/);
+    expect(parseCoordinatorEnv(baseEnv()).db).toBe(database);
+  });
   it('parses bindings and applies documented defaults', () => {
     const config = parseCoordinatorEnv(baseEnv());
     expect(config.enabledRegionIds).toEqual(['us-east', 'eu-west']);

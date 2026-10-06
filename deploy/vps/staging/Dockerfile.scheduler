@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1
+# Minimal runtime image for the pre-bundled minute scheduler.
+#
+# Build from a directory holding scheduler.mjs and this file:
+#   docker build -t uptime-staging-scheduler:<tag> -f Dockerfile.scheduler .
+# The API image and container are not rebuilt or touched.
+FROM node:24-bookworm-slim
+
+ENV NODE_ENV=production
+WORKDIR /app
+
+# Produced by `pnpm --filter @uptime/coordinator-worker build:node`.
+# Self-contained JavaScript with no node_modules dependencies.
+COPY scheduler.mjs ./scheduler.mjs
+
+USER node
+
+# The scheduler listens on no port, so there is nothing for a healthcheck to probe.
+HEALTHCHECK NONE
+
+STOPSIGNAL SIGTERM
+CMD ["node", "scheduler.mjs"]

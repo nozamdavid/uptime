@@ -47,7 +47,7 @@ export function SlotAssignment({
       </label>
       {imported && (
         <p className="settings-note">
-          This existing staging monitor fleet and its history will belong to the assigned user.
+          This existing imported monitor fleet and its history will belong to the assigned user.
         </p>
       )}
       <button className="button button--quiet" disabled={busy || !ownerDid}>

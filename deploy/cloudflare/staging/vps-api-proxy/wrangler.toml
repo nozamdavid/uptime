@@ -1,0 +1,38 @@
+# Cloudflare Worker Proxy for Staging Node API on VPS.
+#
+# Routes traffic through Cloudflare Workers VPC HTTP Service Binding to the
+# loopback Node.js API (127.0.0.1:3001) on VPS 217.217.227.164 via Cloudflare
+# Tunnel 73f04432-509a-4aed-87fb-b94f67bbe41d.
+#
+# Live Worker identity: `uptime-staging-oauth-api`.
+# Cloudflare Pages (`deploy/cloudflare/staging/pages/wrangler.toml`) binds `OAUTH`
+# to `uptime-staging-oauth-api`.
+
+name = "uptime-staging-oauth-api"
+main = "src/index.ts"
+compatibility_date = "2026-08-30"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+# No cron: the Node server on the VPS runs reconcileScheduled on its own timer.
+[triggers]
+crons = []
+
+[limits]
+cpu_ms = 100
+
+[observability]
+enabled = true
+
+# VPC HTTP Service Binding to VPS loopback 127.0.0.1:3001
+# Tunnel: 73f04432-509a-4aed-87fb-b94f67bbe41d
+[[vpc_services]]
+binding = "STAGING_NODE_API"
+service_id = "01a10dc6-3059-7072-a158-bb56c702efcc"
+
+[vars]
+PUBLIC_ORIGIN = "https://uptime-staging.pages.dev"
+ENVIRONMENT = "staging"
+
+# Configure secret using Wrangler:
+#   npx wrangler secret put API_GATEWAY_TOKEN --config deploy/cloudflare/staging/vps-api-proxy/wrangler.toml

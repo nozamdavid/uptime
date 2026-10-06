@@ -7,7 +7,7 @@ import type {
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 
-import { api, RequestError } from './api.js';
+import { api, isImportedWorkspaceKind, RequestError } from './api.js';
 import { NotificationHistoryView } from './notification-history.js';
 import { useProductSession } from './product-shell.js';
 
@@ -118,7 +118,7 @@ export function NotificationsPage() {
   const hostedFree = Boolean(
     session?.user &&
     session.workspace?.plan === 'free' &&
-    session.workspace.kind !== 'staging_import',
+    !isImportedWorkspaceKind(session.workspace.kind),
   );
   const [services, setServices] = useState<NotificationService[] | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);

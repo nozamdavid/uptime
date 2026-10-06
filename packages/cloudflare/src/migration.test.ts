@@ -97,6 +97,32 @@ describe('D1 initial migration', () => {
     db.close();
   });
 
+  it('enforces configurable monitor and region caps in tenant SQL', () => {
+    const db = createTestDatabase();
+    db.prepare(
+      `INSERT INTO workspace_metadata(id,workspace_id,plan,monitor_limit,region_limit,allowed_region_ids)
+       VALUES(1,'workspace-policy','free',4,4,'["eu-west","us-east","asia","asia-east"]')`,
+    ).run();
+    const hostedMonitor = {
+      interval_seconds: 300,
+      timeout_ms: 10000,
+      outage_threshold: 2,
+      recovery_threshold: 1,
+    };
+    const monitorIds = Array.from({ length: 4 }, () => insertMonitor(db, hostedMonitor));
+    expect(() => insertMonitor(db, hostedMonitor)).toThrow(/free_monitor_limit/);
+
+    const region = db.prepare('INSERT INTO monitor_regions(monitor_id,region_id) VALUES(?,?)');
+    for (const regionId of ['eu-west', 'us-east', 'asia', 'asia-east'])
+      region.run(monitorIds[0]!, regionId);
+    expect(() => region.run(monitorIds[0]!, 'asia-south')).toThrow(/free_region_unavailable/);
+    db.prepare('UPDATE workspace_metadata SET allowed_region_ids = ? WHERE id = 1').run(
+      '["eu-west","us-east","asia","asia-east","asia-south"]',
+    );
+    expect(() => region.run(monitorIds[0]!, 'asia-south')).toThrow(/free_region_limit/);
+    db.close();
+  });
+
   it('preserves populated monitor badge links while replacing the constraint', () => {
     const db = new DatabaseSync(':memory:');
     db.exec('PRAGMA foreign_keys = ON');
@@ -126,7 +152,7 @@ describe('D1 initial migration', () => {
       .filter((name) => name.endsWith('.sql'))
       .sort();
     const blueskyMigration = migrations.find((name) => name.startsWith('0011_'))!;
-    for (const migration of migrations.filter((name) => name !== blueskyMigration)) {
+    for (const migration of migrations.filter((name) => name < blueskyMigration)) {
       db.exec(readFileSync(`${directory}/${migration}`, 'utf8'));
     }
 
@@ -174,6 +200,9 @@ describe('D1 initial migration', () => {
       `INSERT INTO notification_services (id, name, provider, config)
        VALUES ('service-bluesky', 'Bluesky', 'bluesky', '{"handle":"ops.example.com"}')`,
     ).run();
+    for (const migration of migrations.filter((name) => name > blueskyMigration)) {
+      db.exec(readFileSync(`${directory}/${migration}`, 'utf8'));
+    }
     expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     db.close();
   });

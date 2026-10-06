@@ -1,5 +1,178 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap');
 @import './tokens.css';
+
+/* Inter (400, 500, 600) */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/inter-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/inter-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/inter-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/inter-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/inter-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/inter-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+
+/* JetBrains Mono (400, 500, 600) */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+
+/* Space Grotesk (500, 600) */
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/space-grotesk-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/space-grotesk-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/space-grotesk-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/space-grotesk-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
 
 * {
   box-sizing: border-box;
@@ -416,23 +589,6 @@ small {
   padding: var(--space-sm);
   display: grid;
   gap: var(--space-xs);
-}
-.verification-box {
-  margin-top: var(--space-xs);
-  border: 1px solid var(--color-focus);
-  background: var(--color-paper);
-  padding: var(--space-sm);
-  display: grid;
-  gap: var(--space-xs);
-}
-.verification-box p {
-  margin: 0;
-  color: var(--color-muted);
-}
-.verification-box code {
-  overflow-wrap: anywhere;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
 }
 .operator-list {
   display: grid;
@@ -2588,14 +2744,36 @@ select {
   grid-column: 1 / -1;
 }
 
-.settings-page.operator-page > .operator-budget {
+.settings-page.operator-page > .settings-card,
+.settings-page.operator-page .operator-row > * {
   min-width: 0;
 }
 
 .settings-page.operator-page > .settings-card:has(> .operator-slot-list),
+.settings-page.operator-page > .settings-card:has(.operator-slots-grid),
+.settings-page.operator-page > .settings-card:has(> .operator-health),
+.settings-page.operator-page > .operator-tier-catalog,
 .settings-page.operator-page > details:has(.operator-slot-list),
 .settings-page.operator-page > .operator-list {
   grid-column: 1 / -1;
+}
+
+.settings-page.operator-page ul.operator-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-page.operator-page .operator-row {
+  overflow-wrap: anywhere;
+}
+
+.operator-workspaces > .operator-row {
+  align-items: flex-start;
+}
+
+.operator-workspaces > .operator-row > .button {
+  flex-shrink: 0;
 }
 
 .operator-budget__summary,
@@ -2604,7 +2782,7 @@ select {
 }
 
 .operator-controls {
-  grid-template-columns: auto minmax(10rem, 1fr) auto;
+  grid-template-columns: auto minmax(min(100%, 10rem), 1fr) auto;
   gap: var(--space-sm);
   margin-top: var(--space-sm);
 }
@@ -2622,6 +2800,78 @@ select {
   display: block;
   color: var(--color-muted);
   font-size: var(--text-xs);
+}
+
+.operator-workspace-limits {
+  margin-top: var(--space-2xs);
+  font-size: var(--text-sm);
+}
+
+.operator-limits {
+  margin-top: var(--space-xs);
+}
+
+.operator-limits > summary {
+  color: var(--color-ink);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.operator-limits__form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(min(100%, 8rem), 12rem));
+  align-items: end;
+  gap: var(--space-xs);
+  margin-top: var(--space-xs);
+}
+
+.operator-limits__form > label {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3xs);
+  color: var(--color-ink);
+  font-size: var(--text-sm);
+}
+
+.operator-limits__form input[type='number'] {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.operator-limits__form fieldset {
+  grid-column: 1 / -1;
+  min-width: 0;
+  border: var(--rule);
+  padding: var(--space-xs);
+}
+
+.operator-limits__form legend {
+  padding-inline: var(--space-3xs);
+  color: var(--color-ink);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.operator-limits__regions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs) var(--space-sm);
+}
+
+.operator-limits__regions label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  color: var(--color-ink-soft);
+  font-size: var(--text-sm);
+}
+
+.operator-limits__form > .field-error,
+.operator-limits__form > [role='status'] {
+  grid-column: 1 / -1;
 }
 
 .operator-slot-list {
@@ -2660,6 +2910,12 @@ select {
   list-style-position: outside;
 }
 
+.settings-page.operator-page .operator-interest > summary,
+.settings-page.operator-page .operator-capacity-details > summary,
+.settings-page.operator-page .operator-limits > summary {
+  margin-inline-start: 1em;
+}
+
 .settings-page details[open] > summary {
   margin-bottom: var(--space-xs);
 }
@@ -2687,7 +2943,7 @@ select {
   .operator-slot-list .operator-row > .operator-controls {
     grid-column: 2;
     grid-row: 1;
-    grid-template-columns: minmax(12rem, 1fr) auto;
+    grid-template-columns: minmax(min(100%, 12rem), 1fr) auto;
     align-items: end;
     width: min(100%, 34rem);
     justify-self: end;
@@ -3187,7 +3443,7 @@ select {
 }
 
 .settings-page.operator-page .operator-capacity > .operator-controls {
-  grid-template-columns: minmax(10rem, 16rem) auto;
+  grid-template-columns: minmax(min(100%, 10rem), 16rem) auto;
   justify-content: start;
 }
 
@@ -3206,12 +3462,19 @@ select {
 .settings-page.operator-page .operator-controls input:not([type='checkbox']),
 .settings-page.operator-page .operator-controls select {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 @media (max-width: 39.99rem) {
   .settings-page.operator-page .operator-controls {
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
+  }
+
+  .operator-limits__form {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .monitor-row {

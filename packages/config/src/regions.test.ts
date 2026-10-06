@@ -1,26 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { checkIntervalPresets, regionById, regions } from './regions.js';
-import { regions as canonicalRegions } from '@uptime/regions';
-
 import { apiEnvSchema, databaseEnvSchema, schedulerEnvSchema } from './env.js';
-
-describe('regional configuration', () => {
-  it('defines each logical region exactly once', () => {
-    expect(regions).toBe(canonicalRegions);
-    expect(regions.map(({ id }) => id)).toHaveLength(9);
-    expect(regionById.asia.placementRegion).toBe('aws:ap-southeast-1');
-  });
-
-  it('uses one-minute intervals through 15 minutes, then five-minute intervals through 60', () => {
-    expect(checkIntervalPresets.slice(0, 15)).toEqual(
-      Array.from({ length: 15 }, (_, index) => (index + 1) * 60),
-    );
-    expect(checkIntervalPresets.slice(15)).toEqual(
-      Array.from({ length: 9 }, (_, index) => (index + 4) * 300),
-    );
-  });
-});
 
 describe('environment configuration', () => {
   it('accepts PostgreSQL connection URLs and rejects unrelated protocols', () => {

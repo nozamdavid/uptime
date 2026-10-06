@@ -1,65 +1,67 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { sealProviderConfig } from '@uptime/api-worker/credentials';
+import type { Database } from '@uptime/cloudflare/postgres';
 
 import { processNotifications } from './notifications.js';
 import { NotificationDeliveryError } from './providers.js';
-import { count, makeDatabase, seedMonitor, seedObservation, seedRound } from './testing.js';
+import {
+  all,
+  count,
+  first,
+  seedMonitor,
+  seedObservation,
+  seedRound,
+  useTenantDatabase,
+} from './testing-postgres.js';
 
 const now = new Date('2026-09-20T10:00:00.000Z');
 const secret = 'y'.repeat(40);
 const log = { info: () => undefined, warn: () => undefined, error: () => undefined };
 
 async function addService(
-  sqlite: ReturnType<typeof makeDatabase>['sqlite'],
+  db: Database,
   id: string,
   provider: string,
   config: unknown,
   updatedAt = '2026-09-01T00:00:00.000Z',
 ): Promise<void> {
   const sealed = await sealProviderConfig(secret, config);
-  sqlite
-    .prepare(
-      `INSERT INTO notification_services (id, name, provider, enabled, config, updated_at)
-       VALUES (?, ?, ?, 1, ?, ?)`,
-    )
-    .run(id, id, provider, sealed, updatedAt);
+  await db.query(
+    `INSERT INTO ${db.table('notification_services')} (id, name, provider, enabled, config, updated_at)
+     VALUES ($1, $2, $3, 1, $4, $5)`,
+    [id, id, provider, sealed, updatedAt],
+  );
 }
 
-function link(
-  sqlite: ReturnType<typeof makeDatabase>['sqlite'],
-  monitorId: string,
-  serviceId: string,
-) {
-  sqlite
-    .prepare(
-      'INSERT INTO monitor_notification_services (monitor_id, notification_service_id) VALUES (?, ?)',
-    )
-    .run(monitorId, serviceId);
+async function link(db: Database, monitorId: string, serviceId: string) {
+  await db.query(
+    `INSERT INTO ${db.table('monitor_notification_services')} (monitor_id, notification_service_id) VALUES ($1, $2)`,
+    [monitorId, serviceId],
+  );
 }
 
-function deliveries(sqlite: ReturnType<typeof makeDatabase>['sqlite']) {
-  return sqlite
-    .prepare(
-      'SELECT kind, status, attempts, event_key, last_error FROM notification_deliveries ORDER BY created_at, kind',
-    )
-    .all() as Array<{
+async function deliveries(db: Database) {
+  return all<{
     kind: string;
     status: string;
     attempts: number;
     event_key: string;
     last_error: string | null;
-  }>;
+  }>(
+    db,
+    `SELECT kind, status, attempts, event_key, last_error FROM ${db.table('notification_deliveries')} ORDER BY created_at, kind`,
+  );
 }
 
-function seedOutage(sqlite: ReturnType<typeof makeDatabase>['sqlite'], monitorId: string): void {
-  seedRound(sqlite, {
+async function seedOutage(db: Database, monitorId: string): Promise<void> {
+  await seedRound(db, {
     id: `history-${monitorId}`,
     monitorId,
     windowStartedAt: '2026-09-20T09:59:00.000Z',
     status: 'complete',
     expectedRegions: ['us-east'],
   });
-  seedObservation(sqlite, {
+  await seedObservation(db, {
     checkRunId: `history-${monitorId}`,
     monitorId,
     regionId: 'us-east',
@@ -69,49 +71,67 @@ function seedOutage(sqlite: ReturnType<typeof makeDatabase>['sqlite'], monitorId
   });
 }
 
-function failHistoryWrites(db: ReturnType<typeof makeDatabase>['db']) {
-  return new Proxy(db, {
-    get(target, property, receiver) {
-      if (property === 'prepare') {
-        return (query: string) => {
-          const statement = target.prepare(query);
-          if (!query.includes('INSERT INTO notification_history')) return statement;
-          return new Proxy(statement, {
-            get(statementTarget, statementProperty, statementReceiver) {
-              if (statementProperty === 'run') {
-                return async () => {
-                  throw new Error('history storage unavailable');
-                };
-              }
-              return Reflect.get(statementTarget, statementProperty, statementReceiver);
-            },
-          });
-        };
+function failHistoryWrites(db: Database): Database {
+  return {
+    ...db,
+    async query<T extends object>(sql: string, values?: readonly unknown[]) {
+      if (sql.includes('INSERT INTO') && sql.includes(db.table('notification_history'))) {
+        throw new Error('history storage unavailable');
       }
-      return Reflect.get(target, property, receiver);
+      return db.query<T>(sql, values);
     },
-  });
+    transaction(callback) {
+      return db.transaction((tx) => callback(failHistoryWrites(tx)));
+    },
+  };
 }
+
+vi.setConfig({ testTimeout: 300_000, hookTimeout: 180_000 });
+const getFixture = useTenantDatabase();
+let fixture: Awaited<ReturnType<typeof getFixture>>;
+
+beforeAll(() => {
+  fixture = getFixture();
+});
+afterEach(async () => {
+  await fixture.adminDb.transaction(async (tx) => {
+    for (const table of [
+      'notification_history',
+      'notification_deliveries',
+      'monitor_notification_state',
+      'monitor_notification_services',
+      'observations',
+      'check_runs',
+      'notification_services',
+      'monitor_regions',
+      'monitors',
+    ])
+      await tx.query(`DELETE FROM ${tx.table(table)}`);
+  });
+}, 180_000);
+afterAll(async () => {
+  await fixture?.close();
+}, 180_000);
 
 describe('notification processing', () => {
   it.each([true, false])(
     'samples delivery claim and provider completion clocks (retry: %s)',
     async (retry) => {
-      const { sqlite, db } = makeDatabase();
-      const monitorId = seedMonitor(sqlite, { outageThreshold: 1 });
+      const { db } = fixture;
+      const monitorId = await seedMonitor(db, { outageThreshold: 1 });
       const serviceId = '00000000-0000-4000-8000-0000000000e1';
-      await addService(sqlite, serviceId, 'webhook', {
+      await addService(db, serviceId, 'webhook', {
         webhookUrl: 'https://hooks.example.test/notify',
       });
-      link(sqlite, monitorId, serviceId);
-      seedRound(sqlite, {
+      await link(db, monitorId, serviceId);
+      await seedRound(db, {
         id: 'clock-round',
         monitorId,
         windowStartedAt: now.toISOString(),
         status: 'complete',
         expectedRegions: ['us-east'],
       });
-      seedObservation(sqlite, {
+      await seedObservation(db, {
         checkRunId: 'clock-round',
         monitorId,
         regionId: 'us-east',
@@ -125,11 +145,10 @@ describe('notification processing', () => {
         now,
         liveNow: () => liveTime,
         fetch: (async () => {
-          claimedLease = (
-            sqlite.prepare('SELECT lease_until FROM notification_deliveries').get() as {
-              lease_until: string;
-            }
-          ).lease_until;
+          claimedLease = (await first<{ lease_until: string }>(
+            db,
+            `SELECT lease_until FROM ${db.table('notification_deliveries')}`,
+          ))!.lease_until;
           liveTime = new Date(liveTime.getTime() + 20_000);
           return new Response('{}', {
             status: retry ? 429 : 200,
@@ -143,9 +162,14 @@ describe('notification processing', () => {
         log,
       });
       expect(claimedLease).toBe('2026-09-20T10:02:30.000Z');
-      const delivery = sqlite
-        .prepare('SELECT status, next_attempt_at, sent_at FROM notification_deliveries')
-        .get() as { status: string; next_attempt_at: string; sent_at: string | null };
+      const delivery = (await first<{
+        status: string;
+        next_attempt_at: string;
+        sent_at: string | null;
+      }>(
+        db,
+        `SELECT status, next_attempt_at, sent_at FROM ${db.table('notification_deliveries')}`,
+      ))!;
       if (retry) {
         expect(delivery.status).toBe('pending');
         expect(delivery.next_attempt_at).toBe('2026-09-20T10:03:50.000Z');
@@ -157,25 +181,25 @@ describe('notification processing', () => {
   );
 
   it('creates one delivery per outage across all linked services, then sends it', async () => {
-    const { sqlite, db } = makeDatabase();
-    const monitorId = seedMonitor(sqlite, { outageThreshold: 1, recoveryThreshold: 1 });
-    await addService(sqlite, '00000000-0000-4000-8000-0000000000a1', 'telegram', {
+    const { db } = fixture;
+    const monitorId = await seedMonitor(db, { outageThreshold: 1, recoveryThreshold: 1 });
+    await addService(db, '00000000-0000-4000-8000-0000000000a1', 'telegram', {
       botToken: '123456:abcdefghijklmnopqrstuvwxyz',
       chatId: '-100123',
     });
-    await addService(sqlite, '00000000-0000-4000-8000-0000000000a2', 'webhook', {
+    await addService(db, '00000000-0000-4000-8000-0000000000a2', 'webhook', {
       webhookUrl: 'https://hooks.example.test/notify',
     });
-    link(sqlite, monitorId, '00000000-0000-4000-8000-0000000000a1');
-    link(sqlite, monitorId, '00000000-0000-4000-8000-0000000000a2');
-    seedRound(sqlite, {
+    await link(db, monitorId, '00000000-0000-4000-8000-0000000000a1');
+    await link(db, monitorId, '00000000-0000-4000-8000-0000000000a2');
+    await seedRound(db, {
       id: 'r1',
       monitorId,
       windowStartedAt: '2026-09-20T09:59:00.000Z',
       status: 'complete',
       expectedRegions: ['us-east', 'eu-west'],
     });
-    seedObservation(sqlite, {
+    await seedObservation(db, {
       checkRunId: 'r1',
       monitorId,
       regionId: 'us-east',
@@ -183,7 +207,7 @@ describe('notification processing', () => {
       success: false,
       startedAt: '2026-09-20T09:59:05.000Z',
     });
-    seedObservation(sqlite, {
+    await seedObservation(db, {
       checkRunId: 'r1',
       monitorId,
       regionId: 'eu-west',
@@ -213,15 +237,17 @@ describe('notification processing', () => {
       log,
     });
 
-    const rows = deliveries(sqlite);
+    const rows = await deliveries(db);
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.kind === 'outage')).toBe(true);
     expect(rows.every((row) => row.status === 'sent' && row.attempts === 1)).toBe(true);
     expect(sent.some((url) => url.includes('api.telegram.org'))).toBe(true);
     expect(sent.some((url) => url.includes('hooks.example.test'))).toBe(true);
-    const state = sqlite
-      .prepare('SELECT status, failure_streak FROM monitor_notification_state WHERE monitor_id = ?')
-      .get(monitorId) as { status: string; failure_streak: number };
+    const state = (await first<{ status: string; failure_streak: number }>(
+      db,
+      `SELECT status, failure_streak FROM ${db.table('monitor_notification_state')} WHERE monitor_id = $1`,
+      [monitorId],
+    ))!;
     expect(state).toEqual({ status: 'down', failure_streak: 1 });
     // A second evaluation must not enqueue a duplicate outage event.
     await processNotifications({
@@ -234,24 +260,24 @@ describe('notification processing', () => {
       leaseToken: 'lease-2',
       log,
     });
-    expect(count(sqlite, 'notification_deliveries')).toBe(2);
+    expect(await count(db, 'notification_deliveries')).toBe(2);
   });
 
   it('records the exact sent text, monitor snapshot, and validated provider link', async () => {
-    const { sqlite, db } = makeDatabase();
-    const monitorId = seedMonitor(sqlite, {
+    const { db } = fixture;
+    const monitorId = await seedMonitor(db, {
       id: '00000000-0000-4000-8000-0000000000f8',
       name: 'Checkout API',
       url: 'https://shop.example.test/health',
       outageThreshold: 1,
     });
     const serviceId = '00000000-0000-4000-8000-0000000000f9';
-    await addService(sqlite, serviceId, 'telegram', {
+    await addService(db, serviceId, 'telegram', {
       botToken: '123456:abcdefghijklmnopqrstuvwxyz',
       chatId: '@status_room',
     });
-    link(sqlite, monitorId, serviceId);
-    seedOutage(sqlite, monitorId);
+    await link(db, monitorId, serviceId);
+    await seedOutage(db, monitorId);
     let sentText = '';
     const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       sentText = (JSON.parse(String(init?.body)) as { text: string }).text;
@@ -275,12 +301,7 @@ describe('notification processing', () => {
       log,
     });
 
-    const history = sqlite
-      .prepare(
-        `SELECT monitor_id, monitor_name, monitor_url, status, text, external_url, error
-         FROM notification_history WHERE notification_service_id = ?`,
-      )
-      .get(serviceId) as {
+    const history = (await first<{
       monitor_id: string;
       monitor_name: string;
       monitor_url: string;
@@ -288,7 +309,11 @@ describe('notification processing', () => {
       text: string;
       external_url: string | null;
       error: string | null;
-    };
+    }>(
+      db,
+      `SELECT monitor_id, monitor_name, monitor_url, status, text, external_url, error FROM ${db.table('notification_history')} WHERE notification_service_id = $1`,
+      [serviceId],
+    ))!;
     expect(history).toEqual({
       monitor_id: monitorId,
       monitor_name: 'Checkout API',
@@ -301,18 +326,18 @@ describe('notification processing', () => {
   });
 
   it('records failed attempts without storing provider response secrets', async () => {
-    const { sqlite, db } = makeDatabase();
-    const monitorId = seedMonitor(sqlite, {
+    const { db } = fixture;
+    const monitorId = await seedMonitor(db, {
       id: '00000000-0000-4000-8000-0000000000fe',
       outageThreshold: 1,
     });
     const serviceId = '00000000-0000-4000-8000-0000000000ff';
-    await addService(sqlite, serviceId, 'telegram', {
+    await addService(db, serviceId, 'telegram', {
       botToken: '123456:abcdefghijklmnopqrstuvwxyz',
       chatId: '-10012345',
     });
-    link(sqlite, monitorId, serviceId);
-    seedOutage(sqlite, monitorId);
+    await link(db, monitorId, serviceId);
+    await seedOutage(db, monitorId);
 
     await processNotifications({
       db,
@@ -328,9 +353,11 @@ describe('notification processing', () => {
       log,
     });
 
-    const history = sqlite
-      .prepare('SELECT status, error FROM notification_history WHERE notification_service_id = ?')
-      .get(serviceId) as { status: string; error: string };
+    const history = (await first<{ status: string; error: string }>(
+      db,
+      `SELECT status, error FROM ${db.table('notification_history')} WHERE notification_service_id = $1`,
+      [serviceId],
+    ))!;
     expect(history.status).toBe('failed');
     expect(history.error).toBe('Notification service rejected the message; check its settings');
     expect(history.error).not.toContain('abcdefghijklmnopqrstuvwxyz');
@@ -343,8 +370,8 @@ describe('notification processing', () => {
       { responseStatus: 400, expectedStatus: 'failed' },
       { responseStatus: 503, expectedStatus: 'pending' },
     ]) {
-      const { sqlite, db } = makeDatabase();
-      const monitorId = seedMonitor(sqlite, {
+      const { db } = fixture;
+      const monitorId = await seedMonitor(db, {
         id:
           outcome.responseStatus === 200
             ? '00000000-0000-4000-8000-0000000000f6'
@@ -359,12 +386,12 @@ describe('notification processing', () => {
           : outcome.responseStatus === 400
             ? '00000000-0000-4000-8000-0000000000fc'
             : '00000000-0000-4000-8000-0000000000fd';
-      await addService(sqlite, serviceId, 'telegram', {
+      await addService(db, serviceId, 'telegram', {
         botToken: '123456:abcdefghijklmnopqrstuvwxyz',
         chatId: '-10012345',
       });
-      link(sqlite, monitorId, serviceId);
-      seedOutage(sqlite, monitorId);
+      await link(db, monitorId, serviceId);
+      await seedOutage(db, monitorId);
 
       await processNotifications({
         db: failHistoryWrites(db),
@@ -389,11 +416,11 @@ describe('notification processing', () => {
         log,
       });
 
-      const delivery = sqlite
-        .prepare(
-          'SELECT status, last_error FROM notification_deliveries WHERE notification_service_id = ?',
-        )
-        .get(serviceId) as { status: string; last_error: string | null };
+      const delivery = (await first<{ status: string; last_error: string | null }>(
+        db,
+        `SELECT status, last_error FROM ${db.table('notification_deliveries')} WHERE notification_service_id = $1`,
+        [serviceId],
+      ))!;
       expect(delivery.status).toBe(outcome.expectedStatus);
       if (outcome.responseStatus === 200) {
         expect(delivery.last_error).toBeNull();
@@ -405,20 +432,20 @@ describe('notification processing', () => {
   });
 
   it('does not alert when a round is missing regions even with a linked service', async () => {
-    const { sqlite, db } = makeDatabase();
-    const monitorId = seedMonitor(sqlite, { outageThreshold: 1 });
-    await addService(sqlite, '00000000-0000-4000-8000-0000000000b1', 'webhook', {
+    const { db } = fixture;
+    const monitorId = await seedMonitor(db, { outageThreshold: 1 });
+    await addService(db, '00000000-0000-4000-8000-0000000000b1', 'webhook', {
       webhookUrl: 'https://hooks.example.test/notify',
     });
-    link(sqlite, monitorId, '00000000-0000-4000-8000-0000000000b1');
-    seedRound(sqlite, {
+    await link(db, monitorId, '00000000-0000-4000-8000-0000000000b1');
+    await seedRound(db, {
       id: 'r1',
       monitorId,
       windowStartedAt: '2026-09-20T09:59:00.000Z',
       status: 'partial',
       expectedRegions: ['us-east', 'eu-west'],
     });
-    seedObservation(sqlite, {
+    await seedObservation(db, {
       checkRunId: 'r1',
       monitorId,
       regionId: 'us-east',
@@ -438,30 +465,30 @@ describe('notification processing', () => {
       leaseToken: 'lease-1',
       log,
     });
-    expect(count(sqlite, 'notification_deliveries')).toBe(0);
-    const state = sqlite
-      .prepare(
-        'SELECT status, failure_streak, success_streak FROM monitor_notification_state WHERE monitor_id = ?',
-      )
-      .get(monitorId) as { status: string; failure_streak: number; success_streak: number };
+    expect(await count(db, 'notification_deliveries')).toBe(0);
+    const state = (await first<{ status: string; failure_streak: number; success_streak: number }>(
+      db,
+      `SELECT status, failure_streak, success_streak FROM ${db.table('monitor_notification_state')} WHERE monitor_id = $1`,
+      [monitorId],
+    ))!;
     expect(state).toEqual({ status: 'healthy', failure_streak: 0, success_streak: 0 });
   });
 
   it('retries transient provider failures with backoff and stops at the attempt limit', async () => {
-    const { sqlite, db } = makeDatabase();
-    const monitorId = seedMonitor(sqlite, { outageThreshold: 1 });
-    await addService(sqlite, '00000000-0000-4000-8000-0000000000c1', 'webhook', {
+    const { db } = fixture;
+    const monitorId = await seedMonitor(db, { outageThreshold: 1 });
+    await addService(db, '00000000-0000-4000-8000-0000000000c1', 'webhook', {
       webhookUrl: 'https://hooks.example.test/notify',
     });
-    link(sqlite, monitorId, '00000000-0000-4000-8000-0000000000c1');
-    seedRound(sqlite, {
+    await link(db, monitorId, '00000000-0000-4000-8000-0000000000c1');
+    await seedRound(db, {
       id: 'r1',
       monitorId,
       windowStartedAt: '2026-09-20T09:59:00.000Z',
       status: 'complete',
       expectedRegions: ['us-east'],
     });
-    seedObservation(sqlite, {
+    await seedObservation(db, {
       checkRunId: 'r1',
       monitorId,
       regionId: 'us-east',
@@ -480,7 +507,7 @@ describe('notification processing', () => {
       leaseToken: 'lease-1',
       log,
     });
-    let row = deliveries(sqlite)[0]!;
+    let row = (await deliveries(db))[0]!;
     expect(row.status).toBe('pending');
     expect(row.attempts).toBe(1);
 
@@ -495,7 +522,7 @@ describe('notification processing', () => {
       leaseToken: 'lease-2',
       log,
     });
-    expect(deliveries(sqlite)[0]!.attempts).toBe(1);
+    expect((await deliveries(db))[0]!.attempts).toBe(1);
 
     await processNotifications({
       db,
@@ -507,30 +534,29 @@ describe('notification processing', () => {
       leaseToken: 'lease-3',
       log,
     });
-    row = deliveries(sqlite)[0]!;
+    row = (await deliveries(db))[0]!;
     expect(row.status).toBe('failed');
     expect(row.attempts).toBe(2);
   });
 
   it('reclaims a delivery whose send lease expired after a crash', async () => {
-    const { sqlite, db } = makeDatabase();
-    const monitorId = seedMonitor(sqlite, { outageThreshold: 1 });
-    await addService(sqlite, '00000000-0000-4000-8000-0000000000d1', 'webhook', {
+    const { db } = fixture;
+    const monitorId = await seedMonitor(db, { outageThreshold: 1 });
+    await addService(db, '00000000-0000-4000-8000-0000000000d1', 'webhook', {
       webhookUrl: 'https://hooks.example.test/notify',
     });
-    link(sqlite, monitorId, '00000000-0000-4000-8000-0000000000d1');
+    await link(db, monitorId, '00000000-0000-4000-8000-0000000000d1');
     // No rounds: the only pending work is the stuck delivery.
     // Simulate a delivery stuck in `sending` from a crashed invocation.
-    sqlite
-      .prepare(
-        `INSERT INTO notification_deliveries (
+    await db.query(
+      `INSERT INTO ${db.table('notification_deliveries')} (
            id, monitor_id, notification_service_id, event_key, kind, message, status, attempts,
            next_attempt_at, lease_until, lease_token
-         ) VALUES ('stuck', ?, '00000000-0000-4000-8000-0000000000d1', 'evt', 'outage',
+         ) VALUES ('stuck', $1, '00000000-0000-4000-8000-0000000000d1', 'evt', 'outage',
            '{"kind":"outage","monitorName":"x","monitorUrl":"https://example.com","occurredAt":"2026-09-20T09:59:00.000Z","outageStartedAt":null}',
-           'sending', 1, ?, '2026-09-20T09:00:00.000Z', 'dead')`,
-      )
-      .run(monitorId, now.toISOString());
+         'sending', 1, $2, '2026-09-20T09:00:00.000Z', 'dead')`,
+      [monitorId, now.toISOString()],
+    );
     const fetchImpl = (async () => new Response('{}', { status: 200 })) as typeof fetch;
     await processNotifications({
       db,
@@ -542,28 +568,29 @@ describe('notification processing', () => {
       leaseToken: 'lease-1',
       log,
     });
-    const row = sqlite
-      .prepare("SELECT status, lease_token FROM notification_deliveries WHERE id = 'stuck'")
-      .get() as { status: string; lease_token: string | null };
+    const row = (await first<{ status: string; lease_token: string | null }>(
+      db,
+      `SELECT status, lease_token FROM ${db.table('notification_deliveries')} WHERE id = 'stuck'`,
+    ))!;
     expect(row.status).toBe('sent');
     expect(row.lease_token).toBeNull();
   });
 
   it('does not let a stale overlapping evaluation regress a newer incident watermark', async () => {
-    const { sqlite, db } = makeDatabase();
-    const monitorId = seedMonitor(sqlite, { outageThreshold: 1 });
-    await addService(sqlite, '00000000-0000-4000-8000-0000000000f1', 'webhook', {
+    const { db } = fixture;
+    const monitorId = await seedMonitor(db, { outageThreshold: 1 });
+    await addService(db, '00000000-0000-4000-8000-0000000000f1', 'webhook', {
       webhookUrl: 'https://hooks.example.test/notify',
     });
-    link(sqlite, monitorId, '00000000-0000-4000-8000-0000000000f1');
-    seedRound(sqlite, {
+    await link(db, monitorId, '00000000-0000-4000-8000-0000000000f1');
+    await seedRound(db, {
       id: 'r1',
       monitorId,
       windowStartedAt: '2026-09-20T09:59:00.000Z',
       status: 'complete',
       expectedRegions: ['us-east'],
     });
-    seedObservation(sqlite, {
+    await seedObservation(db, {
       checkRunId: 'r1',
       monitorId,
       regionId: 'us-east',
@@ -583,51 +610,52 @@ describe('notification processing', () => {
       log,
     };
     await processNotifications(deps);
-    const advanced = sqlite
-      .prepare('SELECT last_window_started_at FROM monitor_notification_state WHERE monitor_id = ?')
-      .get(monitorId) as { last_window_started_at: string };
+    const advanced = (await first<{ last_window_started_at: string }>(
+      db,
+      `SELECT last_window_started_at FROM ${db.table('monitor_notification_state')} WHERE monitor_id = $1`,
+      [monitorId],
+    ))!;
     expect(advanced.last_window_started_at).toBe('2026-09-20T09:59:00.000Z');
 
     // A stale invocation that observed an empty watermark must not roll state
     // back, nor fabricate a second outage for the already-processed round.
     await processNotifications({ ...deps, leaseToken: 'lease-2' });
-    const after = sqlite
-      .prepare(
-        'SELECT last_window_started_at, status FROM monitor_notification_state WHERE monitor_id = ?',
-      )
-      .get(monitorId) as { last_window_started_at: string; status: string };
+    const after = (await first<{ last_window_started_at: string; status: string }>(
+      db,
+      `SELECT last_window_started_at, status FROM ${db.table('monitor_notification_state')} WHERE monitor_id = $1`,
+      [monitorId],
+    ))!;
     expect(after).toEqual({
       last_window_started_at: '2026-09-20T09:59:00.000Z',
       status: 'down',
     });
-    expect(count(sqlite, 'notification_deliveries')).toBe(1);
+    expect(await count(db, 'notification_deliveries')).toBe(1);
   });
 
   it('does not cancel a newer delivery when a stale evaluation overlaps', async () => {
-    const { sqlite, db } = makeDatabase();
-    const monitorId = seedMonitor(sqlite, { outageThreshold: 1, recoveryThreshold: 1 });
-    await addService(sqlite, '00000000-0000-4000-8000-0000000000f2', 'webhook', {
+    const { db } = fixture;
+    const monitorId = await seedMonitor(db, { outageThreshold: 1, recoveryThreshold: 1 });
+    await addService(db, '00000000-0000-4000-8000-0000000000f2', 'webhook', {
       webhookUrl: 'https://hooks.example.test/notify',
     });
-    link(sqlite, monitorId, '00000000-0000-4000-8000-0000000000f2');
+    await link(db, monitorId, '00000000-0000-4000-8000-0000000000f2');
     // Existing state at an older watermark with a mismatched fingerprint, so a
     // stale evaluation would reset and try to cancel pending deliveries.
-    sqlite
-      .prepare(
-        `INSERT INTO monitor_notification_state (
+    await db.query(
+      `INSERT INTO ${db.table('monitor_notification_state')} (
            monitor_id, config_fingerprint, last_window_started_at, status, failure_streak,
            success_streak, outage_started_at, last_reminder_at
-         ) VALUES (?, 'old', '2026-09-20T08:59:00.000Z', 'healthy', 0, 0, NULL, NULL)`,
-      )
-      .run(monitorId);
-    seedRound(sqlite, {
+         ) VALUES ($1, 'old', '2026-09-20T08:59:00.000Z', 'healthy', 0, 0, NULL, NULL)`,
+      [monitorId],
+    );
+    await seedRound(db, {
       id: 'r1',
       monitorId,
       windowStartedAt: '2026-09-20T09:59:00.000Z',
       status: 'complete',
       expectedRegions: ['us-east'],
     });
-    seedObservation(sqlite, {
+    await seedObservation(db, {
       checkRunId: 'r1',
       monitorId,
       regionId: 'us-east',
@@ -635,35 +663,28 @@ describe('notification processing', () => {
       success: false,
       startedAt: '2026-09-20T09:59:05.000Z',
     });
-    // Interleave a newer invocation committing its watermark and delivery
-    // between the stale invocation's read and its batch.
-    let injected = false;
-    const interleaved = {
-      ...db,
-      batch: async (statements: Parameters<typeof db.batch>[0]) => {
-        if (!injected) {
-          injected = true;
-          sqlite
-            .prepare(
-              "UPDATE monitor_notification_state SET last_window_started_at = '2026-09-20T09:59:00.000Z' WHERE monitor_id = ?",
-            )
-            .run(monitorId);
-          sqlite
-            .prepare(
-              `INSERT INTO notification_deliveries (
-                 id, monitor_id, notification_service_id, event_key, kind, message, status, attempts,
-                 next_attempt_at
-               ) VALUES ('newer', ?, '00000000-0000-4000-8000-0000000000f2', 'evt-new', 'outage',
-                 '{"kind":"outage","monitorName":"x","monitorUrl":"https://example.com","occurredAt":"2026-09-20T09:59:00.000Z","outageStartedAt":null}',
-                 'pending', 0, ?)`,
-            )
-            .run(monitorId, now.toISOString());
-        }
-        return db.batch(statements);
-      },
-    } as typeof db;
+    // A newer invocation commits its watermark and delivery on an independent
+    // connection before this stale invocation runs.
+    const newerDb = await fixture.openConnection();
     await processNotifications({
-      db: interleaved,
+      db: newerDb,
+      fetch: (async () => new Response('nope', { status: 503 })) as typeof fetch,
+      now,
+      enabledRegionIds: ['us-east', 'eu-west'],
+      credentialEncryptionSecret: secret,
+      maxAttempts: 8,
+      leaseToken: 'newer-lease',
+      log,
+    });
+    const newerId = (await first<{ id: string }>(
+      db,
+      `SELECT id FROM ${db.table('notification_deliveries')}`,
+    ))!.id;
+    await db.query(`UPDATE ${db.table('notification_deliveries')} SET id = 'newer' WHERE id = $1`, [
+      newerId,
+    ]);
+    await processNotifications({
+      db,
       fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
       now,
       enabledRegionIds: ['us-east', 'eu-west'],
@@ -672,34 +693,35 @@ describe('notification processing', () => {
       leaseToken: 'lease-1',
       log,
     });
-    const newer = sqlite
-      .prepare("SELECT status FROM notification_deliveries WHERE id = 'newer'")
-      .get() as { status: string };
+    const newer = (await first<{ status: string }>(
+      db,
+      `SELECT status FROM ${db.table('notification_deliveries')} WHERE id = 'newer'`,
+    ))!;
     expect(newer.status).not.toBe('cancelled');
     // The stale batch must not enqueue its own obsolete outage alongside the
     // delivery created by the invocation that won the state transition.
-    expect(count(sqlite, 'notification_deliveries')).toBe(1);
+    expect(await count(db, 'notification_deliveries')).toBe(1);
   });
 
   it('fails an SMTP delivery terminally because Workers cannot open sockets', async () => {
-    const { sqlite, db } = makeDatabase();
-    const monitorId = seedMonitor(sqlite, { outageThreshold: 1 });
-    await addService(sqlite, '00000000-0000-4000-8000-0000000000e1', 'smtp', {
+    const { db } = fixture;
+    const monitorId = await seedMonitor(db, { outageThreshold: 1 });
+    await addService(db, '00000000-0000-4000-8000-0000000000e1', 'smtp', {
       host: 'smtp.example.test',
       port: 587,
       security: 'starttls',
       from: 'uptime@example.test',
       to: ['ops@example.test'],
     });
-    link(sqlite, monitorId, '00000000-0000-4000-8000-0000000000e1');
-    seedRound(sqlite, {
+    await link(db, monitorId, '00000000-0000-4000-8000-0000000000e1');
+    await seedRound(db, {
       id: 'r1',
       monitorId,
       windowStartedAt: '2026-09-20T09:59:00.000Z',
       status: 'complete',
       expectedRegions: ['us-east'],
     });
-    seedObservation(sqlite, {
+    await seedObservation(db, {
       checkRunId: 'r1',
       monitorId,
       regionId: 'us-east',
@@ -720,7 +742,7 @@ describe('notification processing', () => {
       leaseToken: 'lease-1',
       log,
     });
-    const row = deliveries(sqlite)[0]!;
+    const row = (await deliveries(db))[0]!;
     expect(row.status).toBe('failed');
     expect(row.last_error).toContain('SMTP is not supported');
   });

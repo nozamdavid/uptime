@@ -1,18 +1,19 @@
 import {
-  batch,
-  first,
-  all,
   nowIso,
   notificationMessageText,
   notificationPreview,
   randomId,
   recordNotificationHistory,
-  run,
   sha256Hex,
-  type D1Database,
   type NotificationMessage,
   type NotificationProviderKind,
 } from '@uptime/cloudflare';
+import {
+  pgAll as all,
+  pgFirst as first,
+  pgRun as run,
+  type Database,
+} from '@uptime/cloudflare/postgres';
 import { openProviderConfig } from '@uptime/api-worker/credentials';
 import type { RegionId } from '@uptime/regions';
 
@@ -76,8 +77,14 @@ interface DeliveryRow {
 
 const runHistoryLimit = 200;
 
+/** Called only inside the monitor evaluation transaction. */
+async function batch(db: Database, statements: readonly { sql: string; values: unknown[] }[]) {
+  for (const statement of statements) await db.query(statement.sql, statement.values);
+}
+
 export interface NotificationDependencies {
-  readonly db: D1Database;
+  readonly db: Database;
+  readonly schedulingPolicy?: 'hosted' | 'legacy';
   readonly fetch: typeof fetch;
   readonly now: Date;
   /** Delivery timing is separate from the logical incident evaluation timestamp. */
@@ -97,7 +104,7 @@ export interface NotificationDependencies {
  *
  * Every decision is derived from finalized rounds only (a pending round blocks
  * progress past it). Missing regional results yield `unknown`, never healthy.
- * The state upsert and its new delivery rows commit in one D1 batch, and the
+ * The state upsert and its new delivery rows commit in one transaction, and the
  * unique `(event_key, notification_service_id)` makes replayed evaluations
  * idempotent.
  */
@@ -105,10 +112,10 @@ export async function processNotifications(dependencies: NotificationDependencie
   const { db } = dependencies;
   const monitors = await all<{ id: string }>(
     db,
-    `SELECT id FROM monitors WHERE EXISTS (
-       SELECT 1 FROM monitor_notification_services mns WHERE mns.monitor_id = monitors.id
+    `SELECT id FROM ${db.table('monitors')} monitors WHERE EXISTS (
+       SELECT 1 FROM ${db.table('monitor_notification_services')} mns WHERE mns.monitor_id = monitors.id
      ) OR EXISTS (
-       SELECT 1 FROM monitor_notification_state s WHERE s.monitor_id = monitors.id
+       SELECT 1 FROM ${db.table('monitor_notification_state')} s WHERE s.monitor_id = monitors.id
      ) ORDER BY id`,
   );
   // Rotate the starting monitor each minute so a budget-limited tick cannot
@@ -119,7 +126,13 @@ export async function processNotifications(dependencies: NotificationDependencie
   for (const monitor of fairOrder) {
     if (dependencies.shouldContinueEvaluation && !dependencies.shouldContinueEvaluation()) break;
     try {
-      await evaluateMonitor(dependencies, monitor.id);
+      await db.transaction(async (tx) => {
+        // Serialize incident reads and writes, including the first state insert.
+        await tx.query(`SELECT id FROM ${tx.table('monitors')} WHERE id = $1 FOR NO KEY UPDATE`, [
+          monitor.id,
+        ]);
+        await evaluateMonitor({ ...dependencies, db: tx }, monitor.id);
+      });
     } catch (error) {
       if (isQueryBudgetExceeded(error)) {
         break;
@@ -144,24 +157,26 @@ async function evaluateMonitor(
   const { db, now } = dependencies;
   const monitor = await first<MonitorRow>(
     db,
-    `SELECT id, name, url, enabled, outage_threshold, recovery_threshold,
+    `SELECT id, name, url,
+       CASE WHEN EXISTS (SELECT 1 FROM ${db.table(dependencies.schedulingPolicy === 'hosted' ? 'tier_schedulable_monitors' : 'monitors')} eligible WHERE eligible.id = m.id AND eligible.enabled = 1) THEN m.enabled ELSE 0 END AS enabled,
+       outage_threshold, recovery_threshold,
        repeat_notification_minutes, updated_at
-     FROM monitors WHERE id = ? LIMIT 1`,
+     FROM ${db.table('monitors')} m WHERE id = $1 LIMIT 1`,
     [monitorId],
   );
   if (!monitor) return;
   const services = await all<ServiceRow>(
     db,
     `SELECT ns.id, ns.provider, ns.config, ns.updated_at
-     FROM notification_services ns
-     JOIN monitor_notification_services mns ON mns.notification_service_id = ns.id
-     WHERE mns.monitor_id = ? AND ns.enabled = 1
+     FROM ${db.table(dependencies.schedulingPolicy === 'hosted' ? 'tier_active_notification_services' : 'notification_services')} ns
+     JOIN ${db.table('monitor_notification_services')} mns ON mns.notification_service_id = ns.id
+     WHERE mns.monitor_id = $1 AND ns.enabled = 1
      ORDER BY ns.id`,
     [monitorId],
   );
   const regionRows = await all<{ region_id: RegionId }>(
     db,
-    'SELECT region_id FROM monitor_regions WHERE monitor_id = ? ORDER BY region_id',
+    `SELECT region_id FROM ${db.table('monitor_regions')} WHERE monitor_id = $1 ORDER BY region_id`,
     [monitorId],
   );
   const regions = regionRows
@@ -171,10 +186,10 @@ async function evaluateMonitor(
   if (monitor.enabled !== 1 || services.length === 0 || regions.length === 0) {
     await batch(db, [
       {
-        sql: `INSERT INTO monitor_notification_state (
+        sql: `INSERT INTO ${db.table('monitor_notification_state')} AS monitor_notification_state (
                 monitor_id, config_fingerprint, last_window_started_at, status,
                 failure_streak, success_streak, outage_started_at, last_reminder_at, updated_at
-              ) VALUES (?, 'inactive', ?, 'healthy', 0, 0, NULL, NULL, ?)
+              ) VALUES ($1, 'inactive', $2, 'healthy', 0, 0, NULL, NULL, $3)
               ON CONFLICT (monitor_id) DO UPDATE SET
                 config_fingerprint = 'inactive',
                 last_window_started_at = excluded.last_window_started_at,
@@ -184,8 +199,8 @@ async function evaluateMonitor(
         values: [monitorId, nowIso(now), nowIso(now)],
       },
       {
-        sql: `UPDATE notification_deliveries SET status = 'cancelled', lease_until = NULL, lease_token = NULL
-              WHERE monitor_id = ? AND status IN ('pending', 'sending')`,
+        sql: `UPDATE ${db.table('notification_deliveries')} SET status = 'cancelled', lease_until = NULL, lease_token = NULL
+              WHERE monitor_id = $1 AND status IN ('pending', 'sending')`,
         values: [monitorId],
       },
     ]);
@@ -206,7 +221,7 @@ async function evaluateMonitor(
     db,
     `SELECT config_fingerprint, last_window_started_at, status, failure_streak,
        success_streak, outage_started_at, last_reminder_at
-     FROM monitor_notification_state WHERE monitor_id = ? LIMIT 1`,
+     FROM ${db.table('monitor_notification_state')} WHERE monitor_id = $1 LIMIT 1`,
     [monitorId],
   );
   // Optimistic-concurrency token: the watermark observed before this
@@ -241,12 +256,12 @@ async function evaluateMonitor(
   const runs = await all<RunRow>(
     db,
     `SELECT cr.id, cr.window_started_at, cr.status, cr.expected_region_count AS expected,
-       (SELECT count(*) FROM observations o WHERE o.check_run_id = cr.id) AS received,
-       (SELECT count(*) FROM observations o WHERE o.check_run_id = cr.id AND o.success = 0) AS failures
-     FROM check_runs cr
-     WHERE cr.monitor_id = ? AND cr.window_started_at > ?
+       (SELECT count(*)::integer FROM ${db.table('observations')} o WHERE o.check_run_id = cr.id) AS received,
+       (SELECT count(*)::integer FROM ${db.table('observations')} o WHERE o.check_run_id = cr.id AND o.success = 0) AS failures
+     FROM ${db.table('check_runs')} cr
+     WHERE cr.monitor_id = $1 AND cr.window_started_at > $2
      ORDER BY cr.window_started_at ASC
-     LIMIT ?`,
+     LIMIT $3`,
     [monitorId, watermark, runHistoryLimit],
   );
 
@@ -258,7 +273,7 @@ async function evaluateMonitor(
   const statements: { sql: string; values: unknown[] }[] = [];
   if (reset) {
     statements.push(
-      ...cancelPending(monitorId, storedWatermark, storedReminder, storedFingerprint),
+      ...cancelPending(db, monitorId, storedWatermark, storedReminder, storedFingerprint),
     );
   }
   let blocked = false;
@@ -279,7 +294,7 @@ async function evaluateMonitor(
     watermark = at;
     if (advanced.event) {
       statements.push(
-        ...cancelPending(monitorId, storedWatermark, storedReminder, storedFingerprint),
+        ...cancelPending(db, monitorId, storedWatermark, storedReminder, storedFingerprint),
       );
       statements.push(
         ...enqueue(
@@ -302,9 +317,9 @@ async function evaluateMonitor(
     const pending = await first<{ active: number }>(
       db,
       `SELECT EXISTS (
-         SELECT 1 FROM notification_deliveries
-         WHERE monitor_id = ? AND status IN ('pending', 'sending')
-       ) AS active`,
+         SELECT 1 FROM ${db.table('notification_deliveries')}
+         WHERE monitor_id = $1 AND status IN ('pending', 'sending')
+       )::integer AS active`,
       [monitorId],
     );
     if ((pending?.active ?? 0) === 0) {
@@ -329,10 +344,10 @@ async function evaluateMonitor(
     }
   }
   statements.push({
-    sql: `INSERT INTO monitor_notification_state (
+    sql: `INSERT INTO ${db.table('monitor_notification_state')} AS monitor_notification_state (
             monitor_id, config_fingerprint, last_window_started_at, status,
             failure_streak, success_streak, outage_started_at, last_reminder_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
           ON CONFLICT (monitor_id) DO UPDATE SET
             config_fingerprint = excluded.config_fingerprint,
             last_window_started_at = excluded.last_window_started_at,
@@ -344,9 +359,9 @@ async function evaluateMonitor(
             updated_at = excluded.updated_at
           -- Never let an overlapping invocation with an older watermark
           -- overwrite newer incident state and replay processed rounds.
-          WHERE monitor_notification_state.last_window_started_at IS ?
-            AND monitor_notification_state.last_reminder_at IS ?
-            AND monitor_notification_state.config_fingerprint IS ?`,
+          WHERE monitor_notification_state.last_window_started_at IS NOT DISTINCT FROM $10
+            AND monitor_notification_state.last_reminder_at IS NOT DISTINCT FROM $11
+            AND monitor_notification_state.config_fingerprint IS NOT DISTINCT FROM $12`,
     values: [
       monitorId,
       fingerprint,
@@ -379,6 +394,7 @@ function failuresOutcome(expected: number, received: number, failures: number) {
  * because `enqueue` uses `ON CONFLICT DO NOTHING`).
  */
 function cancelPending(
+  db: Database,
   monitorId: string,
   observedWatermark: string | null,
   observedReminder: string | null,
@@ -386,14 +402,14 @@ function cancelPending(
 ): { sql: string; values: unknown[] }[] {
   return [
     {
-      sql: `UPDATE notification_deliveries SET status = 'cancelled', lease_until = NULL, lease_token = NULL
-            WHERE monitor_id = ? AND status IN ('pending', 'sending')
-              AND (SELECT last_window_started_at FROM monitor_notification_state WHERE monitor_id = ?)
-                  IS ?
-              AND (SELECT last_reminder_at FROM monitor_notification_state WHERE monitor_id = ?)
-                  IS ?
-              AND (SELECT config_fingerprint FROM monitor_notification_state WHERE monitor_id = ?)
-                  IS ?`,
+      sql: `UPDATE ${db.table('notification_deliveries')} SET status = 'cancelled', lease_until = NULL, lease_token = NULL
+            WHERE monitor_id = $1 AND status IN ('pending', 'sending')
+              AND (SELECT last_window_started_at FROM ${db.table('monitor_notification_state')} WHERE monitor_id = $2)
+                  IS NOT DISTINCT FROM $3
+              AND (SELECT last_reminder_at FROM ${db.table('monitor_notification_state')} WHERE monitor_id = $4)
+                  IS NOT DISTINCT FROM $5
+              AND (SELECT config_fingerprint FROM ${db.table('monitor_notification_state')} WHERE monitor_id = $6)
+                  IS NOT DISTINCT FROM $7`,
       values: [
         monitorId,
         monitorId,
@@ -427,12 +443,12 @@ function enqueue(
     outageStartedAt,
   };
   return services.map((service) => ({
-    sql: `INSERT INTO notification_deliveries (
+    sql: `INSERT INTO ${dependencies.db.table('notification_deliveries')} (
             id, monitor_id, notification_service_id, event_key, kind, message, next_attempt_at
-          ) SELECT ?, ?, ?, ?, ?, ?, ?
-            WHERE (SELECT last_window_started_at FROM monitor_notification_state WHERE monitor_id = ?) IS ?
-              AND (SELECT last_reminder_at FROM monitor_notification_state WHERE monitor_id = ?) IS ?
-              AND (SELECT config_fingerprint FROM monitor_notification_state WHERE monitor_id = ?) IS ?
+          ) SELECT $1, $2, $3, $4, $5, $6, $7
+            WHERE (SELECT last_window_started_at FROM ${dependencies.db.table('monitor_notification_state')} WHERE monitor_id = $8) IS NOT DISTINCT FROM $9
+              AND (SELECT last_reminder_at FROM ${dependencies.db.table('monitor_notification_state')} WHERE monitor_id = $10) IS NOT DISTINCT FROM $11
+              AND (SELECT config_fingerprint FROM ${dependencies.db.table('monitor_notification_state')} WHERE monitor_id = $12) IS NOT DISTINCT FROM $13
           ON CONFLICT (event_key, notification_service_id) DO NOTHING`,
     values: [
       randomId(),
@@ -463,25 +479,26 @@ async function deliverPending(dependencies: NotificationDependencies): Promise<v
   const now = currentTime();
   const claimed = await all<DeliveryRow>(
     db,
-    `UPDATE notification_deliveries
-     SET status = 'sending', attempts = attempts + 1, lease_until = ?, lease_token = ?
+    `UPDATE ${db.table('notification_deliveries')} AS delivery
+     SET status = 'sending', attempts = attempts + 1, lease_until = $1, lease_token = $2
      WHERE id IN (
-       SELECT d.id FROM notification_deliveries d
-       JOIN monitors m ON m.id = d.monitor_id
-       JOIN notification_services ns ON ns.id = d.notification_service_id
-       JOIN monitor_notification_services mns
+       SELECT d.id FROM ${db.table('notification_deliveries')} d
+       JOIN ${db.table(dependencies.schedulingPolicy === 'hosted' ? 'tier_schedulable_monitors' : 'monitors')} m ON m.id = d.monitor_id
+       JOIN ${db.table(dependencies.schedulingPolicy === 'hosted' ? 'tier_active_notification_services' : 'notification_services')} ns ON ns.id = d.notification_service_id
+       JOIN ${db.table('monitor_notification_services')} mns
          ON mns.monitor_id = m.id AND mns.notification_service_id = ns.id
-       WHERE m.enabled = 1 AND ns.enabled = 1 AND d.attempts < ?
+       WHERE m.enabled = 1 AND ns.enabled = 1 AND d.attempts < $3
          AND (
-           (d.status = 'pending' AND d.next_attempt_at <= ?)
-           OR (d.status = 'sending' AND d.lease_until < ?)
+           (d.status = 'pending' AND d.next_attempt_at <= $4)
+           OR (d.status = 'sending' AND d.lease_until < $5)
          )
        ORDER BY d.next_attempt_at, d.created_at
        LIMIT 10
+       FOR UPDATE OF d SKIP LOCKED
      )
      RETURNING id, monitor_id, notification_service_id, message, attempts,
-       (SELECT provider FROM notification_services WHERE id = notification_service_id) AS provider,
-       (SELECT config FROM notification_services WHERE id = notification_service_id) AS config`,
+       (SELECT provider FROM ${db.table('notification_services')} WHERE id = delivery.notification_service_id) AS provider,
+       (SELECT config FROM ${db.table('notification_services')} WHERE id = delivery.notification_service_id) AS config`,
     [
       nowIso(new Date(now.getTime() + 60_000)),
       leaseToken,
@@ -539,12 +556,19 @@ async function deliverPending(dependencies: NotificationDependencies): Promise<v
         const retryable = error instanceof NotificationDeliveryError && error.retryable;
         const retryAfter =
           error instanceof NotificationDeliveryError ? error.retryAfterSeconds : 60;
-        await failDelivery(dependencies, delivery, retryable, retryAfter, error, currentTime());
+        const acknowledged = await failDelivery(
+          dependencies,
+          delivery,
+          retryable,
+          retryAfter,
+          error,
+          currentTime(),
+        );
         const safeError =
           error instanceof NotificationDeliveryError && !error.retryable
             ? error.message
             : 'Temporary provider failure';
-        await recordAttempt('failed', preview.text, null, safeError);
+        if (acknowledged) await recordAttempt('failed', preview.text, null, safeError);
         dependencies.log.warn({
           event: 'notification_delivery_failed',
           deliveryId: delivery.id,
@@ -554,22 +578,23 @@ async function deliverPending(dependencies: NotificationDependencies): Promise<v
       }
       // If acknowledgement fails, leave the lease recoverable rather than
       // misclassifying a database error as provider rejection.
-      await run(
+      const acknowledged = await run(
         db,
-        `UPDATE notification_deliveries
-         SET status = 'sent', sent_at = ?, lease_until = NULL, lease_token = NULL, last_error = NULL
-         WHERE id = ? AND status = 'sending' AND lease_token = ?`,
+        `UPDATE ${db.table('notification_deliveries')}
+         SET status = 'sent', sent_at = $1, lease_until = NULL, lease_token = NULL, last_error = NULL
+         WHERE id = $2 AND status = 'sending' AND lease_token = $3`,
         [nowIso(currentTime()), delivery.id, leaseToken],
       );
-      await recordAttempt('sent', receipt.text, receipt.externalUrl, null);
+      if (acknowledged.rowCount)
+        await recordAttempt('sent', receipt.text, receipt.externalUrl, null);
     }),
   );
   await run(
     db,
-    `UPDATE notification_deliveries
+    `UPDATE ${db.table('notification_deliveries')}
      SET status = 'failed', lease_until = NULL, lease_token = NULL,
        last_error = 'Delivery lease expired after final attempt'
-     WHERE status = 'sending' AND lease_until < ? AND attempts >= ?`,
+     WHERE status = 'sending' AND lease_until < $1 AND attempts >= $2`,
     [nowIso(currentTime()), dependencies.maxAttempts],
   );
 }
@@ -581,7 +606,7 @@ async function failDelivery(
   retryAfterSeconds: number,
   error: unknown,
   now: Date,
-): Promise<void> {
+): Promise<boolean> {
   const retry = retryable && delivery.attempts < dependencies.maxAttempts;
   const backoff = Math.min(3_600, 30 * 2 ** Math.max(0, delivery.attempts - 1));
   const delay = Math.max(retryAfterSeconds, backoff);
@@ -589,11 +614,11 @@ async function failDelivery(
   // operators can inspect why a delivery will never succeed.
   const explicitReason =
     error instanceof NotificationDeliveryError && !error.retryable ? error.reason : undefined;
-  await run(
+  const result = await run(
     dependencies.db,
-    `UPDATE notification_deliveries
-     SET status = ?, next_attempt_at = ?, lease_until = NULL, lease_token = NULL, last_error = ?
-     WHERE id = ? AND status = 'sending' AND lease_token = ?`,
+    `UPDATE ${dependencies.db.table('notification_deliveries')}
+     SET status = $1, next_attempt_at = $2, lease_until = NULL, lease_token = NULL, last_error = $3
+     WHERE id = $4 AND status = 'sending' AND lease_token = $5`,
     [
       retry ? 'pending' : 'failed',
       nowIso(new Date(now.getTime() + delay * 1_000)),
@@ -604,4 +629,5 @@ async function failDelivery(
       dependencies.leaseToken,
     ],
   );
+  return (result.rowCount ?? 0) > 0;
 }

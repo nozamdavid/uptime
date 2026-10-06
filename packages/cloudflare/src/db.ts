@@ -69,6 +69,8 @@ export async function batch(
 }
 
 export function isUniqueViolation(error: unknown): boolean {
+  if (typeof error === 'object' && error !== null && 'code' in error && error.code === '23505')
+    return true;
   const message = error instanceof Error ? error.message : String(error);
   return /UNIQUE constraint failed|SQLITE_CONSTRAINT_UNIQUE|constraint failed:.*UNIQUE/i.test(
     message,

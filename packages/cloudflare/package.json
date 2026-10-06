@@ -6,10 +6,19 @@
   "exports": {
     ".": "./src/index.ts",
     "./migrations": "./src/migrations/0001_initial.sql",
-    "./testing": "./src/testing/sqlite.ts"
+    "./testing": "./src/testing/sqlite.ts",
+    "./postgres": "./src/postgres/index.ts",
+    "./testing/postgres": "./src/testing/postgres.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:postgres": "vitest run src/postgres"
+  },
+  "dependencies": {
+    "pg": "8.16.3"
+  },
+  "devDependencies": {
+    "@types/pg": "8.15.5"
   }
 }

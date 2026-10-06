@@ -18,6 +18,24 @@ function source(overrides: Record<string, unknown> = {}) {
 }
 
 describe('api worker environment', () => {
+  it('uses explicit native mode and never uses CONTROL_DB to choose hosted authentication', () => {
+    const hosted = source({
+      POSTGRES_RUNTIME_CATALOG: '{"controlSchema":"control","sources":[]}',
+      ADMIN_EMAIL: undefined,
+      ADMIN_PASSWORD_HASH: undefined,
+    });
+    expect(parseApiEnv(hosted).adminEmail).toBe('');
+    expect(() => parseApiEnv(source({ CONTROL_DB: {}, ADMIN_EMAIL: undefined }))).toThrow();
+    expect(() =>
+      parseApiEnv(
+        source({
+          POSTGRES_RUNTIME_CATALOG: '{"controlSchema":"control","sources":[]}',
+          POSTGRES_SOURCE_DATABASE_ID: 'legacy',
+          ADMIN_EMAIL: undefined,
+        }),
+      ),
+    ).toThrow();
+  });
   it('defaults to all regions and secure SameSite=None cookies in production', () => {
     const config = parseApiEnv(source({ ENVIRONMENT: 'production' }));
     expect(config.enabledRegionIds).toHaveLength(9);

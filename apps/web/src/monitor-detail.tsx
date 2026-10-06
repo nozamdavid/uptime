@@ -26,18 +26,8 @@ import { EndpointEvidence, summarizeEndpointEvidence } from './endpoint-evidence
 import { MonitorForm } from './monitor-form.js';
 import { MonitorBadge } from './monitor-badge.js';
 import { monitorDisplayName } from './monitor-format.js';
-import { publicReportsEnabled } from './config.js';
-import {
-  assessFreshness,
-  assessLatencySampling,
-  formatAge,
-  loadMonitorReport,
-  monitorSnapshotToDetail,
-  SnapshotPendingError,
-  type MonitorReportSnapshot,
-} from './reports.js';
+import { assessLatencySampling, formatAge } from './reports.js';
 import { formatLatency, formatPercentage } from './status-page-format.js';
-import { ReportFreshness } from './report-freshness.js';
 import { UptimeStrip, uptimeSeverity } from './uptime-strip.js';
 
 const ranges = ['1h', '24h', '7d', '30d'] as const;
@@ -64,8 +54,6 @@ export function aggregateLatencyBucketLabel(range: LatencyRange) {
   return aggregateLatencyBucketLabels[range];
 }
 export const monitorDetailRefreshIntervalMs = 60_000;
-const reportPreparationBudgetMs = 30_000;
-const reportPreparationMaxAttempts = 30;
 
 function workspaceSearch(session: ReturnType<typeof useProductSession>) {
   try {
@@ -102,12 +90,9 @@ export function MonitorDetail({
     Boolean(session?.user && session.workspace?.plan === 'free') || publicWorkspaceContext;
   const canWrite = !session?.user || session.role === 'owner' || session.role === 'maintainer';
   const [range, setRange] = useState<LatencyRange>('24h');
-  const currentRange = useRef(range);
-  currentRange.current = range;
   const [data, setData] = useState<MonitorDetailResponse | PublicMonitorDetailResponse | null>(
     null,
   );
-  const [snapshot, setSnapshot] = useState<MonitorReportSnapshot | null>(null);
   const [observations, setObservations] = useState<Observation[] | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -122,8 +107,6 @@ export function MonitorDetail({
   const [error, setError] = useState('');
   const [reload, setReload] = useState(0);
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const autoRefreshEnabled = useRef(autoRefresh);
-  autoRefreshEnabled.current = autoRefresh;
   const inFlightRefresh = useRef<Promise<void> | null>(null);
   const displayedRequestKey = useRef<string | null>(null);
   const observationGeneration = useRef(0);
@@ -136,98 +119,30 @@ export function MonitorDetail({
     data.summary.monitor.dnsDiagnosticsEnabled,
   );
   const load = () => setReload((value) => value + 1);
-  const useSnapshot = publicMode && publicReportsEnabled();
-  const visibleRanges = hostedFree ? (['1h', '24h'] as const) : ranges;
   useEffect(() => {
     let active = true;
-    let retryTimer: number | undefined;
-    let cancelWait: (() => void) | undefined;
-    const controller = new AbortController();
-    const deadline = Date.now() + reportPreparationBudgetMs;
-    const deadlineTimer = useSnapshot
-      ? window.setTimeout(() => controller.abort(), reportPreparationBudgetMs)
-      : undefined;
     observationGeneration.current += 1;
     const rangeOverride = range;
-    const requestKey = `${monitorId}:${publicMode ? 'public' : 'private'}:${useSnapshot ? 'snapshot' : rangeOverride}`;
-    const initialCachedDetail = displayedRequestKey.current === requestKey ? data : null;
+    const requestKey = `${monitorId}:${publicMode ? 'public' : 'private'}:${rangeOverride}`;
     if (displayedRequestKey.current !== requestKey) {
       displayedRequestKey.current = requestKey;
       setData(null);
-      setSnapshot(null);
       setObservations(publicMode ? [] : null);
       setDnsDiagnostics(null);
       setDnsNextCursor(null);
       setDnsError('');
     }
     setError('');
-    // Keep this recovery inside the request lifecycle so navigation cancels both
-    // its timer and fetch, and the regular refresh cannot overlap it.
-    const loadSnapshot = async (): Promise<PublicMonitorDetailResponse> => {
-      let cachedDetail = initialCachedDetail;
-      let attempts = 0;
-      let preparing = false;
-      while (active) {
-        let retryAfterMs = 1_000;
-        try {
-          attempts += 1;
-          const loaded = await loadMonitorReport(monitorId, undefined, controller.signal);
-          const detail = monitorSnapshotToDetail(loaded, currentRange.current);
-          if (!active) return detail;
-          cachedDetail = detail;
-          setSnapshot(loaded);
-          setData(detail);
-          setObservations([]);
-          if (new URLSearchParams(window.location.search).has('generation')) {
-            const url = new URL(window.location.href);
-            url.searchParams.delete('generation');
-            window.history.replaceState(
-              window.history.state,
-              '',
-              `${url.pathname}${url.search}${url.hash}`,
-            );
-          }
-          if (assessFreshness(loaded).state !== 'stale') return detail;
-        } catch (reason) {
-          if (active && controller.signal.aborted && preparing) {
-            if (cachedDetail) return cachedDetail;
-            throw new Error('Report is still being prepared. Try again shortly.');
-          }
-          if (!(reason instanceof SnapshotPendingError)) throw reason;
-          preparing = true;
-          retryAfterMs = reason.retryAfterMs;
-        }
-        if (cachedDetail && !autoRefreshEnabled.current) return cachedDetail;
-        const remaining = deadline - Date.now();
-        if (attempts >= reportPreparationMaxAttempts || remaining <= 0) {
-          if (cachedDetail) return cachedDetail;
-          throw new Error('Report is still being prepared. Try again shortly.');
-        }
-        await new Promise<void>((resolve) => {
-          cancelWait = resolve;
-          retryTimer = window.setTimeout(resolve, Math.min(retryAfterMs, remaining));
-        });
-        if (cachedDetail && !autoRefreshEnabled.current) return cachedDetail;
-        if (Date.now() >= deadline) {
-          if (cachedDetail) return cachedDetail;
-          throw new Error('Report is still being prepared. Try again shortly.');
-        }
-      }
-      // Cleanup deactivates the request before settling its cancelled wait.
-      throw new Error('Report request cancelled');
-    };
-    const detail: Promise<MonitorDetailResponse | PublicMonitorDetailResponse> = useSnapshot
-      ? loadSnapshot()
-      : publicMode
-        ? api.publicMonitor(monitorId, rangeOverride)
-        : api.monitor(monitorId, rangeOverride);
+    const detail: Promise<MonitorDetailResponse | PublicMonitorDetailResponse> = publicMode
+      ? api.publicMonitor(monitorId, rangeOverride)
+      : api.monitor(monitorId, rangeOverride);
     const history = publicMode
       ? Promise.resolve({ items: [] as Observation[], nextCursor: null })
       : api.observations(monitorId, rangeOverride);
     const request = Promise.all([detail, history])
       .then(([detail, history]) => {
         if (!active) return;
-        if (!useSnapshot) setData(detail);
+        setData(detail);
         setObservations(history.items);
         setNextCursor(history.nextCursor);
       })
@@ -236,21 +151,13 @@ export function MonitorDetail({
           setError(reason instanceof Error ? reason.message : 'Could not load monitor details.');
       })
       .finally(() => {
-        window.clearTimeout(deadlineTimer);
         if (inFlightRefresh.current === request) inFlightRefresh.current = null;
       });
     inFlightRefresh.current = request;
     return () => {
       active = false;
-      controller.abort();
-      window.clearTimeout(deadlineTimer);
-      window.clearTimeout(retryTimer);
-      cancelWait?.();
     };
-    // Snapshots carry all published ranges, so only reload them when the monitor
-    // or mode changes; switching range re-projects the already-loaded snapshot.
-    // The API path still refetches per range.
-  }, [monitorId, publicMode, reload, useSnapshot ? '' : range]);
+  }, [monitorId, publicMode, reload, range]);
   useEffect(() => {
     if (!autoRefresh || (error && !data)) return;
     let active = true;
@@ -263,14 +170,6 @@ export function MonitorDetail({
       window.clearTimeout(timer);
     };
   }, [autoRefresh, monitorId, publicMode, range, reload, Boolean(error && !data)]);
-  useEffect(() => {
-    if (!snapshot) return;
-    try {
-      setData(monitorSnapshotToDetail(snapshot, range));
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not read the monitor snapshot.');
-    }
-  }, [snapshot, range]);
   useEffect(() => {
     dnsGeneration.current += 1;
     if (!showsPrivateMonitorData(publicMode)) return;
@@ -407,13 +306,6 @@ export function MonitorDetail({
           Latest refresh failed: {error}
         </p>
       )}
-      {publicMode && (
-        <ReportFreshness
-          snapshot={snapshot}
-          monitorName={monitorDisplayName(monitor)}
-          observationDate="medium"
-        />
-      )}
       <MonitorUptimeOverview
         uptime={data.uptime}
         monitorName={monitorDisplayName(monitor)}
@@ -426,7 +318,7 @@ export function MonitorDetail({
         <PublicShareLink monitorId={monitorId} publicSlug={monitor.publicSlug} />
       )}
       <div className="range-tabs" role="tablist" aria-label="Latency time range">
-        {visibleRanges.map((item) => (
+        {ranges.map((item) => (
           <button
             key={item}
             role="tab"

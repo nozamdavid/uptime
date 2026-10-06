@@ -47,7 +47,7 @@ function metricsAt(
   },
 ): ReportJobMetrics {
   const queryWork = {
-    reports: { statements: 0, rowsRead: 0, rowsWritten: 0, unmeasured: 0 },
+    reports: { statements: 0, durationMs: 0, failures: 0 },
     ...meter.work,
   };
   return {
@@ -82,10 +82,6 @@ export async function runReportJob(
       {
         ...inputConfig,
         db: meter.db,
-        // Two selection/claim statements, two per startup, then at most 15
-        // hourly maintenance statements. Keep five additional statements spare.
-        monitorRefreshStartLimit: () =>
-          Math.max(0, Math.min(20, Math.floor((100 - meter.statementCount() - 22) / 2))),
       },
       startedAt,
       dependencies.log,

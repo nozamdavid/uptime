@@ -21,26 +21,43 @@ async function context() {
   return ctx;
 }
 
-afterEach(() => {
-  for (const ctx of contexts.splice(0)) ctx.db.close();
+afterEach(async () => {
+  for (const ctx of contexts.splice(0)) await ctx.close();
 });
 
 describe('public monitor views', () => {
+  it('checks visibility and authentication even while monitor requests are cached', async () => {
+    const ctx = await context();
+    const id = await seedMonitor(ctx.db, { isPublic: true });
+    const path = `/api/monitors/public/${id}`;
+    for (const suffix of ['', '/uptime', '/latency?range=7d']) {
+      expect((await request(ctx.app, path + suffix)).status).toBe(200);
+      expect((await request(ctx.app, path + suffix)).status).toBe(200);
+    }
+    const { cookie } = await login(ctx.app);
+    expect(
+      (await request(ctx.app, `/api/monitors/${id}/latency?range=7d`, { cookie })).status,
+    ).toBe(200);
+    expect((await request(ctx.app, `/api/monitors/${id}/latency?range=7d`)).status).toBe(401);
+    await ctx.db.query(`UPDATE ${ctx.db.table('monitors')} SET is_public = 0 WHERE id = $1`, [id]);
+    for (const suffix of ['', '/uptime', '/latency?range=7d'])
+      expect((await request(ctx.app, path + suffix)).status).toBe(404);
+  });
   it('serves a public summary without private fields or diagnostics', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite, {
+    const id = await seedMonitor(ctx.db, {
       isPublic: true,
       dnsDiagnosticsEnabled: true,
       regions: ['us-east', 'eu-west'],
     });
     // Latest round: one success, one failure.
-    const run = seedRun(ctx.sqlite, {
+    const run = await seedRun(ctx.db, {
       monitorId: id,
       status: 'complete',
       expectedRegionCount: 2,
       windowStartedAt: '2026-09-16T11:59:00.000Z',
     });
-    seedObservation(ctx.sqlite, {
+    await seedObservation(ctx.db, {
       checkRunId: run,
       monitorId: id,
       regionId: 'us-east',
@@ -48,7 +65,7 @@ describe('public monitor views', () => {
       responseMs: 120,
       startedAt: '2026-09-16T11:59:05.000Z',
     });
-    seedObservation(ctx.sqlite, {
+    await seedObservation(ctx.db, {
       checkRunId: run,
       monitorId: id,
       regionId: 'eu-west',
@@ -70,12 +87,12 @@ describe('public monitor views', () => {
 
   it('resolves a public monitor by slug and hides private monitors', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite, { isPublic: true, publicSlug: 'website' });
+    const id = await seedMonitor(ctx.db, { isPublic: true, publicSlug: 'website' });
     const bySlug = await request(ctx.app, '/api/monitors/public/website');
     expect(bySlug.status).toBe(200);
     expect((await json(bySlug)).summary.monitor.id).toBe(id);
 
-    const privateId = seedMonitor(ctx.sqlite, {
+    const privateId = await seedMonitor(ctx.db, {
       id: '30000000-0000-4000-8000-000000000002',
       isPublic: false,
     });
@@ -85,16 +102,16 @@ describe('public monitor views', () => {
 
   it('returns aggregate latency with exact percentiles', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite, { isPublic: true });
+    const id = await seedMonitor(ctx.db, { isPublic: true });
     const samples = [100, 200, 300, 400, 500];
     let index = 0;
     for (const value of samples) {
-      const run = seedRun(ctx.sqlite, {
+      const run = await seedRun(ctx.db, {
         monitorId: id,
         status: 'complete',
         windowStartedAt: `2026-09-16T11:5${index}:00.000Z`,
       });
-      seedObservation(ctx.sqlite, {
+      await seedObservation(ctx.db, {
         checkRunId: run,
         monitorId: id,
         responseMs: value,
@@ -119,39 +136,39 @@ describe('public monitor views', () => {
 
   it('averages per-region bucket averages for the aggregate latency series', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite, { isPublic: true, regions: ['us-east', 'eu-west'] });
+    const id = await seedMonitor(ctx.db, { isPublic: true, regions: ['us-east', 'eu-west'] });
     // Same 5-minute aggregate bucket, unequal sample counts per region. The
     // aggregate is the mean of regional averages (100 and 200), not raw rows.
-    const east = seedRun(ctx.sqlite, {
+    const east = await seedRun(ctx.db, {
       monitorId: id,
       status: 'complete',
       windowStartedAt: '2026-09-16T11:55:00.000Z',
     });
-    seedObservation(ctx.sqlite, {
+    await seedObservation(ctx.db, {
       checkRunId: east,
       monitorId: id,
       regionId: 'us-east',
       responseMs: 100,
       startedAt: '2026-09-16T11:55:05.000Z',
     });
-    const westA = seedRun(ctx.sqlite, {
+    const westA = await seedRun(ctx.db, {
       monitorId: id,
       status: 'complete',
       windowStartedAt: '2026-09-16T11:56:00.000Z',
     });
-    seedObservation(ctx.sqlite, {
+    await seedObservation(ctx.db, {
       checkRunId: westA,
       monitorId: id,
       regionId: 'eu-west',
       responseMs: 200,
       startedAt: '2026-09-16T11:56:05.000Z',
     });
-    const westB = seedRun(ctx.sqlite, {
+    const westB = await seedRun(ctx.db, {
       monitorId: id,
       status: 'complete',
       windowStartedAt: '2026-09-16T11:57:00.000Z',
     });
-    seedObservation(ctx.sqlite, {
+    await seedObservation(ctx.db, {
       checkRunId: westB,
       monitorId: id,
       regionId: 'eu-west',
@@ -166,13 +183,13 @@ describe('public monitor views', () => {
 
   it('serves the 90-day uptime strip for a public monitor', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite, { isPublic: true });
-    const run = seedRun(ctx.sqlite, {
+    const id = await seedMonitor(ctx.db, { isPublic: true });
+    const run = await seedRun(ctx.db, {
       monitorId: id,
       status: 'complete',
       windowStartedAt: '2026-09-16T10:00:00.000Z',
     });
-    seedObservation(ctx.sqlite, {
+    await seedObservation(ctx.db, {
       checkRunId: run,
       monitorId: id,
       success: false,
@@ -192,26 +209,25 @@ describe('public monitor views', () => {
 describe('public status pages', () => {
   it('resolves a public status page by slug with per-monitor uptime', async () => {
     const ctx = await context();
-    const monitorId = seedMonitor(ctx.sqlite, {
+    const monitorId = await seedMonitor(ctx.db, {
       id: '30000000-0000-4000-8000-000000000001',
       regions: ['us-east', 'eu-west'],
       thresholds: { green: 99.9, lightGreen: 99, orange: 95 },
     });
     // Yesterday rollup + today's observation.
-    ctx.sqlite
-      .prepare(
-        `INSERT INTO monitor_daily_uptime
-           (monitor_id, day, uptime_percentage, average_response_ms, weight, received_count, success_count)
-         VALUES (?, '2026-09-15', 100, 50, 10, 10, 10)`,
-      )
-      .run(monitorId);
-    const run = seedRun(ctx.sqlite, {
+    await ctx.db.query(
+      `INSERT INTO ${ctx.db.table('monitor_daily_uptime')}
+         (monitor_id, day, uptime_percentage, average_response_ms, weight, received_count, success_count)
+       VALUES ($1, '2026-09-15', 100, 50, 10, 10, 10)`,
+      [monitorId],
+    );
+    const run = await seedRun(ctx.db, {
       monitorId,
       status: 'complete',
       expectedRegionCount: 2,
       windowStartedAt: '2026-09-16T10:00:00.000Z',
     });
-    seedObservation(ctx.sqlite, {
+    await seedObservation(ctx.db, {
       checkRunId: run,
       monitorId,
       regionId: 'us-east',
@@ -219,7 +235,7 @@ describe('public status pages', () => {
       responseMs: 100,
       startedAt: '2026-09-16T10:00:05.000Z',
     });
-    seedObservation(ctx.sqlite, {
+    await seedObservation(ctx.db, {
       checkRunId: run,
       monitorId,
       regionId: 'eu-west',
@@ -255,17 +271,17 @@ describe('public status pages', () => {
 
   it('reports an incomplete latest round as unknown despite successful received probes', async () => {
     const ctx = await context();
-    const monitorId = seedMonitor(ctx.sqlite, {
+    const monitorId = await seedMonitor(ctx.db, {
       id: '30000000-0000-4000-8000-000000000001',
       regions: ['us-east', 'eu-west'],
     });
-    const run = seedRun(ctx.sqlite, {
+    const run = await seedRun(ctx.db, {
       monitorId,
       status: 'partial',
       expectedRegionCount: 2,
       windowStartedAt: '2026-09-16T10:00:00.000Z',
     });
-    seedObservation(ctx.sqlite, {
+    await seedObservation(ctx.db, {
       checkRunId: run,
       monitorId,
       regionId: 'us-east',
@@ -301,14 +317,14 @@ describe('public status pages', () => {
 describe('private history', () => {
   it('paginates observations with a cursor and region filter', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite);
+    const id = await seedMonitor(ctx.db);
     for (let index = 0; index < 5; index += 1) {
-      const run = seedRun(ctx.sqlite, {
+      const run = await seedRun(ctx.db, {
         monitorId: id,
         status: 'complete',
         windowStartedAt: `2026-09-16T11:0${index}:00.000Z`,
       });
-      seedObservation(ctx.sqlite, {
+      await seedObservation(ctx.db, {
         checkRunId: run,
         monitorId: id,
         scheduledWindow: `2026-09-16T11:0${index}:00.000Z`,
@@ -334,7 +350,7 @@ describe('private history', () => {
 
   it('rejects a malformed cursor', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite);
+    const id = await seedMonitor(ctx.db);
     const { cookie } = await login(ctx.app);
     const response = await request(
       ctx.app,
@@ -349,14 +365,12 @@ describe('private history', () => {
 
   it('paginates DNS diagnostics', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite, { dnsDiagnosticsEnabled: true });
-    ctx.sqlite
-      .prepare(
-        `INSERT INTO network_diagnostics (id, monitor_id, region_id, window_started_at, lifecycle,
-           result, requested_at, completed_at)
-         VALUES (?, ?, 'us-east', '2026-09-16T10:00:00.000Z', 'complete', ?, '2026-09-16T10:00:00.000Z', '2026-09-16T10:00:01.000Z')`,
-      )
-      .run(
+    const id = await seedMonitor(ctx.db, { dnsDiagnosticsEnabled: true });
+    await ctx.db.query(
+      `INSERT INTO ${ctx.db.table('network_diagnostics')} (id, monitor_id, region_id, window_started_at, lifecycle,
+         result, requested_at, completed_at)
+       VALUES ($1, $2, 'us-east', '2026-09-16T10:00:00.000Z', 'complete', $3, '2026-09-16T10:00:00.000Z', '2026-09-16T10:00:01.000Z')`,
+      [
         '50000000-0000-4000-8000-000000000001',
         id,
         JSON.stringify({
@@ -374,7 +388,8 @@ describe('private history', () => {
           schemaVersion: '1',
           parserVersion: '1',
         }),
-      );
+      ],
+    );
     const { cookie } = await login(ctx.app);
     const response = await request(ctx.app, `/api/monitors/${id}/dns-diagnostics?range=7d`, {
       cookie,
@@ -397,7 +412,7 @@ describe('private history', () => {
 
   it('returns invalid_cursor for a corrupt base64 cursor', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite);
+    const id = await seedMonitor(ctx.db);
     const { cookie } = await login(ctx.app);
     const response = await request(ctx.app, `/api/monitors/${id}/observations?cursor=%25%25%25`, {
       cookie,
@@ -408,7 +423,7 @@ describe('private history', () => {
 
   it('requires authentication for observations and diagnostics', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite);
+    const id = await seedMonitor(ctx.db);
     expect((await request(ctx.app, `/api/monitors/${id}/observations`)).status).toBe(401);
     expect((await request(ctx.app, `/api/monitors/${id}/dns-diagnostics`)).status).toBe(401);
     expect((await request(ctx.app, `/api/monitors/${id}/latency`)).status).toBe(401);

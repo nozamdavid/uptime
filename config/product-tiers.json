@@ -1,0 +1,73 @@
+{
+  "revision": 0,
+  "preview": true,
+  "billingMode": "mock",
+  "plans": [
+    {
+      "id": "free",
+      "revision": 0,
+      "name": "Free",
+      "description": "Draft staging example. Prices are not approved.",
+      "price": { "amount": 0, "currency": "usd", "interval": "month" },
+      "entitlements": {
+        "monitors": 3,
+        "regions": 3,
+        "allowedRegionIds": ["eu-west", "us-east", "asia"],
+        "seats": 3,
+        "statusPages": 1,
+        "notificationDestinations": 3,
+        "customDomains": 0,
+        "intervalSeconds": 300,
+        "rawRetentionHours": 24,
+        "dailyRetentionDays": 30
+      },
+      "active": true,
+      "published": true,
+      "preview": true
+    },
+    {
+      "id": "pro",
+      "revision": 0,
+      "name": "Pro",
+      "description": "Draft staging example. Prices are not approved.",
+      "price": { "amount": 1900, "currency": "usd", "interval": "month" },
+      "entitlements": {
+        "monitors": 10,
+        "regions": 3,
+        "allowedRegionIds": ["eu-west", "us-east", "asia"],
+        "seats": 5,
+        "statusPages": 3,
+        "notificationDestinations": 5,
+        "customDomains": 1,
+        "intervalSeconds": 300,
+        "rawRetentionHours": 24,
+        "dailyRetentionDays": 30
+      },
+      "active": true,
+      "published": true,
+      "preview": true
+    },
+    {
+      "id": "team",
+      "revision": 0,
+      "name": "Team",
+      "description": "Draft staging example. Prices are not approved.",
+      "price": { "amount": 4900, "currency": "usd", "interval": "month" },
+      "entitlements": {
+        "monitors": 25,
+        "regions": 3,
+        "allowedRegionIds": ["eu-west", "us-east", "asia"],
+        "seats": 15,
+        "statusPages": 10,
+        "notificationDestinations": 10,
+        "customDomains": 3,
+        "intervalSeconds": 300,
+        "rawRetentionHours": 24,
+        "dailyRetentionDays": 30
+      },
+      "active": true,
+      "published": true,
+      "preview": true
+    }
+  ]
+}

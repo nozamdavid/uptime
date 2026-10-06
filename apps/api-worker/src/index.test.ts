@@ -1,36 +1,52 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { hashPassword } from '@uptime/cloudflare';
+import { hashPassword, type CloudflareEnv } from '@uptime/cloudflare';
 
 import worker, { workerFetch } from './index.js';
-import { createD1Adapter, createTestDatabase } from '@uptime/cloudflare/testing';
 import { defaultTestConfig } from './testing/harness.js';
+import { createRuntimeFixture } from './testing/runtime-fixture.js';
 
 const passwordHash = await hashPassword('correct horse battery staple');
 
-const env = {
-  DB: createD1Adapter(createTestDatabase()),
-  ADMIN_EMAIL: defaultTestConfig.adminEmail,
-  ADMIN_PASSWORD_HASH: passwordHash,
-  SESSION_SECRET: 'a'.repeat(32),
-  CREDENTIAL_ENCRYPTION_SECRET: 'c'.repeat(32),
-  REGIONS_LIST: '',
-  SESSION_TTL_SECONDS: '604800',
-  SESSION_COOKIE_SECURE: 'false',
-  ENVIRONMENT: 'test',
-};
+let fixture: Awaited<ReturnType<typeof createRuntimeFixture>>;
+let env: CloudflareEnv;
+beforeAll(async () => {
+  fixture = await createRuntimeFixture(['legacy-staging']);
+  await fixture.assign(
+    0,
+    '11111111-1111-4111-8111-111111111111',
+    'did:plc:cccccccccccccccccccccccc',
+  );
+  env = {
+    ...fixture.env,
+    POSTGRES_SOURCE_DATABASE_ID: 'source-1',
+    ADMIN_EMAIL: defaultTestConfig.adminEmail,
+    ADMIN_PASSWORD_HASH: passwordHash,
+    SESSION_SECRET: 'a'.repeat(32),
+    CREDENTIAL_ENCRYPTION_SECRET: 'c'.repeat(32),
+    REGIONS_LIST: '',
+    SESSION_TTL_SECONDS: '604800',
+    SESSION_COOKIE_SECURE: 'false',
+    ENVIRONMENT: 'test',
+    DISABLE_RATE_LIMIT: 'true',
+  };
+}, 120_000);
+afterAll(async () => {
+  await fixture?.close();
+}, 120_000);
 
 const context = {
   waitUntil() {},
   passThroughOnException() {},
 } as unknown as ExecutionContext;
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllGlobals();
   delete (env as Record<string, unknown>).OAUTH;
   env.ENVIRONMENT = 'test';
-  env.DB.close();
-  env.DB = createD1Adapter(createTestDatabase());
+  await fixture.tenants[0]!.adminDb.query(
+    `TRUNCATE TABLE ${fixture.tenants[0]!.db.table('admins')} CASCADE`,
+  );
 });
 
 describe('worker entry point', () => {

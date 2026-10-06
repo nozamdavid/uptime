@@ -1,0 +1,298 @@
+/* operator-operations.css */
+@import './tokens.css';
+
+/* Health Panel & Scheduling */
+.operator-health {
+  display: grid;
+  gap: var(--space-md);
+  margin-top: var(--space-md);
+  min-width: 0;
+  width: 100%;
+}
+
+.operator-health__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.operator-health__header > div,
+.operator-workspace-health-card__header > div,
+.operator-scheduling-box form > * {
+  min-width: 0;
+}
+
+.operator-health__header > div,
+.operator-scheduling-box form > div {
+  flex-wrap: wrap;
+}
+
+.operator-paused-banner {
+  background: var(--color-surface);
+  border: 2px solid var(--color-danger, #e53e3e);
+  border-radius: var(--radius-md, 6px);
+  padding: var(--space-md);
+  display: grid;
+  gap: var(--space-xs);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-paused-banner h3 {
+  margin: 0;
+  color: var(--color-danger, #e53e3e);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.operator-paused-banner p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-paused-banner ul {
+  margin: var(--space-2xs) 0 0 var(--space-md);
+  padding: 0;
+}
+
+.operator-dispatch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  gap: var(--space-sm);
+  margin-top: var(--space-xs);
+  min-width: 0;
+}
+
+.operator-dispatch-stat {
+  background: var(--color-surface);
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm, 4px);
+  border: var(--rule);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-dispatch-stat small {
+  display: block;
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+}
+
+.operator-dispatch-stat strong {
+  font-size: var(--text-lg);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.operator-workspaces-health {
+  display: grid;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.operator-workspace-health-card {
+  border: var(--rule);
+  border-radius: var(--radius-sm, 4px);
+  padding: var(--space-sm);
+  background: var(--color-paper);
+  display: grid;
+  gap: var(--space-xs);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-workspace-health-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.operator-workspace-health-card strong {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.operator-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  font-size: var(--text-xs);
+  border-radius: 4px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.operator-badge--hosted {
+  background: #e2e8f0;
+  color: #334155;
+}
+
+.operator-badge--staging_import {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.operator-badge--legacy_import {
+  background: #ede9fe;
+  color: #5b21b6;
+}
+
+.operator-badge--paused {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.operator-badge--ok {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.operator-badge--stale {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.operator-telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: var(--space-xs);
+  font-size: var(--text-xs);
+  min-width: 0;
+}
+
+.operator-telemetry-grid > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-regional-probes {
+  margin-top: var(--space-2xs);
+  font-size: var(--text-xs);
+  border-top: var(--rule);
+  padding-top: var(--space-2xs);
+  min-width: 0;
+}
+
+.operator-regional-probes summary {
+  cursor: pointer;
+  color: var(--color-muted);
+}
+
+.operator-pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: var(--space-sm);
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+/* Scheduling Controls */
+.operator-scheduling-box {
+  margin-top: var(--space-xs);
+  padding: var(--space-sm);
+  background: var(--color-surface);
+  border: var(--rule);
+  border-radius: var(--radius-sm, 4px);
+  display: grid;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.operator-scheduling-box form {
+  display: grid;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.operator-scheduling-box textarea,
+.operator-scheduling-box input[type='text'] {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: var(--text-sm);
+}
+
+/* Quota Editor Live Preview */
+.operator-capacity-preview {
+  margin-top: var(--space-sm);
+  padding: var(--space-sm);
+  background: var(--color-surface);
+  border-radius: var(--radius-sm, 4px);
+  border: var(--rule);
+  display: grid;
+  gap: var(--space-xs);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-capacity-preview--unsafe {
+  border-color: var(--color-danger, #e53e3e);
+  background: #fff5f5;
+}
+
+.operator-capacity-preview__title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.operator-capacity-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: var(--space-sm);
+  font-size: var(--text-xs);
+  min-width: 0;
+}
+
+.operator-capacity-metric-item {
+  display: grid;
+  gap: var(--space-3xs);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-capacity-progress {
+  width: 100%;
+  height: 6px;
+  background: #e2e8f0;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.operator-capacity-progress-bar {
+  height: 100%;
+  background: #3b82f6;
+  border-radius: 3px;
+  transition: width 0.2s ease;
+}
+
+.operator-capacity-progress-bar--warning {
+  background: #f59e0b;
+}
+
+.operator-capacity-progress-bar--danger {
+  background: #ef4444;
+}
+
+.operator-capacity-warnings {
+  margin: var(--space-2xs) 0 0 0;
+  padding-left: var(--space-md);
+  color: var(--color-danger, #dc2626);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}

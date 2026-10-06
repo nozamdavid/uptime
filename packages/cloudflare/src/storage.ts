@@ -1,8 +1,12 @@
 import type { RegionId } from './regions.js';
-import { all, batch, chunk, first, isUniqueViolation, run } from './db.js';
+import { chunk } from './db.js';
+import { pgAll as all, pgFirst as first, pgRun as run } from './postgres/query.js';
+import {
+  isPostgresUniqueViolation as isUniqueViolation,
+  type Database,
+} from './postgres/database.js';
 import { nowIso, randomId } from './crypto.js';
 import { toBoolean } from './env.js';
-import type { D1Database } from './workers-types.js';
 import type {
   CheckRunRow,
   DueRound,
@@ -13,7 +17,8 @@ import type {
 } from './types.js';
 
 export interface CoordinatorContext {
-  db: D1Database;
+  db: Database;
+  schedulingPolicy?: 'hosted' | 'legacy';
   now: Date;
   enabledRegionIds: readonly RegionId[];
   claimToken: string;
@@ -98,17 +103,6 @@ export function nextCheckAt(
   return new Date(observed + steps * intervalMs).toISOString();
 }
 
-function enabledRegionClause(regionIds: readonly RegionId[]): {
-  clause: string;
-  values: RegionId[];
-} {
-  if (regionIds.length === 0) return { clause: 'NULL', values: [] };
-  return {
-    clause: regionIds.map(() => '?').join(', '),
-    values: [...regionIds],
-  };
-}
-
 /**
  * Atomically advance due monitor schedules, insert their check rounds, and
  * claim pending rounds.
@@ -138,66 +132,56 @@ export async function claimDueRounds(
     context.collectionGraceMs,
   );
 
-  const regionFilter = enabledRegionClause(context.enabledRegionIds);
-  // Each monitor's compare-and-set advance and its round insert are committed in
-  // the same atomic batch. Advancing the schedule without inserting the round
-  // (a crash between two separate batches) would permanently skip the window;
-  // inserting the round without advancing would leave the monitor due forever.
-  const pairs: { sql: string; values: unknown[] }[][] = [];
-  for (const monitor of due) {
+  for (const monitor of due.slice(0, Math.min(context.batchSize ?? defaultBatchSize, 50))) {
     const advanced = nextCheckAt(monitor.next_check_at, monitor.interval_seconds, context.now);
     const windowStartedAt = monitor.next_check_at;
     // Include time spent queued behind other regional requests. Basing this on
     // a stale scheduled window would immediately expire missed windows.
     const deadlineAt = new Date(context.now.getTime() + roundDeadlineOffset).toISOString();
-    pairs.push([
-      {
-        // Compare-and-set: only the invocation that observed the same schedule
-        // wins and advances it.
-        sql: `UPDATE monitors SET next_check_at = ?
-              WHERE id = ? AND next_check_at = ? AND enabled = 1`,
-        values: [advanced, monitor.id, monitor.next_check_at],
-      },
-      {
-        // The round is inserted only when this invocation won the advance: the
-        // EXISTS clause checks the monitor now sits at the advanced schedule.
-        // Round insertion is idempotent on `(monitor_id, window_started_at)`.
-        sql: `INSERT INTO check_runs (
+    await context.db.transaction(async (db) => {
+      const eligibility = db.table(
+        context.schedulingPolicy === 'hosted' ? 'tier_schedulable_monitors' : 'monitors',
+      );
+      const locked = await first<{ id: string }>(
+        db,
+        `SELECT m.id FROM ${db.table('monitors')} m
+         WHERE m.id = $1 AND m.next_check_at = $2 AND m.enabled = 1
+           AND EXISTS (SELECT 1 FROM ${eligibility} eligible WHERE eligible.id = m.id)
+         FOR UPDATE OF m SKIP LOCKED`,
+        [monitor.id, monitor.next_check_at],
+      );
+      if (!locked) return;
+      const regions = await all<{ region_id: RegionId }>(
+        db,
+        `SELECT region_id FROM ${db.table('monitor_regions')}
+         WHERE monitor_id = $1 AND region_id = ANY($2::text[]) ORDER BY region_id`,
+        [monitor.id, context.enabledRegionIds],
+      );
+      if (regions.length === 0) return;
+      await run(db, `UPDATE ${db.table('monitors')} SET next_check_at = $1 WHERE id = $2`, [
+        advanced,
+        monitor.id,
+      ]);
+      await run(
+        db,
+        `INSERT INTO ${db.table('check_runs')} (
                 monitor_id, window_started_at, expected_region_count, expected_regions,
                 monitor_url, timeout_ms, dns_diagnostics_enabled, deadline_at
               )
-              SELECT ?, ?, count(*), json_group_array(region_id), ?, ?, ?, ?
-              FROM monitor_regions
-              WHERE monitor_id = ? AND region_id IN (${regionFilter.clause})
-                AND EXISTS (
-                  SELECT 1 FROM monitors m
-                  WHERE m.id = ? AND m.enabled = 1 AND m.next_check_at = ?
-                )
-              GROUP BY monitor_id
-              -- A monitor with no enabled regions produces no round rather than an
-              -- invalid zero-region round.
-              HAVING count(*) > 0
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
               ON CONFLICT (monitor_id, window_started_at) DO NOTHING`,
-        values: [
+        [
           monitor.id,
           windowStartedAt,
+          regions.length,
+          JSON.stringify(regions.map((row) => row.region_id)),
           monitor.url,
           monitor.timeout_ms,
           monitor.dns_diagnostics_enabled,
           deadlineAt,
-          monitor.id,
-          ...regionFilter.values,
-          monitor.id,
-          advanced,
         ],
-      },
-    ]);
-  }
-  // Keep each batch bounded (25 monitors = 50 statements, matching the previous
-  // per-batch size); a failure between batches only leaves later monitors due
-  // for the next invocation, never a skipped window.
-  for (const group of chunk(pairs, 25)) {
-    await batch(context.db, group.flat());
+      );
+    });
   }
 
   return claimPendingRounds(context);
@@ -206,39 +190,33 @@ export async function claimDueRounds(
 /** Claim pending rounds whose lease is free or expired. */
 export async function claimPendingRounds(context: CoordinatorContext): Promise<DueRound[]> {
   const leaseSeconds = context.leaseSeconds ?? defaultLeaseSeconds;
-  const batchSize = context.batchSize ?? defaultBatchSize;
+  const batchSize = Math.min(context.batchSize ?? defaultBatchSize, 50);
   const regionalTaskBudget = context.regionalTaskBudget ?? batchSize * 9;
   const now = nowIso(context.now);
   const leaseExpiresAt = nowIso(new Date(context.now.getTime() + leaseSeconds * 1_000));
   const claimed = await all<CheckRunRow>(
     context.db,
-    `UPDATE check_runs
-     SET claim_token = ?,
-       claim_expires_at = CASE WHEN deadline_at > ? THEN deadline_at ELSE ? END,
-       claimed_by = ?
-     WHERE id IN (
-       SELECT id FROM (
+    `WITH available AS MATERIALIZED (
+      SELECT cr.* FROM ${context.db.table('check_runs')} cr
+      WHERE cr.status = 'pending'
+        AND (cr.claim_expires_at IS NULL OR cr.claim_expires_at <= $4)
+        AND cr.deadline_at > $4
+        AND EXISTS (SELECT 1 FROM ${context.db.table(context.schedulingPolicy === 'hosted' ? 'tier_schedulable_monitors' : 'monitors')} m WHERE m.id = cr.monitor_id AND m.enabled = 1)
+      ORDER BY cr.window_started_at, cr.id LIMIT $6
+      FOR UPDATE OF cr SKIP LOCKED
+    ), budgeted AS (
          SELECT id, SUM(expected_region_count) OVER (
            ORDER BY window_started_at ASC, id ASC
          ) AS regional_tasks
-         FROM check_runs
-         WHERE status = 'pending'
-           AND (claim_expires_at IS NULL OR claim_expires_at <= ?)
-           AND deadline_at > ?
-       ) WHERE regional_tasks <= ?
-       LIMIT ?
+         FROM available
+    ) UPDATE ${context.db.table('check_runs')} cr
+     SET claim_token = $1,
+       claim_expires_at = GREATEST(cr.deadline_at, $2), claimed_by = $3
+     WHERE cr.id IN (
+       SELECT id FROM budgeted WHERE regional_tasks <= $5
      )
      RETURNING *`,
-    [
-      context.claimToken,
-      leaseExpiresAt,
-      leaseExpiresAt,
-      context.claimToken,
-      now,
-      now,
-      regionalTaskBudget,
-      batchSize,
-    ],
+    [context.claimToken, leaseExpiresAt, context.claimToken, now, regionalTaskBudget, batchSize],
   );
   return claimed.map(roundRowToDueRound);
 }
@@ -250,12 +228,16 @@ export async function reclaimExpiredRounds(
   const timestamp = nowIso(context.now);
   const pending = await run(
     context.db,
-    `UPDATE check_runs SET claim_token = NULL, claim_expires_at = NULL, claimed_by = NULL
-     WHERE status = 'pending' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?`,
+    `UPDATE ${context.db.table('check_runs')} SET claim_token = NULL, claim_expires_at = NULL, claimed_by = NULL
+     WHERE id IN (
+       SELECT id FROM ${context.db.table('check_runs')}
+       WHERE status = 'pending' AND claim_expires_at IS NOT NULL AND claim_expires_at <= $1
+       ORDER BY claim_expires_at, id LIMIT 50 FOR UPDATE SKIP LOCKED
+     )`,
     [timestamp],
   );
   const expired = await finalizeExpiredRounds(context);
-  return { pending: pending.meta.changes, expired };
+  return { pending: pending.rowCount ?? 0, expired };
 }
 
 export function roundRowToDueRound(row: CheckRunRow): DueRound {
@@ -303,19 +285,19 @@ export interface ObservationInput {
  * linking a network diagnostic).
  */
 export async function insertObservation(
-  db: D1Database,
+  db: Database,
   observation: ObservationInput,
 ): Promise<{ id: string; inserted: boolean }> {
   const id = randomId();
   try {
     const result = await run(
       db,
-      `INSERT INTO observations (
+      `INSERT INTO ${db.table('observations')} (
          id, check_run_id, monitor_id, region_id, scheduled_window, status, success,
          http_status, response_ms, total_ms, error_code, error_detail, placement, colo,
          final_url, endpoint_evidence, redirect_count, body_bytes, probe_version,
          response_metadata, started_at, completed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
        ON CONFLICT (monitor_id, region_id, scheduled_window) DO NOTHING`,
       [
         id,
@@ -346,7 +328,7 @@ export async function insertObservation(
         observation.completedAt ?? null,
       ],
     );
-    if (result.meta.changes > 0) return { id, inserted: true };
+    if ((result.rowCount ?? 0) > 0) return { id, inserted: true };
     return { id: await existingObservationId(db, observation), inserted: false };
   } catch (error) {
     if (isUniqueViolation(error)) {
@@ -358,13 +340,13 @@ export async function insertObservation(
 
 /** Resolve the persisted id for a durable observation key after a duplicate. */
 async function existingObservationId(
-  db: D1Database,
+  db: Database,
   observation: Pick<ObservationInput, 'monitorId' | 'regionId' | 'scheduledWindow'>,
 ): Promise<string> {
   const row = await first<{ id: string }>(
     db,
-    `SELECT id FROM observations
-     WHERE monitor_id = ? AND region_id = ? AND scheduled_window = ? LIMIT 1`,
+    `SELECT id FROM ${db.table('observations')}
+     WHERE monitor_id = $1 AND region_id = $2 AND scheduled_window = $3 LIMIT 1`,
     [observation.monitorId, observation.regionId, observation.scheduledWindow],
   );
   return row?.id ?? '';
@@ -377,31 +359,37 @@ async function existingObservationId(
  * finalized (making repeated calls idempotent).
  */
 export async function finalizeRound(
-  db: D1Database,
+  db: Database,
   roundId: string,
   now: Date = new Date(),
 ): Promise<RunStatus | null> {
   const timestamp = nowIso(now);
-  const row = await first<{ status: RunStatus }>(
-    db,
-    `UPDATE check_runs
+  return db.transaction(async (tx) => {
+    await tx.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+    await tx.query(`SELECT id FROM ${tx.table('check_runs')} WHERE id = $1 FOR NO KEY UPDATE`, [
+      roundId,
+    ]);
+    const row = await first<{ status: RunStatus }>(
+      tx,
+      `UPDATE ${tx.table('check_runs')} cr
      SET status = CASE
-           WHEN (SELECT count(*) FROM observations WHERE check_run_id = check_runs.id)
+           WHEN (SELECT count(*) FROM ${tx.table('observations')} WHERE check_run_id = cr.id)
                 >= expected_region_count THEN 'complete'
            ELSE 'partial'
          END,
-         completed_at = COALESCE(completed_at, ?),
-         finalized_at = COALESCE(finalized_at, ?)
-     WHERE id = ? AND status = 'pending'
+         completed_at = COALESCE(completed_at, $1),
+         finalized_at = COALESCE(finalized_at, $1)
+     WHERE id = $2 AND status = 'pending'
        AND (
-         (SELECT count(*) FROM observations WHERE check_run_id = check_runs.id)
+         (SELECT count(*) FROM ${tx.table('observations')} WHERE check_run_id = cr.id)
            >= expected_region_count
-         OR deadline_at <= ?
+         OR deadline_at <= $1
        )
      RETURNING status`,
-    [timestamp, timestamp, roundId, timestamp],
-  );
-  return row?.status ?? null;
+      [timestamp, roundId],
+    );
+    return row?.status ?? null;
+  });
 }
 
 /**
@@ -411,22 +399,19 @@ export async function finalizeRound(
  */
 export async function finalizeExpiredRounds(context: CoordinatorContext): Promise<number> {
   const timestamp = nowIso(context.now);
-  const result = await run(
+  const rows = await all<{ id: string }>(
     context.db,
-    `UPDATE check_runs
-     SET status = CASE
-           WHEN (SELECT count(*) FROM observations WHERE check_run_id = check_runs.id)
-                >= expected_region_count THEN 'complete'
-           ELSE 'partial'
-         END,
-         completed_at = COALESCE(completed_at, ?),
-         finalized_at = COALESCE(finalized_at, ?)
-     WHERE status = 'pending' AND deadline_at <= ?`,
-    [timestamp, timestamp, timestamp],
+    `SELECT id FROM ${context.db.table('check_runs')}
+     WHERE status = 'pending' AND deadline_at <= $1 ORDER BY deadline_at, id LIMIT 50`,
+    [timestamp],
   );
-  return result.meta.changes;
+  let finalized = 0;
+  for (const row of rows) if (await finalizeRound(context.db, row.id, context.now)) finalized += 1;
+  return finalized;
 }
 
-export async function getRound(db: D1Database, roundId: string): Promise<CheckRunRow | null> {
-  return first<CheckRunRow>(db, 'SELECT * FROM check_runs WHERE id = ? LIMIT 1', [roundId]);
+export async function getRound(db: Database, roundId: string): Promise<CheckRunRow | null> {
+  return first<CheckRunRow>(db, `SELECT * FROM ${db.table('check_runs')} WHERE id = $1 LIMIT 1`, [
+    roundId,
+  ]);
 }

@@ -1,8 +1,5 @@
-import { all, first, type D1Database } from '@uptime/cloudflare';
 import {
-  endpointEvidenceSchema,
-  summarizeUptimeDays,
-  uptimeWindow,
+  type RegionId,
   type Badge,
   type Monitor,
   type MonitorSummary,
@@ -10,13 +7,28 @@ import {
   type MonitorUptimeData,
   type StatusPageReportSnapshot,
   type StatusPageReportSnapshotMonitor,
-  type RegionId,
+  endpointEvidenceSchema,
+  summarizeUptimeDays,
+  uptimeWindow,
 } from '@uptime/contracts';
+import {
+  type Database,
+  pgAll,
+  pgFirst,
+  pgRun,
+} from '@uptime/cloudflare/postgres';
 import { regions as regionDefinitions } from '@uptime/regions';
 
 import { decodeStoredJson, type StoredJsonLog } from './stored-json.js';
 import { deriveAggregateStatus } from './status.js';
-import { calculateLatency, ranges, type RangeKey, type LatencyObservationRow } from './latency.js';
+import {
+  ranges,
+  type RangeKey,
+  type LatencyAggregateBucket,
+  type LatencyObservationRow,
+  calculateLatency,
+  createLatencyAccumulator,
+} from './latency.js';
 export {
   calculateLatency,
   createLatencyAccumulator,
@@ -40,6 +52,7 @@ import {
   type StatusPageRow,
   type UptimeDayRow,
 } from './types.js';
+import { base64UrlDecodeJson, base64UrlEncodeJson } from './stored-json.js';
 
 export function placeholders(count: number): string {
   return Array.from({ length: count }, () => '?').join(', ');
@@ -52,39 +65,41 @@ export function nextBoundary(now: Date, intervalSeconds: number): Date {
 
 export { uptimeWindow } from '@uptime/contracts';
 
-export const monitorSelect = `
-  SELECT m.*, COALESCE((
-    SELECT json_group_array(notification_service_id)
-    FROM (
-      SELECT notification_service_id FROM monitor_notification_services
-      WHERE monitor_id = m.id ORDER BY notification_service_id
-    )
+export function monitorSelect(db?: Database): string {
+  const monitors = db ? db.table('monitors') : '"monitors"';
+  const services = db ? db.table('monitor_notification_services') : '"monitor_notification_services"';
+  return `SELECT m.*, COALESCE((
+    SELECT json_agg(notification_service_id ORDER BY notification_service_id)::text
+    FROM ${services}
+    WHERE monitor_id = m.id
   ), '[]') AS notification_service_ids
-  FROM monitors m`;
+  FROM ${monitors} m`;
+}
+monitorSelect.toString = () => monitorSelect();
 
-export async function getMonitor(db: D1Database, id: string): Promise<MonitorRow | null> {
-  return first<MonitorRow>(db, `${monitorSelect} WHERE m.id = ? LIMIT 1`, [id]);
+export async function getMonitor(db: Database, id: string): Promise<MonitorRow | null> {
+  return pgFirst<MonitorRow>(db, `${monitorSelect(db)} WHERE m.id = $1 LIMIT 1`, [id]);
 }
 
-export async function getMonitorRegions(db: D1Database, monitorId: string): Promise<RegionId[]> {
-  const rows = await all<{ region_id: RegionId }>(
+export async function getMonitorRegions(db: Database, monitorId: string): Promise<RegionId[]> {
+  const rows = await pgAll<{ region_id: RegionId }>(
     db,
-    'SELECT region_id FROM monitor_regions WHERE monitor_id = ? ORDER BY region_id',
+    `SELECT region_id FROM ${db.table('monitor_regions')} WHERE monitor_id = $1 ORDER BY region_id`,
     [monitorId],
   );
   return rows.map((row) => row.region_id);
 }
 
 export async function getPublicMonitor(
-  db: D1Database,
+  db: Database,
   reference: string,
 ): Promise<MonitorRow | null> {
-  return first<MonitorRow>(
+  return pgFirst<MonitorRow>(
     db,
-    `${monitorSelect}
-     WHERE (m.id = ? OR m.public_slug = ?)
+    `${monitorSelect(db)}
+     WHERE (m.id = $1 OR m.public_slug = $2)
        AND (m.is_public = 1 OR EXISTS (
-         SELECT 1 FROM status_page_monitors spm WHERE spm.monitor_id = m.id
+         SELECT 1 FROM ${db.table('status_page_monitors')} spm WHERE spm.monitor_id = m.id
        ))
      LIMIT 1`,
     [reference, reference],
@@ -146,7 +161,7 @@ function parseStoredEndpointEvidence(
 }
 
 export async function monitorSummary(
-  db: D1Database,
+  db: Database,
   row: MonitorRow,
   log: StoredJsonLog,
 ): Promise<MonitorSummary> {
@@ -154,40 +169,42 @@ export async function monitorSummary(
 }
 
 export async function monitorSummaries(
-  db: D1Database,
+  db: Database,
   rows: readonly MonitorRow[],
   log: StoredJsonLog,
 ): Promise<MonitorSummary[]> {
   if (rows.length === 0) return [];
-  const idsJson = JSON.stringify([...new Set(rows.map((row) => row.id))]);
+  const ids = [...new Set(rows.map((row) => row.id))];
   const [regionRows, badges, latestRows] = await Promise.all([
-    all<{ monitor_id: string; region_id: RegionId }>(
+    pgAll<{ monitor_id: string; region_id: RegionId }>(
       db,
-      `SELECT monitor_id, region_id FROM monitor_regions
-       WHERE monitor_id IN (SELECT value FROM json_each(?)) ORDER BY monitor_id, region_id`,
-      [idsJson],
+      `SELECT monitor_id, region_id FROM ${db.table('monitor_regions')}
+       WHERE monitor_id = ANY($1::text[]) ORDER BY monitor_id, region_id`,
+      [ids],
     ),
-    all<Badge>(
+    pgAll<Badge>(
       db,
-      `SELECT id, name, color FROM badges
-       WHERE id IN (SELECT badge_id FROM monitors
-         WHERE id IN (SELECT value FROM json_each(?)) AND badge_id IS NOT NULL)`,
-      [idsJson],
+      `SELECT id, name, color FROM ${db.table('badges')}
+       WHERE id IN (
+         SELECT badge_id FROM ${db.table('monitors')}
+         WHERE id = ANY($1::text[]) AND badge_id IS NOT NULL
+       )`,
+      [ids],
     ),
-    all<ObservationRow>(
+    pgAll<ObservationRow>(
       db,
-      `WITH requested(id) AS (SELECT value FROM json_each(?)),
-       latest_runs AS (
+      `WITH latest_runs AS (
          SELECT m.id AS monitor_id, (
-           SELECT cr.id FROM check_runs cr
+           SELECT cr.id FROM ${db.table('check_runs')} cr
            WHERE cr.monitor_id = m.id AND cr.status IN ('complete', 'partial')
              AND cr.window_started_at >= m.updated_at
            ORDER BY cr.window_started_at DESC LIMIT 1
          ) AS run_id
-         FROM monitors m JOIN requested ON requested.id = m.id
+         FROM ${db.table('monitors')} m
+         WHERE m.id = ANY($1::text[])
        )
-       SELECT o.* FROM latest_runs lr JOIN observations o ON o.check_run_id = lr.run_id`,
-      [idsJson],
+       SELECT o.* FROM latest_runs lr JOIN ${db.table('observations')} o ON o.check_run_id = lr.run_id`,
+      [ids],
     ),
   ]);
   const regions = new Map<string, RegionId[]>();
@@ -250,10 +267,10 @@ function buildMonitorSummary(
   };
   const status = deriveAggregateStatus(
     regionIds,
-    latestRows.map((row) => ({
-      regionId: row.region_id,
-      status: row.status,
-      success: asBool(row.success),
+    latestRows.map((obs) => ({
+      regionId: obs.region_id,
+      status: obs.status,
+      success: asBool(obs.success),
     })),
   );
   return {
@@ -270,27 +287,27 @@ export { toPublicMonitorSummary } from '@uptime/contracts';
 // Status pages
 // ---------------------------------------------------------------------------
 
-export async function getStatusPage(db: D1Database, id: string) {
-  const page = await first<StatusPageRow>(
+export async function getStatusPage(db: Database, id: string) {
+  const page = await pgFirst<StatusPageRow>(
     db,
-    'SELECT id, title, public_slug, created_at, updated_at FROM status_pages WHERE id = ? LIMIT 1',
+    `SELECT id, title, public_slug, created_at, updated_at FROM ${db.table('status_pages')} WHERE id = $1 LIMIT 1`,
     [id],
   );
   if (!page) return null;
-  const groups = await all<StatusPageGroupRow>(
+  const groups = await pgAll<StatusPageGroupRow>(
     db,
-    'SELECT id, title, position, width, show_badges FROM status_page_groups WHERE status_page_id = ? ORDER BY position',
+    `SELECT id, title, position, width, show_badges FROM ${db.table('status_page_groups')} WHERE status_page_id = $1 ORDER BY position`,
     [id],
   );
-  const monitors = await all<StatusPageMonitorRow>(
+  const monitors = await pgAll<StatusPageMonitorRow>(
     db,
     `SELECT spm.group_id, m.id, m.name, m.url, m.public_slug,
        b.id AS badge_id, b.name AS badge_name, b.color AS badge_color,
        m.uptime_thresholds, spm.position
-     FROM status_page_monitors spm
-     JOIN monitors m ON m.id = spm.monitor_id
-     LEFT JOIN badges b ON b.id = m.badge_id
-     WHERE spm.status_page_id = ?
+     FROM ${db.table('status_page_monitors')} spm
+     JOIN ${db.table('monitors')} m ON m.id = spm.monitor_id
+     LEFT JOIN ${db.table('badges')} b ON b.id = m.badge_id
+     WHERE spm.status_page_id = $1
      ORDER BY spm.position`,
     [id],
   );
@@ -322,23 +339,23 @@ export async function getStatusPage(db: D1Database, id: string) {
   };
 }
 
-export async function getPublicStatusPage(db: D1Database, reference: string) {
+export async function getPublicStatusPage(db: Database, reference: string) {
   const byId = await getStatusPage(db, reference);
   if (byId) return byId;
-  const matched = await first<{ id: string }>(
+  const matched = await pgFirst<{ id: string }>(
     db,
-    'SELECT id FROM status_pages WHERE public_slug = ? LIMIT 1',
+    `SELECT id FROM ${db.table('status_pages')} WHERE public_slug = $1 LIMIT 1`,
     [reference],
   );
   return matched ? getStatusPage(db, matched.id) : null;
 }
 
-export async function listStatusPageSummaries(db: D1Database) {
-  const pages = await all<StatusPageRow>(
+export async function listStatusPageSummaries(db: Database) {
+  const pages = await pgAll<StatusPageRow>(
     db,
     `SELECT sp.id, sp.title, sp.public_slug, sp.created_at, sp.updated_at,
-       (SELECT count(*) FROM status_page_monitors spm WHERE spm.status_page_id = sp.id) AS monitor_count
-     FROM status_pages sp ORDER BY sp.created_at DESC`,
+       (SELECT count(*)::integer FROM ${db.table('status_page_monitors')} spm WHERE spm.status_page_id = sp.id) AS monitor_count
+     FROM ${db.table('status_pages')} sp ORDER BY sp.created_at DESC`,
   );
   return pages.map((page) => ({
     id: page.id,
@@ -416,25 +433,27 @@ function validClosedDaysCache(
 }
 
 async function observedMissingDays(
-  db: D1Database,
+  db: Database,
   missing: readonly { monitorId: string; day: string }[],
 ): Promise<Map<string, ObservedDayRow>> {
   if (missing.length === 0) return new Map();
-  const rows = await all<ObservedDayRow & { monitor_id: string }>(
+  const rows = await pgAll<ObservedDayRow & { monitor_id: string }>(
     db,
-    `WITH missing(monitor_id, day) AS (
-       SELECT json_extract(value, '$.monitorId'), json_extract(value, '$.day') FROM json_each(?)
+    `WITH missing AS (
+       SELECT (elem->>'monitorId')::text AS monitor_id, (elem->>'day')::text AS day
+       FROM json_array_elements($1::json) AS elem
      )
-     SELECT missing.monitor_id, missing.day AS day, COUNT(*) AS received_count,
-       SUM(CASE WHEN o.success = 1 THEN 1 ELSE 0 END) AS success_count,
-       AVG(CASE WHEN o.success = 1 AND o.response_ms IS NOT NULL THEN o.response_ms END) AS average_response_ms
+     SELECT missing.monitor_id, missing.day AS day,
+       COUNT(*)::integer AS received_count,
+       COALESCE(SUM(CASE WHEN o.success = 1 THEN 1 ELSE 0 END), 0)::integer AS success_count,
+       AVG(CASE WHEN o.success = 1 AND o.response_ms IS NOT NULL THEN o.response_ms END)::double precision AS average_response_ms
      FROM missing
-     CROSS JOIN check_runs cr INDEXED BY check_runs_monitor_time_idx
+     JOIN ${db.table('check_runs')} cr
        ON cr.monitor_id = missing.monitor_id
        AND cr.window_started_at >= missing.day || 'T00:00:00.000Z'
-       AND cr.window_started_at < strftime('%Y-%m-%dT00:00:00.000Z', missing.day, '+1 day')
+       AND cr.window_started_at < (missing.day::date + 1)::text || 'T00:00:00.000Z'
        AND cr.status IN ('complete', 'partial')
-     JOIN observations o ON o.check_run_id = cr.id
+     JOIN ${db.table('observations')} o ON o.check_run_id = cr.id
      GROUP BY missing.monitor_id, missing.day`,
     [JSON.stringify(missing)],
   );
@@ -473,7 +492,7 @@ function summarizeDays(
 }
 
 async function recoveryStatuses(
-  db: D1Database,
+  db: Database,
   monitorIds: readonly string[],
   todayIso: string,
 ): Promise<
@@ -487,20 +506,24 @@ async function recoveryStatuses(
     { recoveryStatus: 'up' | 'down' | 'recovering' | null; affectedRegionIds: RegionId[] }
   >(monitorIds.map((id) => [id, { recoveryStatus: null, affectedRegionIds: [] }]));
   if (monitorIds.length === 0) return result;
-  const failing = await all<{
+  const failing = await pgAll<{
     monitor_id: string;
     region_id: RegionId;
     failure_window: string;
   }>(
     db,
-    `WITH requested(monitor_id) AS (SELECT value FROM json_each(?)),
-     regions(region_id) AS (SELECT value FROM json_each(?)),
+    `WITH requested AS (
+       SELECT unnest($1::text[]) AS monitor_id
+     ),
+     regions AS (
+       SELECT unnest($2::text[]) AS region_id
+     ),
      failures AS (
        SELECT requested.monitor_id, regions.region_id, (
-         SELECT o.scheduled_window FROM observations o
+         SELECT o.scheduled_window FROM ${db.table('observations')} o
          WHERE o.monitor_id = requested.monitor_id AND o.region_id = regions.region_id
-           AND o.scheduled_window >= ? AND o.success = 0
-           AND EXISTS (SELECT 1 FROM check_runs cr
+           AND o.scheduled_window >= $3 AND o.success = 0
+           AND EXISTS (SELECT 1 FROM ${db.table('check_runs')} cr
              WHERE cr.id = o.check_run_id AND cr.status IN ('complete', 'partial'))
          ORDER BY o.scheduled_window DESC LIMIT 1
        ) AS failure_window
@@ -510,33 +533,35 @@ async function recoveryStatuses(
      FROM failures
      WHERE failure_window IS NOT NULL`,
     [
-      JSON.stringify(monitorIds),
-      JSON.stringify(regionDefinitions.map((region) => region.id)),
+      monitorIds,
+      regionDefinitions.map((region) => region.id),
       todayIso,
     ],
   );
   if (failing.length === 0) return result;
-  const recentRows = await all<{ monitor_id: string; region_id: RegionId; recent: string }>(
+  const recentRows = await pgAll<{ monitor_id: string; region_id: RegionId; recent: unknown }>(
     db,
-    `WITH failing(monitor_id, region_id, failure_window) AS (
-       SELECT json_extract(value, '$.monitor_id'), json_extract(value, '$.region_id'),
-         json_extract(value, '$.failure_window')
-       FROM json_each(?)
+    `WITH failing AS (
+       SELECT (elem->>'monitor_id')::text AS monitor_id,
+              (elem->>'region_id')::text AS region_id,
+              (elem->>'failure_window')::text AS failure_window
+       FROM json_array_elements($1::json) AS elem
      )
      SELECT failing.monitor_id, failing.region_id, (
-       SELECT json_group_array(success) FROM (
-         SELECT o.success FROM observations o
+       SELECT COALESCE(json_agg(sub.success ORDER BY sub.scheduled_window DESC)::text, '[]')
+       FROM (
+         SELECT o.success, o.scheduled_window FROM ${db.table('observations')} o
          WHERE o.monitor_id = failing.monitor_id AND o.region_id = failing.region_id
            AND o.scheduled_window > failing.failure_window
-           AND EXISTS (SELECT 1 FROM check_runs cr
+           AND EXISTS (SELECT 1 FROM ${db.table('check_runs')} cr
              WHERE cr.id = o.check_run_id AND cr.status IN ('complete', 'partial'))
          ORDER BY o.scheduled_window DESC LIMIT 5
-       )
+       ) sub
      ) AS recent FROM failing`,
     [JSON.stringify(failing)],
   );
   for (const row of recentRows) {
-    const recent = JSON.parse(row.recent) as number[];
+    const recent = (typeof row.recent === 'string' ? JSON.parse(row.recent) : row.recent) as number[];
     const firstTwo = recent.slice(0, 2);
     const state =
       recent.length === 5 && recent.every((success) => success === 1)
@@ -561,7 +586,7 @@ async function recoveryStatuses(
 }
 
 export async function monitorUptimePayload(
-  db: D1Database,
+  db: Database,
   monitorId: string,
   currentTime: Date,
 ): Promise<MonitorUptimePayload> {
@@ -569,7 +594,7 @@ export async function monitorUptimePayload(
 }
 
 async function monitorUptimeDetails(
-  db: D1Database,
+  db: Database,
   monitorId: string,
   currentTime: Date,
 ): Promise<{
@@ -580,7 +605,7 @@ async function monitorUptimeDetails(
 }
 
 export async function monitorUptimeDetailsBulk(
-  db: D1Database,
+  db: Database,
   monitorIds: readonly string[],
   currentTime: Date,
 ): Promise<Map<string, { uptime: MonitorUptimePayload; affectedRegionIds: RegionId[] }>> {
@@ -630,7 +655,7 @@ function cachedStoredRow(day: string, row: ReportUptimeClosedDay): UptimeDayRow 
  * rereads yesterday once before promoting it into the closed-day cache.
  */
 export async function monitorUptimeDetailsBulkCached(
-  db: D1Database,
+  db: Database,
   monitorIds: readonly string[],
   currentTime: Date,
   closedDaysCache?: ReportUptimeClosedDaysCache,
@@ -639,7 +664,7 @@ export async function monitorUptimeDetailsBulkCached(
 }
 
 async function monitorUptimeDetailsBulkInternal(
-  db: D1Database,
+  db: Database,
   requestedMonitorIds: readonly string[],
   currentTime: Date,
   closedDaysCache: ReportUptimeClosedDaysCache | undefined,
@@ -651,9 +676,9 @@ async function monitorUptimeDetailsBulkInternal(
   const closedDayKeys = dayKeys.slice(0, -1);
   const throughDay = closedDayKeys.at(-1)!;
   const revisionRow = cacheEnabled
-    ? await first<{ revision: number }>(
+    ? await pgFirst<{ revision: number }>(
         db,
-        `SELECT revision FROM report_cache_revisions WHERE cache_key = 'monitor_daily_uptime' LIMIT 1`,
+        `SELECT revision FROM ${db.table('report_cache_revisions')} WHERE cache_key = 'monitor_daily_uptime' LIMIT 1`,
       )
     : null;
   const revision = Number(revisionRow?.revision ?? 0);
@@ -676,24 +701,24 @@ async function monitorUptimeDetailsBulkInternal(
     closedDaysCache.throughDay === priorThrough.toISOString().slice(0, 10);
   const closedRows = cacheCurrent
     ? []
-    : await all<UptimeDayRow>(
+    : await pgAll<UptimeDayRow>(
         db,
         `SELECT monitor_id, day, uptime_percentage, average_response_ms, weight, received_count, success_count
-         FROM monitor_daily_uptime
-         WHERE monitor_id IN (SELECT value FROM json_each(?)) AND day >= ? AND day <= ?`,
+         FROM ${db.table('monitor_daily_uptime')}
+         WHERE monitor_id = ANY($1::text[]) AND day >= $2 AND day <= $3`,
         [
-          JSON.stringify(monitorIds),
+          monitorIds,
           rollover ? throughDay : closedDayKeys[0]!,
           cacheEnabled ? throughDay : todayKey,
         ],
       );
   const todayRows = cacheEnabled
-    ? await all<UptimeDayRow>(
+    ? await pgAll<UptimeDayRow>(
         db,
         `SELECT monitor_id, day, uptime_percentage, average_response_ms, weight, received_count, success_count
-         FROM monitor_daily_uptime
-         WHERE monitor_id IN (SELECT value FROM json_each(?)) AND day = ?`,
-        [JSON.stringify(monitorIds), todayKey],
+         FROM ${db.table('monitor_daily_uptime')}
+         WHERE monitor_id = ANY($1::text[]) AND day = $2`,
+        [monitorIds, todayKey],
       )
     : [];
   const storedRows = [...closedRows, ...todayRows];
@@ -703,10 +728,6 @@ async function monitorUptimeDetailsBulkInternal(
     values.set(row.day.slice(0, 10), row);
     storedByMonitor.set(row.monitor_id, values);
   }
-  // D1 triggers maintain this exact aggregate for both finalized rounds and
-  // late observations, including the live UTC day. Legacy/imported databases
-  // can still have gaps, so seek only those individual UTC days instead of
-  // scanning the whole ninety-day observation range.
   const closedBase = new Map<string, Map<string, UptimeDayRow>>();
   if (cacheCurrent || rollover) {
     for (const monitorId of monitorIds) {
@@ -788,7 +809,7 @@ export interface PublicStatusPagePayload {
 }
 
 export async function publicStatusPagePayload(
-  db: D1Database,
+  db: Database,
   statusPage: NonNullable<Awaited<ReturnType<typeof getStatusPage>>>,
   currentTime: Date,
 ): Promise<PublicStatusPagePayload> {
@@ -797,8 +818,8 @@ export async function publicStatusPagePayload(
   ];
   const [detailsByMonitor, monitorRows] = await Promise.all([
     monitorUptimeDetailsBulk(db, monitorIds, currentTime),
-    all<MonitorRow>(db, `${monitorSelect} WHERE m.id IN (SELECT value FROM json_each(?))`, [
-      JSON.stringify(monitorIds),
+    pgAll<MonitorRow>(db, `${monitorSelect(db)} WHERE m.id = ANY($1::text[])`, [
+      monitorIds,
     ]),
   ]);
   const summaries = await monitorSummaries(db, monitorRows, noopLog);
@@ -844,24 +865,19 @@ export async function publicStatusPagePayload(
 
 /**
  * Build the bounded latency payload for a requested range.
- *
- * LIMITATION: SQLite/D1 has no `percentile_disc`/`date_bin`, so exact samples
- * for the requested range are read and bucketed in the Worker. Queries are
- * bounded by the fixed 1h/24h/7d/30d ranges; monitor-wide ranges on very busy
- * monitors should be watched against D1 row-read limits.
  */
 export async function latencyPayload(
-  db: D1Database,
+  db: Database,
   monitorId: string,
   range: RangeKey,
   currentTime: Date,
 ) {
   const since = new Date(currentTime.getTime() - ranges[range]).toISOString();
-  const rows = await all<LatencyObservationRow>(
+  const rows = await pgAll<LatencyObservationRow>(
     db,
     `SELECT region_id, success, started_at, id,
        COALESCE(response_ms, CASE WHEN error_code = 'timeout' THEN total_ms END) AS value
-     FROM observations WHERE monitor_id = ? AND started_at >= ?`,
+     FROM ${db.table('observations')} WHERE monitor_id = $1 AND started_at >= $2`,
     [monitorId, since],
   );
 
@@ -879,33 +895,41 @@ export interface Cursor {
 }
 
 export async function listObservations(
-  db: D1Database,
+  db: Database,
   monitorId: string,
   options: {
     range: RangeKey;
-    regionId?: RegionId;
-    cursor?: Cursor | null;
+    regionId?: RegionId | undefined;
+    cursor?: Cursor | null | undefined;
     limit: number;
     now: Date;
   },
 ): Promise<{ observations: Observation[]; nextCursor: Cursor | null }> {
   const since = new Date(options.now.getTime() - ranges[options.range]).toISOString();
-  const clauses = ['monitor_id = ?', 'started_at >= ?'];
   const values: unknown[] = [monitorId, since];
-  if (options.regionId) {
-    clauses.push('region_id = ?');
+  const clauses = [`monitor_id = $1`, `started_at >= $2`];
+
+  if (options.regionId !== undefined) {
     values.push(options.regionId);
+    clauses.push(`region_id = $${values.length}`);
   }
   if (options.cursor) {
-    clauses.push('(started_at < ? OR (started_at = ? AND id < ?))');
-    values.push(options.cursor.startedAt, options.cursor.startedAt, options.cursor.id);
+    values.push(options.cursor.startedAt);
+    const startedAtParam = `$${values.length}`;
+    values.push(options.cursor.id);
+    const idParam = `$${values.length}`;
+    clauses.push(`(started_at < ${startedAtParam} OR (started_at = ${startedAtParam} AND id < ${idParam}))`);
   }
-  const rows = await all<ObservationRow>(
+  values.push(options.limit + 1);
+  const limitParam = `$${values.length}`;
+
+  const rows = await pgAll<ObservationRow>(
     db,
-    `SELECT * FROM observations WHERE ${clauses.join(' AND ')}
-     ORDER BY started_at DESC, id DESC LIMIT ?`,
-    [...values, options.limit + 1],
+    `SELECT * FROM ${db.table('observations')} WHERE ${clauses.join(' AND ')}
+     ORDER BY started_at DESC, id DESC LIMIT ${limitParam}`,
+    values,
   );
+
   const hasMore = rows.length > options.limit;
   const page = rows.slice(0, options.limit);
   return {
@@ -936,12 +960,12 @@ export interface SerializedDnsDiagnostic {
 }
 
 export async function listDnsDiagnostics(
-  db: D1Database,
+  db: Database,
   monitorId: string,
   options: {
     range: '7d' | '30d';
-    regionId?: RegionId;
-    cursor?: { requestedAt: string; id: string } | null;
+    regionId?: RegionId | undefined;
+    cursor?: { requestedAt: string; id: string } | null | undefined;
     limit: number;
     now: Date;
     parseResult: (row: DnsDiagnosticRow, log: StoredJsonLog) => unknown;
@@ -954,22 +978,30 @@ export async function listDnsDiagnostics(
   const since = new Date(
     options.now.getTime() - (options.range === '30d' ? ranges['30d'] : ranges['7d']),
   ).toISOString();
-  const clauses = ['monitor_id = ?', 'requested_at >= ?'];
   const values: unknown[] = [monitorId, since];
-  if (options.regionId) {
-    clauses.push('region_id = ?');
+  const clauses = [`monitor_id = $1`, `requested_at >= $2`];
+
+  if (options.regionId !== undefined) {
     values.push(options.regionId);
+    clauses.push(`region_id = $${values.length}`);
   }
   if (options.cursor) {
-    clauses.push('(requested_at < ? OR (requested_at = ? AND id < ?))');
-    values.push(options.cursor.requestedAt, options.cursor.requestedAt, options.cursor.id);
+    values.push(options.cursor.requestedAt);
+    const requestedAtParam = `$${values.length}`;
+    values.push(options.cursor.id);
+    const idParam = `$${values.length}`;
+    clauses.push(`(requested_at < ${requestedAtParam} OR (requested_at = ${requestedAtParam} AND id < ${idParam}))`);
   }
-  const rows = await all<DnsDiagnosticRow>(
+  values.push(options.limit + 1);
+  const limitParam = `$${values.length}`;
+
+  const rows = await pgAll<DnsDiagnosticRow>(
     db,
-    `SELECT * FROM network_diagnostics WHERE ${clauses.join(' AND ')}
-     ORDER BY requested_at DESC, id DESC LIMIT ?`,
-    [...values, options.limit + 1],
+    `SELECT * FROM ${db.table('network_diagnostics')} WHERE ${clauses.join(' AND ')}
+     ORDER BY requested_at DESC, id DESC LIMIT ${limitParam}`,
+    values,
   );
+
   const hasMore = rows.length > options.limit;
   const page = rows
     .slice(0, options.limit)
@@ -1015,25 +1047,75 @@ function serializeDnsDiagnostic(
 
 export const noopLog: StoredJsonLog = { warn: () => undefined };
 
-export async function badgeExists(db: D1Database, badgeId: string): Promise<boolean> {
-  const row = await first<{ id: string }>(db, 'SELECT id FROM badges WHERE id = ? LIMIT 1', [
-    badgeId,
-  ]);
+export async function badgeExists(db: Database, badgeId: string): Promise<boolean> {
+  const row = await pgFirst<{ id: string }>(
+    db,
+    `SELECT id FROM ${db.table('badges')} WHERE id = $1 LIMIT 1`,
+    [badgeId],
+  );
   return row !== null;
 }
 
 export async function notificationServicesExist(
-  db: D1Database,
+  db: Database,
   serviceIds: readonly string[],
 ): Promise<boolean> {
   const unique = [...new Set(serviceIds)];
   if (unique.length === 0) return true;
-  const rows = await all<{ id: string }>(
+  const rows = await pgAll<{ id: string }>(
     db,
-    `SELECT id FROM notification_services WHERE id IN (${placeholders(unique.length)})`,
-    unique,
+    `SELECT id FROM ${db.table('notification_services')} WHERE id = ANY($1::text[])`,
+    [unique],
   );
   return rows.length === unique.length;
+}
+
+export interface NotificationHistoryWrite {
+  notificationServiceId: string;
+  monitorId: string | null;
+  monitorName: string;
+  monitorUrl: string | null;
+  provider: string;
+  kind: string;
+  status: 'sent' | 'failed';
+  createdAt: Date;
+  text: string;
+  externalUrl: string | null;
+  error: string | null;
+  preview: { subject?: string; from?: string; to?: string[]; handle?: string };
+}
+
+export async function recordNotificationHistory(
+  db: Database,
+  entry: NotificationHistoryWrite,
+): Promise<void> {
+  await pgRun(
+    db,
+    `INSERT INTO ${db.table('notification_history')} (
+       id, notification_service_id, monitor_id, monitor_name, monitor_url,
+       provider, kind, status, created_at, text, external_url, error, preview
+     )
+     SELECT $1, id,
+       CASE WHEN $2::text IS NOT NULL AND EXISTS (SELECT 1 FROM ${db.table('monitors')} WHERE id = $2)
+         THEN $2 ELSE NULL END,
+       $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+     FROM ${db.table('notification_services')} WHERE id = $13`,
+    [
+      crypto.randomUUID(),
+      entry.monitorId,
+      entry.monitorName,
+      entry.monitorUrl,
+      entry.provider,
+      entry.kind,
+      entry.status,
+      entry.createdAt.toISOString(),
+      entry.text,
+      entry.externalUrl,
+      entry.error,
+      JSON.stringify(entry.preview),
+      entry.notificationServiceId,
+    ],
+  );
 }
 
 export type { BadgeRow };

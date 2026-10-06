@@ -17,8 +17,8 @@ async function context() {
   return ctx;
 }
 
-afterEach(() => {
-  for (const ctx of contexts.splice(0)) ctx.db.close();
+afterEach(async () => {
+  for (const ctx of contexts.splice(0)) await ctx.close();
 });
 
 const monitorA = '30000000-0000-4000-8000-000000000001';
@@ -27,8 +27,8 @@ const monitorB = '30000000-0000-4000-8000-000000000002';
 describe('status page CRUD', () => {
   it('creates, reads, lists, updates and deletes a status page', async () => {
     const ctx = await context();
-    seedMonitor(ctx.sqlite, { id: monitorA, regions: ['us-east', 'eu-west'] });
-    seedMonitor(ctx.sqlite, { id: monitorB, regions: ['us-east'] });
+    await seedMonitor(ctx.db, { id: monitorA, regions: ['us-east', 'eu-west'] });
+    await seedMonitor(ctx.db, { id: monitorB, regions: ['us-east'] });
     const { cookie } = await login(ctx.app);
 
     const created = await request(ctx.app, '/api/status-pages', {
@@ -79,7 +79,7 @@ describe('status page CRUD', () => {
 
   it('enforces unique public slugs', async () => {
     const ctx = await context();
-    seedMonitor(ctx.sqlite, { id: monitorA });
+    await seedMonitor(ctx.db, { id: monitorA });
     const { cookie } = await login(ctx.app);
     await request(ctx.app, '/api/status-pages', {
       method: 'POST',
@@ -97,7 +97,7 @@ describe('status page CRUD', () => {
 
   it('rejects a monitor that appears on two groups', async () => {
     const ctx = await context();
-    seedMonitor(ctx.sqlite, { id: monitorA });
+    await seedMonitor(ctx.db, { id: monitorA });
     const { cookie } = await login(ctx.app);
     const response = await request(ctx.app, '/api/status-pages', {
       method: 'POST',

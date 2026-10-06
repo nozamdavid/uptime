@@ -18,7 +18,7 @@ import {
 } from '@uptime/regions';
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { api, RequestError, type WorkspaceTarget } from './api.js';
+import { api, isImportedWorkspaceKind, RequestError } from './api.js';
 import { useProductSession } from './product-shell.js';
 import { formatInterval } from './monitor-format.js';
 import {
@@ -63,8 +63,12 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
   const hostedFree = Boolean(
     session?.user &&
     session.workspace?.plan === 'free' &&
-    session.workspace.kind !== 'staging_import',
+    !isImportedWorkspaceKind(session.workspace.kind),
   );
+  const [workspacePolicy, setWorkspacePolicy] = useState(() => ({
+    limits: session?.limits ?? null,
+    usage: session?.usage,
+  }));
   const [value, setValue] = useState<MonitorCreate>(() => ({
     ...initial,
     ...monitor,
@@ -72,13 +76,18 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
       ? {
           intervalSeconds: 300,
           timeoutMs: Math.min(monitor?.timeoutMs ?? 10_000, 10_000),
-          regionIds: (monitor?.regionIds ?? initial.regionIds).slice(0, 3),
           dnsDiagnosticsEnabled: false,
           outageThreshold: 2,
           recoveryThreshold: 1,
           repeatNotificationMinutes: null,
         }
       : {}),
+    regionIds:
+      hostedFree && !monitor?.id && session?.limits
+        ? session.limits.allowedRegionIds.includes(initial.regionIds[0]!)
+          ? [...initial.regionIds]
+          : session.limits.allowedRegionIds.slice(0, 1)
+        : (monitor?.regionIds ?? initial.regionIds),
     notificationServiceIds: monitor?.notificationServiceIds ?? [],
     outageThreshold: monitor?.outageThreshold ?? 2,
     recoveryThreshold: monitor?.recoveryThreshold ?? 1,
@@ -89,23 +98,91 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
   const [badges, setBadges] = useState<Badge[]>([]);
   const [badgeName, setBadgeName] = useState(monitor?.badge?.name ?? '');
   const [creatingBadge, setCreatingBadge] = useState(false);
-  const [availableRegions, setAvailableRegions] = useState<readonly RegionDefinition[]>(regions);
+  const [availableRegions, setAvailableRegions] = useState<readonly RegionDefinition[]>(() => {
+    if (!hostedFree) return regions;
+    const allowed = new Set(session?.limits?.allowedRegionIds ?? []);
+    return regions.filter((region) => allowed.has(region.id));
+  });
   const [notificationServices, setNotificationServices] = useState<NotificationService[] | null>(
     null,
   );
   const [notificationServicesError, setNotificationServicesError] = useState('');
+  const [workspacePolicyError, setWorkspacePolicyError] = useState('');
+  const [workspacePolicyLoading, setWorkspacePolicyLoading] = useState(
+    hostedFree && (!session?.limits || !session.usage),
+  );
+  const [workspacePolicyRetry, setWorkspacePolicyRetry] = useState(0);
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [urlError, setUrlError] = useState('');
   const [historyDeleteOpen, setHistoryDeleteOpen] = useState(false);
   const [historyDeleted, setHistoryDeleted] = useState(false);
-  const [targets, setTargets] = useState<WorkspaceTarget[]>([]);
-  const [targetDraft, setTargetDraft] = useState<WorkspaceTarget | null>(null);
-  const [targetBusy, setTargetBusy] = useState(false);
-  const [targetError, setTargetError] = useState('');
+  const maxRegionsPerMonitor = hostedFree
+    ? (workspacePolicy.limits?.regions ?? availableRegions.length)
+    : availableRegions.length;
+  const workspacePolicyReady = Boolean(
+    !hostedFree || (workspacePolicy.limits && (monitor?.id || workspacePolicy.usage)),
+  );
+  const atMonitorLimit = Boolean(
+    hostedFree &&
+    !monitor?.id &&
+    workspacePolicy.limits &&
+    (workspacePolicy.usage?.monitors ?? 0) >= workspacePolicy.limits.monitors,
+  );
+  const availableRegionIds = new Set(availableRegions.map((region) => region.id));
+  const unavailableSelectedRegionIds = hostedFree
+    ? value.regionIds.filter((regionId) => !availableRegionIds.has(regionId))
+    : [];
+  const regionsForForm = hostedFree
+    ? regions.filter(
+        (region) => availableRegionIds.has(region.id) || value.regionIds.includes(region.id),
+      )
+    : availableRegions;
+  useEffect(() => {
+    setWorkspacePolicy({ limits: session?.limits ?? null, usage: session?.usage });
+  }, [session?.limits, session?.usage, session?.workspace?.id]);
   useEffect(() => {
     let alive = true;
+    if (hostedFree) {
+      setWorkspacePolicyLoading(true);
+      setWorkspacePolicyError('');
+      api
+        .usage()
+        .then(({ limits, usage }) => {
+          if (!alive) return;
+          setWorkspacePolicy({ limits, usage });
+          if (limits) {
+            const allowedIds = new Set(limits.allowedRegionIds);
+            setAvailableRegions((current) => {
+              const filtered = current.filter((region) => allowedIds.has(region.id));
+              return filtered.length > 0
+                ? filtered
+                : regions.filter((region) => allowedIds.has(region.id));
+            });
+            if (!monitor?.id) {
+              setValue((current) => {
+                const selected = current.regionIds.filter((id) => allowedIds.has(id));
+                return {
+                  ...current,
+                  regionIds: selected.length > 0 ? selected : limits.allowedRegionIds.slice(0, 1),
+                };
+              });
+            }
+          } else {
+            setWorkspacePolicyError('Workspace limits are not available for this workspace.');
+          }
+        })
+        .catch((reason) => {
+          if (alive)
+            setWorkspacePolicyError(
+              reason instanceof Error ? reason.message : 'Workspace limits could not be loaded.',
+            );
+        })
+        .finally(() => {
+          if (alive) setWorkspacePolicyLoading(false);
+        });
+    }
     api
       .badges()
       .then(({ badges: choices }) => {
@@ -119,6 +196,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
         setAvailableRegions(enabledRegions);
         const enabledIds = new Set(enabledRegions.map((region) => region.id));
         setValue((current) => {
+          if (monitor?.id) return current;
           const regionIds = current.regionIds.filter((regionId) => enabledIds.has(regionId));
           return {
             ...current,
@@ -142,17 +220,10 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
           reason instanceof Error ? reason.message : 'Notification services could not be loaded.',
         );
       });
-    if (hostedFree)
-      api
-        .workspaceTargets()
-        .then(({ targets: next }) => {
-          if (alive) setTargets(next);
-        })
-        .catch(() => undefined);
     return () => {
       alive = false;
     };
-  }, [hostedFree]);
+  }, [hostedFree, monitor?.id, session?.workspace?.id, workspacePolicyRetry]);
   const slugError = value.publicSlug
     ? (publicMonitorSlugSchema.safeParse(value.publicSlug).error?.issues[0]?.message ?? '')
     : '';
@@ -176,6 +247,10 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
     uptimeThresholds.green > 100 ||
     uptimeThresholds.orange > uptimeThresholds.lightGreen ||
     uptimeThresholds.lightGreen > uptimeThresholds.green;
+  const disallowedRegionIds =
+    hostedFree && workspacePolicy.limits
+      ? value.regionIds.filter((id) => !workspacePolicy.limits!.allowedRegionIds.includes(id))
+      : [];
   const matchingBadge = badges.find(
     (badge) => badge.name.toLocaleLowerCase() === badgeName.trim().toLocaleLowerCase(),
   );
@@ -198,7 +273,11 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
     else {
       try {
         const url = new URL(normalizeMonitorUrl(raw));
-        message = ['http:', 'https:'].includes(url.protocol) ? '' : 'URL must use HTTP or HTTPS.';
+        if (!['http:', 'https:'].includes(url.protocol)) message = 'URL must use HTTP or HTTPS.';
+        else if (hostedFree && url.protocol !== 'https:')
+          message = 'Hosted monitors require a public HTTPS URL on port 443.';
+        else if (hostedFree && url.port && url.port !== '443')
+          message = 'Hosted monitors require HTTPS on port 443.';
       } catch {
         message = 'Enter an absolute HTTP or HTTPS URL.';
       }
@@ -206,58 +285,13 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
     setUrlError(message);
     return message;
   }
-  function originForValue(raw = value.url) {
-    try {
-      return new URL(normalizeMonitorUrl(raw)).origin;
-    } catch {
-      return '';
-    }
-  }
-  const targetOrigin = originForValue();
-  const verifiedTarget = targets.find(
-    (target) => target.origin === targetOrigin && target.verifiedAt,
-  );
-  async function createTarget() {
-    if (!targetOrigin) {
-      setTargetError('Enter a valid URL before creating a verification target.');
-      return;
-    }
-    setTargetBusy(true);
-    setTargetError('');
-    try {
-      const created = await api.createWorkspaceTarget(targetOrigin);
-      const draft = { ...created, verifiedAt: null };
-      setTargetDraft(draft);
-      setTargets((current) => [
-        ...current.filter((target) => target.origin !== targetOrigin),
-        draft,
-      ]);
-    } catch (reason) {
-      setTargetError(
-        reason instanceof Error ? reason.message : 'Could not create verification target.',
-      );
-    } finally {
-      setTargetBusy(false);
-    }
-  }
-  async function verifyTarget() {
-    if (!targetDraft) return;
-    setTargetBusy(true);
-    setTargetError('');
-    try {
-      const result = await api.verifyWorkspaceTarget(targetDraft.id);
-      setTargets((current) =>
-        current.map((target) => (target.id === result.target.id ? result.target : target)),
-      );
-      setTargetDraft(null);
-    } catch (reason) {
-      setTargetError(reason instanceof Error ? reason.message : 'Verification failed.');
-    } finally {
-      setTargetBusy(false);
-    }
-  }
   function toggle(region: RegionId) {
-    if (hostedFree && !value.regionIds.includes(region) && value.regionIds.length >= 3) return;
+    if (
+      hostedFree &&
+      !value.regionIds.includes(region) &&
+      value.regionIds.length >= maxRegionsPerMonitor
+    )
+      return;
     set(
       'regionIds',
       value.regionIds.includes(region)
@@ -301,12 +335,16 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
       nextUrlError ||
       timeoutError ||
       slugError ||
-      (hostedFree && !verifiedTarget) ||
       notificationRulesInvalid ||
       uptimeThresholdsInvalid ||
       unresolvedBadge ||
       !value.url ||
-      value.regionIds.length === 0
+      value.regionIds.length === 0 ||
+      value.regionIds.length > maxRegionsPerMonitor ||
+      disallowedRegionIds.length > 0 ||
+      unavailableSelectedRegionIds.length > 0 ||
+      !workspacePolicyReady ||
+      atMonitorLimit
     )
       return;
     const input = { ...value, url: normalizedUrl };
@@ -333,6 +371,39 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
         <div>
           <h1>{monitor ? 'Edit monitor' : 'Add monitor'}</h1>
           <p>Every selected region performs one bounded GET for each scheduled interval.</p>
+          {hostedFree && workspacePolicy.limits && (
+            <p className="monitor-quota-copy">
+              Shared workspace quota: {workspacePolicy.usage?.monitors ?? '—'} of{' '}
+              {workspacePolicy.limits.monitors} saved monitors. Up to{' '}
+              {workspacePolicy.limits.regions} region
+              {workspacePolicy.limits.regions === 1 ? '' : 's'} per monitor.
+            </p>
+          )}
+          {hostedFree && workspacePolicyLoading && workspacePolicyReady && (
+            <p role="status">Refreshing workspace limits…</p>
+          )}
+          {hostedFree && !workspacePolicyReady && (
+            <p role={workspacePolicyLoading ? 'status' : 'alert'}>
+              {workspacePolicyLoading
+                ? 'Loading workspace limits…'
+                : workspacePolicyError || 'Workspace limits could not be loaded.'}
+            </p>
+          )}
+          {hostedFree && workspacePolicyError && workspacePolicyReady && (
+            <p role="alert">
+              Could not refresh workspace limits. The last loaded policy is still shown.{' '}
+              {workspacePolicyError}
+            </p>
+          )}
+          {hostedFree && workspacePolicyError && !workspacePolicyLoading && (
+            <button
+              type="button"
+              className="button button--quiet"
+              onClick={() => setWorkspacePolicyRetry((current) => current + 1)}
+            >
+              Retry loading workspace limits
+            </button>
+          )}
         </div>
       </div>
       <form className="monitor-form" onSubmit={submit} noValidate>
@@ -365,43 +436,8 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
           <small id="url-help" className={touched.url && urlError ? 'field-error' : ''}>
             {touched.url && urlError
               ? urlError
-              : 'HTTPS is used when no scheme is provided. Private and reserved addresses are rejected.'}
+              : 'HTTPS is used when no scheme is provided. Private and reserved IP literals are rejected; hostname DNS destinations are not pinned.'}
           </small>
-          {hostedFree && targetOrigin && !verifiedTarget && (
-            <div className="verification-box">
-              <strong>Verify this origin before monitoring it.</strong>
-              <p>
-                Place the token at <code>{targetOrigin}/.well-known/uptime-verification.txt</code>.
-              </p>
-              {targetDraft ? (
-                <>
-                  <code>{targetDraft.token}</code>
-                  <button
-                    type="button"
-                    className="button button--quiet"
-                    onClick={() => void verifyTarget()}
-                    disabled={targetBusy}
-                  >
-                    {targetBusy ? 'Checking…' : 'Verify origin'}
-                  </button>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  className="button button--quiet"
-                  onClick={() => void createTarget()}
-                  disabled={targetBusy}
-                >
-                  {targetBusy ? 'Preparing…' : 'Create verification token'}
-                </button>
-              )}
-              {targetError && (
-                <p className="field-error" role="alert">
-                  {targetError}
-                </p>
-              )}
-            </div>
-          )}
         </label>
         <label className="field monitor-badge-field">
           <span>
@@ -459,7 +495,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
           </legend>
           <div className="region-groups">
             {continentIds.map((continentId) => {
-              const continentRegions = availableRegions.filter(
+              const continentRegions = regionsForForm.filter(
                 (region) => region.continentId === continentId,
               );
               return continentRegions.length > 0 ? (
@@ -474,19 +510,23 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
                       <label key={region.id} className="region-option">
                         <input
                           type="checkbox"
+                          value={region.id}
                           checked={value.regionIds.includes(region.id)}
                           onChange={() => toggle(region.id)}
                           disabled={
                             busy ||
                             (hostedFree &&
                               !value.regionIds.includes(region.id) &&
-                              value.regionIds.length >= 3)
+                              value.regionIds.length >= maxRegionsPerMonitor)
                           }
                         />
                         <span>
                           <strong>{region.label}</strong>
                           <small>
                             {region.approximateAnchor} · {region.placementRegion}
+                            {unavailableSelectedRegionIds.includes(region.id)
+                              ? ' · unavailable for this workspace'
+                              : ''}
                           </small>
                         </span>
                       </label>
@@ -498,6 +538,20 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
           </div>
           {touched.regionIds && value.regionIds.length === 0 && (
             <p className="field-error">Select at least one region before saving.</p>
+          )}
+          {value.regionIds.length > maxRegionsPerMonitor && (
+            <p className="field-error" role="alert">
+              This workspace allows up to {maxRegionsPerMonitor} regions per monitor.
+            </p>
+          )}
+          {(disallowedRegionIds.length > 0 || unavailableSelectedRegionIds.length > 0) && (
+            <p className="field-error" role="alert">
+              Some selected regions are unavailable for this workspace. Select available
+              replacements and save to resume checks. The saved monitor stays unchanged until then.
+              {availableRegions.length === 0
+                ? ' Ask the service operator to grant a region enabled in this deployment.'
+                : ''}
+            </p>
           )}
         </fieldset>
         <div className="form-grid">
@@ -837,6 +891,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
             className="button button--primary"
             disabled={
               busy ||
+              atMonitorLimit ||
               Boolean(
                 urlError ||
                 timeoutError ||
@@ -845,13 +900,22 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
                 uptimeThresholdsInvalid ||
                 unresolvedBadge ||
                 !value.url ||
-                value.regionIds.length === 0,
+                value.regionIds.length === 0 ||
+                value.regionIds.length > maxRegionsPerMonitor ||
+                disallowedRegionIds.length > 0 ||
+                !workspacePolicyReady,
               )
             }
           >
-            {busy ? 'Saving…' : 'Save monitor'}
+            {busy ? 'Saving…' : atMonitorLimit ? 'Monitor limit reached' : 'Save monitor'}
           </button>
         </div>
+        {atMonitorLimit && (
+          <p className="field-error" role="status">
+            This workspace has reached its {workspacePolicy.limits?.monitors}-monitor limit. Contact
+            the service operator to change the quota.
+          </p>
+        )}
       </form>
       {historyDeleteOpen && monitor?.id && (
         <DeleteHistoryDialog

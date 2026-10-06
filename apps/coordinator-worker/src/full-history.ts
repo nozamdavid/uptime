@@ -1,4 +1,4 @@
-import { all, type D1Database } from '@uptime/cloudflare';
+import { pgAll as all, type Database } from '@uptime/cloudflare/postgres';
 import {
   createLatencyAccumulator,
   ranges,
@@ -21,7 +21,7 @@ interface HistoryInterval {
 
 /** Closed history uses persisted frequencies; only recent or invalidated hours read raw rows. */
 export async function buildFullHistoryMonitorSnapshot(
-  db: D1Database,
+  db: Database,
   monitorId: string,
   options: { now: Date; staleAfterSeconds: number },
 ): Promise<MonitorReportSnapshot | null> {
@@ -37,7 +37,7 @@ export async function buildFullHistoryMonitorSnapshot(
   const since = new Date(options.now.getTime() - ranges['30d']).toISOString();
   const coverage = await all<{ since: string }>(
     db,
-    'SELECT since FROM monitor_latency_coverage WHERE monitor_id = ?',
+    `SELECT since FROM ${db.table('monitor_latency_coverage')} WHERE monitor_id = $1`,
     [monitorId],
   );
   let intervals: HistoryInterval[] = [
@@ -51,8 +51,8 @@ export async function buildFullHistoryMonitorSnapshot(
     const boundaryHour = new Date(floorHour(options.now.getTime() - ranges['7d'])).toISOString();
     const dirty = await all<{ hour: string }>(
       db,
-      `SELECT hour FROM monitor_latency_dirty
-       WHERE monitor_id = ? AND hour >= ? AND hour < ? ORDER BY hour`,
+      `SELECT hour FROM ${db.table('monitor_latency_dirty')}
+       WHERE monitor_id = $1 AND hour >= $2 AND hour < $3 ORDER BY hour`,
       [monitorId, new Date(floorHour(Date.parse(since))).toISOString(), recentSince],
     );
     const rawHours = new Set(dirty.map(({ hour }) => hour));
@@ -61,8 +61,8 @@ export async function buildFullHistoryMonitorSnapshot(
     rawHours.add(boundaryHour);
     const historical = await all<{ region_id: RegionId; hour: string; payload: string }>(
       db,
-      `SELECT region_id, hour, payload FROM monitor_latency_hourly
-       WHERE monitor_id = ? AND hour >= ? AND hour < ? ORDER BY hour DESC, region_id DESC`,
+      `SELECT region_id, hour, payload FROM ${db.table('monitor_latency_hourly')}
+       WHERE monitor_id = $1 AND hour >= $2 AND hour < $3 ORDER BY hour DESC, region_id DESC`,
       [monitorId, historicalSince, recentSince],
     );
     for (const row of historical) {
@@ -100,11 +100,11 @@ export async function buildFullHistoryMonitorSnapshot(
         db,
         `SELECT region_id, success, started_at, id,
          COALESCE(response_ms, CASE WHEN error_code = 'timeout' THEN total_ms END) AS value
-       FROM observations
-       WHERE monitor_id = ? AND started_at >= ?
-         AND started_at ${cursor ? '<=' : '<'} ?
-         ${cursor ? 'AND (started_at, id) < (?, ?)' : ''}
-       ORDER BY started_at DESC, id DESC LIMIT ?`,
+       FROM ${db.table('observations')}
+       WHERE monitor_id = $1 AND started_at >= $2
+         AND started_at ${cursor ? '<=' : '<'} $3
+         ${cursor ? 'AND (started_at, id) < ($4, $5)' : ''}
+       ORDER BY started_at DESC, id DESC LIMIT $${cursor ? 6 : 4}`,
         [
           monitorId,
           interval.since,

@@ -19,6 +19,7 @@ import { MonitorForm } from './monitor-form.js';
 import { monitorDisplayName } from './monitor-format.js';
 import { MonitorList } from './monitor-list.js';
 import { NotificationsPage } from './notifications.js';
+import { PricingPage } from './pricing.js';
 import { PublicStatusPage, StatusPageEditor, StatusPagesIndex } from './status-pages.js';
 import { WorkspaceState } from './workspace-state.js';
 import './styles.css';
@@ -30,12 +31,18 @@ import {
   ProductSessionContext,
   SettingsPage,
 } from './product-shell.js';
+import { MockBillingCheckoutPage } from './mock-billing-checkout.js';
 
 const rootRoute = createRootRoute({ component: AppShell });
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
   component: LandingPage,
+});
+const pricingRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/pricing',
+  component: PricingPage,
 });
 const appRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -92,8 +99,14 @@ const publicStatusPageRoute = createRoute({
   path: '/status/$statusPageId',
   component: PublicStatusPageRoute,
 });
+const mockBillingCheckoutRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/mock-billing/checkout',
+  component: MockBillingCheckoutPage,
+});
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  pricingRoute,
   appRoute,
   loginRoute,
   signupRoute,
@@ -105,6 +118,7 @@ const routeTree = rootRoute.addChildren([
   notificationsRoute,
   statusPageEditorRoute,
   publicStatusPageRoute,
+  mockBillingCheckoutRoute,
 ]);
 const router = createRouter({ routeTree });
 declare module '@tanstack/react-router' {
@@ -122,11 +136,12 @@ export function AppShell() {
   const isPublicRoute = isPublicMonitorPath(pathname);
   const isPublicStatusPage = pathname.startsWith('/status/');
   const isLanding = pathname === '/';
+  const isPricing = pathname === '/pricing';
   const isAuthRoute = pathname === '/login' || pathname === '/signup';
   const [session, setSession] = useState<ProductSession | null>(null);
   const sessionGeneration = useRef(0);
   const [authenticated, setAuthenticated] = useState<boolean | null>(
-    isLanding || isAuthRoute ? false : null,
+    isLanding || isPricing || isAuthRoute ? false : null,
   );
   const clearSession = () => {
     sessionGeneration.current += 1;
@@ -135,7 +150,7 @@ export function AppShell() {
     setAuthenticated(false);
   };
   useEffect(() => {
-    if (isPublicRoute || isLanding || isAuthRoute) return;
+    if (isPublicRoute || isLanding || isPricing || isAuthRoute) return;
     let active = true;
     const generation = sessionGeneration.current;
     setAuthenticated(null);
@@ -154,12 +169,12 @@ export function AppShell() {
     return () => {
       active = false;
     };
-  }, [isPublicRoute, isLanding, isAuthRoute]);
+  }, [isPublicRoute, isLanding, isPricing, isAuthRoute]);
   useEffect(() => {
     window.addEventListener('uptime:session-expired', clearSession);
     return () => window.removeEventListener('uptime:session-expired', clearSession);
   }, []);
-  if (isLanding)
+  if (isLanding || isPricing)
     return (
       <main className="public-workspace">
         <Outlet />
@@ -206,7 +221,8 @@ export function AppShell() {
         }}
       />
     );
-  const allowRestrictedRoute = pathname === '/settings' || pathname === '/operator';
+  const allowRestrictedRoute =
+    pathname === '/settings' || pathname === '/operator' || pathname === '/mock-billing/checkout';
   return (
     <ProductSessionContext.Provider value={session}>
       <Workspace

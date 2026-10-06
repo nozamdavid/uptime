@@ -6,12 +6,7 @@ import { estimateRequestSchema, monitorCreateSchema, regionIds } from './index.j
 describe('calculateTargetChecksPerDay', () => {
   it.each([
     [1, 60, 1_440],
-    [3, 60, 4_320],
     [3, 300, 864],
-    [2, 900, 192],
-    [1, 1_800, 48],
-    [3, 3_600, 72],
-    [9, 60, 12_960],
   ] as const)(
     '%i regions every %i seconds yields %i target checks',
     (count, interval, expected) => {

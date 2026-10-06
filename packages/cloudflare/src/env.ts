@@ -1,5 +1,5 @@
 import { regionIds, type RegionId } from './regions.js';
-import type { D1Database, R2Bucket } from './workers-types.js';
+import type { D1Database, PostgresHyperdriveBinding, R2Bucket } from './workers-types.js';
 
 /**
  * Common Worker bindings for every Cloudflare deployment in this repository.
@@ -8,6 +8,10 @@ import type { D1Database, R2Bucket } from './workers-types.js';
  * it needs; callers that require a binding should use `requireBinding`.
  */
 export interface CloudflareEnv {
+  /** Staging PostgreSQL capability, requires nodejs_compat and uncached Hyperdrive. */
+  POSTGRES?: PostgresHyperdriveBinding;
+  POSTGRES_RUNTIME_CATALOG?: string;
+  POSTGRES_SOURCE_DATABASE_ID?: string;
   DB: D1Database;
   REPORTS?: R2Bucket;
   /** Control-plane D1 binding used by the hosted multi-tenant coordinator. */

@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { buildNotificationConfig, NotificationsPage } from './notifications.js';
+import { ProductSessionContext } from './product-shell.js';
 
 const reactEnvironment = globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean };
 reactEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
@@ -18,7 +19,7 @@ describe('notifications admin', () => {
     setter?.call(input, value);
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
-  function renderPage(response: unknown) {
+  function renderPage(response: unknown, session?: import('./api.js').ProductSession) {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation(
@@ -38,7 +39,18 @@ describe('notifications admin', () => {
     );
     const container = document.createElement('div');
     const root = createRoot(container);
-    return { container, root };
+    return {
+      container,
+      root,
+      render: () =>
+        session
+          ? createElement(
+              ProductSessionContext.Provider,
+              { value: session },
+              createElement(NotificationsPage),
+            )
+          : createElement(NotificationsPage),
+    };
   }
 
   it('offers all supported providers and serializes Resend recipients', async () => {
@@ -120,6 +132,39 @@ describe('notifications admin', () => {
         to: ['a@example.com', 'b@example.com', 'c@example.com'],
       },
     });
+    await act(async () => root.unmount());
+  });
+
+  it('keeps legacy imported workspaces outside the hosted free provider filter', async () => {
+    const { container, root, render } = renderPage(
+      { services: [] },
+      {
+        user: { did: 'did:plc:legacy', handle: 'legacy.test' },
+        role: 'owner',
+        workspace: {
+          id: 'workspace-legacy',
+          name: 'Production',
+          plan: 'free',
+          kind: 'legacy_import',
+          state: 'active',
+        },
+        usage: { monitors: 107, statusPages: 1, notificationServices: 2 },
+        limits: null,
+      },
+    );
+    await act(async () => {
+      root.render(render());
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () =>
+      [...container.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Add service')
+        ?.click(),
+    );
+    const provider = container.querySelector<HTMLSelectElement>('select')!;
+    expect([...provider.options].map((option) => option.value)).toContain('smtp');
+    expect([...provider.options].map((option) => option.value)).toContain('resend');
     await act(async () => root.unmount());
   });
 

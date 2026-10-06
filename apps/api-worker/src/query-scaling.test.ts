@@ -1,6 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { createD1Adapter, createTestDatabase } from '@uptime/cloudflare/testing';
-import type { D1Database } from '@uptime/cloudflare';
+import { afterEach, describe, expect, it } from 'vitest';
+import { type Database, pgAll } from '@uptime/cloudflare/postgres';
 
 import {
   getStatusPage,
@@ -8,16 +7,35 @@ import {
   monitorSummaries,
   publicStatusPagePayload,
 } from './queries.js';
+import { createTestContext, type TestContext } from './testing/test-utils.js';
 import type { MonitorRow } from './types.js';
 
-function countingDatabase(db: D1Database): { db: D1Database; queries: () => number } {
+const contexts: TestContext[] = [];
+
+afterEach(async () => {
+  for (const ctx of contexts.splice(0)) await ctx.close();
+});
+
+function countingDatabase(db: Database): { db: Database; queries: () => number } {
   let count = 0;
   return {
     db: {
       ...db,
-      prepare(query: string) {
+      query: (sql, values) => {
         count += 1;
-        return db.prepare(query);
+        return db.query(sql, values);
+      },
+      transaction: async (fn) => {
+        return db.transaction(async (tx) => {
+          const countingTx = {
+            ...tx,
+            query: (sql: string, values?: unknown[]) => {
+              count += 1;
+              return tx.query(sql, values);
+            },
+          };
+          return fn(countingTx as unknown as Database);
+        });
       },
     },
     queries: () => count,
@@ -26,47 +44,41 @@ function countingDatabase(db: D1Database): { db: D1Database; queries: () => numb
 
 describe('high-cardinality API query scaling', () => {
   it('keeps monitor lists and 150-monitor status pages on a fixed query budget', async () => {
-    const sqlite = createTestDatabase();
-    sqlite.exec(`
-      INSERT INTO status_pages (id, title, public_slug) VALUES ('page', 'Large page', 'large-page');
-      INSERT INTO status_page_groups (id, status_page_id, title, position)
-        VALUES ('group', 'page', 'Services', 0);
-      WITH RECURSIVE sequence(value) AS (
-        SELECT 0 UNION ALL SELECT value + 1 FROM sequence WHERE value < 149
-      )
-      INSERT INTO monitors
-        (id, name, url, interval_seconds, timeout_ms, next_check_at, created_at, updated_at)
-      SELECT printf('monitor-%03d', value), printf('Monitor %03d', value),
-        'https://example.com/' || value, 60, 1000, '2026-09-21T12:00:00.000Z',
-        '2026-09-21T10:00:00.000Z', '2026-09-21T10:00:00.000Z'
-      FROM sequence;
-      WITH RECURSIVE sequence(value) AS (
-        SELECT 0 UNION ALL SELECT value + 1 FROM sequence WHERE value < 149
-      )
-      INSERT INTO monitor_regions (monitor_id, region_id)
-      SELECT printf('monitor-%03d', value), 'us-east' FROM sequence;
-      WITH RECURSIVE sequence(value) AS (
-        SELECT 0 UNION ALL SELECT value + 1 FROM sequence WHERE value < 149
-      )
-      INSERT INTO status_page_monitors (status_page_id, group_id, monitor_id, position)
-      SELECT 'page', 'group', printf('monitor-%03d', value), value FROM sequence;
-    `);
-    const base = createD1Adapter(sqlite);
+    const ctx = await createTestContext();
+    contexts.push(ctx);
+    const db = ctx.db;
 
-    const listCounter = countingDatabase(base);
-    const rows = await listCounter.db
-      .prepare(`${monitorSelect} ORDER BY m.created_at DESC`)
-      .all<MonitorRow>();
-    const summaries = await monitorSummaries(listCounter.db, rows.results, {
+    await db.query(`
+      INSERT INTO ${db.table('status_pages')} (id, title, public_slug) VALUES ('page', 'Large page', 'large-page');
+      INSERT INTO ${db.table('status_page_groups')} (id, status_page_id, title, position)
+        VALUES ('group', 'page', 'Services', 0);
+      INSERT INTO ${db.table('monitors')}
+        (id, name, url, interval_seconds, timeout_ms, next_check_at, created_at, updated_at)
+      SELECT 'monitor-' || lpad(i::text, 3, '0'), 'Monitor ' || lpad(i::text, 3, '0'),
+        'https://example.com/' || i, 60, 1000, '2026-09-21T12:00:00.000Z',
+        '2026-09-21T10:00:00.000Z', '2026-09-21T10:00:00.000Z'
+      FROM generate_series(0, 149) AS i;
+      INSERT INTO ${db.table('monitor_regions')} (monitor_id, region_id)
+      SELECT 'monitor-' || lpad(i::text, 3, '0'), 'us-east' FROM generate_series(0, 149) AS i;
+      INSERT INTO ${db.table('status_page_monitors')} (status_page_id, group_id, monitor_id, position)
+      SELECT 'page', 'group', 'monitor-' || lpad(i::text, 3, '0'), i FROM generate_series(0, 149) AS i;
+    `);
+
+    const listCounter = countingDatabase(db);
+    const rows = await pgAll<MonitorRow>(
+      listCounter.db,
+      `${monitorSelect(listCounter.db)} ORDER BY m.created_at DESC`,
+    );
+    const summaries = await monitorSummaries(listCounter.db, rows, {
       warn: () => undefined,
     });
     expect(summaries).toHaveLength(150);
     expect(summaries[0]?.monitor.regionIds).toEqual(['us-east']);
     expect(listCounter.queries()).toBe(4);
 
-    const page = await getStatusPage(base, 'page');
+    const page = await getStatusPage(db, 'page');
     expect(page).not.toBeNull();
-    const pageCounter = countingDatabase(base);
+    const pageCounter = countingDatabase(db);
     const payload = await publicStatusPagePayload(
       pageCounter.db,
       page!,
@@ -80,6 +92,5 @@ describe('high-cardinality API query scaling', () => {
       uptimePercentage: null,
     });
     expect(pageCounter.queries()).toBeLessThanOrEqual(8);
-    base.close();
   });
 });

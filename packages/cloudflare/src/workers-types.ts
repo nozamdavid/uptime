@@ -17,6 +17,11 @@ export interface D1Meta {
   readonly changes: number;
 }
 
+/** Hyperdrive with query caching disabled in deployment configuration. */
+export interface PostgresHyperdriveBinding {
+  readonly connectionString: string;
+}
+
 export interface D1Result<T = Record<string, unknown>> {
   readonly results: T[];
   readonly success: boolean;

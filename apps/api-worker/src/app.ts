@@ -1,14 +1,11 @@
+import { notificationPreview, nowIso, randomId } from '@uptime/cloudflare';
 import {
-  all,
-  batch,
-  first,
-  notificationPreview,
-  nowIso,
-  randomId,
-  recordNotificationHistory,
-  run,
-  type D1Database,
-} from '@uptime/cloudflare';
+  type Database,
+  pgAll,
+  pgFirst,
+  pgRun,
+  isPostgresUniqueViolation,
+} from '@uptime/cloudflare/postgres';
 import {
   badgeCreateSchema,
   calculateTargetChecksPerDay,
@@ -59,10 +56,12 @@ import {
   nextBoundary,
   notificationServicesExist,
   publicStatusPagePayload,
+  recordNotificationHistory,
   toPublicMonitorSummary,
   type RangeKey,
 } from './queries.js';
 import { Router, type RouteContext } from './router.js';
+import { monitorRequestCache } from './monitor-cache.js';
 import { assertPublicHttpUrl } from './security.js';
 import { base64UrlDecodeJson, base64UrlEncodeJson, invalidCursor } from './stored-json.js';
 import { parseNotificationServiceIds } from './types.js';
@@ -72,9 +71,11 @@ import type { MonitorRow, NotificationServiceRow } from './types.js';
 
 export interface AppEnv {
   config: ApiConfig;
-  db: D1Database;
+  db: Database;
   now: () => Date;
   log: LogSink;
+  /** Trusted workspace identity, resolved before routing or serving cached data. */
+  monitorCacheScope?: string;
   principal?: { id: string; did: string; handle: string };
 }
 
@@ -87,6 +88,10 @@ export interface AppDependencies {
   now?: () => Date;
   notificationFetch?: typeof fetch;
   log?: LogSink;
+}
+
+function monitorCacheNamespace(env: AppEnv): string {
+  return JSON.stringify([env.config.sessionSecret, env.db.schema, env.monitorCacheScope]);
 }
 
 const idSchema = z.object({ id: z.uuid() });
@@ -189,29 +194,36 @@ function parseNotificationHistoryCursor(cursorText: string | null) {
 }
 
 async function readNotificationHistory(
-  db: D1Database,
+  db: Database,
   serviceId: string | null,
   cursorText: string | null,
 ) {
   const cursor = parseNotificationHistoryCursor(cursorText);
-  const serviceFilter = serviceId === null ? '1 = 1' : 'notification_service_id = ?';
-  const serviceValues = serviceId === null ? [] : [serviceId];
-  const rows = await all<NotificationHistoryRow>(
+  const values: unknown[] = [];
+  const clauses: string[] = [];
+  if (serviceId !== null) {
+    values.push(serviceId);
+    clauses.push(`notification_service_id = $${values.length}`);
+  }
+  if (cursor) {
+    values.push(cursor.createdAt);
+    const createdAtParam = `$${values.length}`;
+    values.push(cursor.id);
+    const idParam = `$${values.length}`;
+    clauses.push(
+      `(created_at < ${createdAtParam} OR (created_at = ${createdAtParam} AND id < ${idParam}))`,
+    );
+  }
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+  const rows = await pgAll<NotificationHistoryRow>(
     db,
     `SELECT id, notification_service_id, monitor_id, monitor_name, monitor_url,
             provider, kind, status, created_at, text, external_url, error, preview
-     FROM notification_history
-     WHERE ${serviceFilter}
-       AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?))
+     FROM ${db.table('notification_history')}
+     ${where}
      ORDER BY created_at DESC, id DESC
      LIMIT 26`,
-    [
-      ...serviceValues,
-      cursor?.createdAt ?? null,
-      cursor?.createdAt ?? null,
-      cursor?.createdAt ?? null,
-      cursor?.id ?? null,
-    ],
+    values,
   );
   const page = rows.slice(0, 25);
   return {
@@ -225,12 +237,14 @@ async function readNotificationHistory(
         : null,
   };
 }
+
 const observationQuerySchema = z.object({
   range: rangeSchema,
   regionId: regionIdSchema.optional(),
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
+
 const dnsDiagnosticQuerySchema = z.object({
   range: diagnosticRangeSchema,
   regionId: regionIdSchema.optional(),
@@ -252,7 +266,7 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
   };
 
   router.add('GET', '/health', async (c) => {
-    const row = await first<{ ok: number }>(c.env.db, 'SELECT 1 AS ok');
+    const row = await pgFirst<{ ok: number }>(c.env.db, 'SELECT 1 AS ok');
     return json({ status: row?.ok === 1 ? 'ok' : 'degraded' });
   });
 
@@ -311,9 +325,9 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
   router.add('GET', '/api/notification-services', async (c) => {
     await requireAdmin(c);
     const { db, config } = c.env;
-    const rows = await all<NotificationServiceRow>(
+    const rows = await pgAll<NotificationServiceRow>(
       db,
-      'SELECT * FROM notification_services ORDER BY created_at DESC',
+      `SELECT * FROM ${db.table('notification_services')} ORDER BY created_at DESC`,
     );
     const services = await Promise.all(
       rows.map((row) => serializeNotificationService(config.credentialEncryptionSecret, row)),
@@ -328,15 +342,15 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const id = randomId();
     const timestamp = nowIso(now());
     const encrypted = await sealProviderConfig(config.credentialEncryptionSecret, input.config);
-    await run(
+    await pgRun(
       db,
-      `INSERT INTO notification_services (id, name, provider, enabled, config, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO ${db.table('notification_services')} (id, name, provider, enabled, config, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [id, input.name, input.provider, input.enabled ? 1 : 0, encrypted, timestamp, timestamp],
     );
-    const row = await first<NotificationServiceRow>(
+    const row = await pgFirst<NotificationServiceRow>(
       db,
-      'SELECT * FROM notification_services WHERE id = ?',
+      `SELECT * FROM ${db.table('notification_services')} WHERE id = $1`,
       [id],
     );
     if (!row) throw new HttpErrorLike(500, 'internal_error', 'Notification service insert failed');
@@ -351,9 +365,9 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const { db, config } = c.env;
     const { id } = idSchema.parse(c.params);
     const input = notificationServiceUpdateSchema.parse(await readJson(c.request));
-    const current = await first<NotificationServiceRow>(
+    const current = await pgFirst<NotificationServiceRow>(
       db,
-      'SELECT * FROM notification_services WHERE id = ?',
+      `SELECT * FROM ${db.table('notification_services')} WHERE id = $1`,
       [id],
     );
     if (!current) throw new HttpErrorLike(404, 'not_found', 'Notification service was not found');
@@ -367,32 +381,36 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const enabledChanged = (current.enabled === 1) !== nextEnabled;
     const encrypted = await sealProviderConfig(config.credentialEncryptionSecret, merged);
     const timestamp = nowIso(now());
-    const statements: { sql: string; values: unknown[] }[] = [
-      {
-        sql: 'UPDATE notification_services SET name = ?, enabled = ?, config = ?, updated_at = ? WHERE id = ?',
-        values: [input.name ?? current.name, nextEnabled ? 1 : 0, encrypted, timestamp, id],
-      },
-    ];
-    if (enabledChanged || configurationChanged) {
-      statements.push(
-        {
-          sql: `UPDATE notification_deliveries SET status = 'cancelled', lease_until = NULL, lease_token = NULL
-                WHERE notification_service_id = ? AND status IN ('pending', 'sending')`,
-          values: [id],
-        },
-        {
-          sql: `UPDATE monitor_notification_state SET config_fingerprint = 'invalidated', updated_at = ?
-                WHERE monitor_id IN (
-                  SELECT monitor_id FROM monitor_notification_services WHERE notification_service_id = ?
-                )`,
-          values: [timestamp, id],
-        },
+
+    await db.transaction(async (tx) => {
+      await tx.query(
+        `UPDATE ${tx.table('notification_services')}
+         SET name = $1, enabled = $2, config = $3, updated_at = $4
+         WHERE id = $5`,
+        [input.name ?? current.name, nextEnabled ? 1 : 0, encrypted, timestamp, id],
       );
-    }
-    await batch(db, statements);
-    const updated = await first<NotificationServiceRow>(
+      if (enabledChanged || configurationChanged) {
+        await tx.query(
+          `UPDATE ${tx.table('notification_deliveries')}
+           SET status = 'cancelled', lease_until = NULL, lease_token = NULL
+           WHERE notification_service_id = $1 AND status IN ('pending', 'sending')`,
+          [id],
+        );
+        await tx.query(
+          `UPDATE ${tx.table('monitor_notification_state')}
+           SET config_fingerprint = 'invalidated', updated_at = $1
+           WHERE monitor_id IN (
+             SELECT monitor_id FROM ${tx.table('monitor_notification_services')}
+             WHERE notification_service_id = $2
+           )`,
+          [timestamp, id],
+        );
+      }
+    });
+
+    const updated = await pgFirst<NotificationServiceRow>(
       db,
-      'SELECT * FROM notification_services WHERE id = ?',
+      `SELECT * FROM ${db.table('notification_services')} WHERE id = $1`,
       [id],
     );
     if (!updated) throw new HttpErrorLike(404, 'not_found', 'Notification service was not found');
@@ -405,8 +423,12 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     await requireAdmin(c);
     const { db } = c.env;
     const { id } = idSchema.parse(c.params);
-    const result = await run(db, 'DELETE FROM notification_services WHERE id = ?', [id]);
-    if (result.meta.changes === 0) {
+    const result = await pgRun(
+      db,
+      `DELETE FROM ${db.table('notification_services')} WHERE id = $1`,
+      [id],
+    );
+    if ((result.rowCount ?? 0) === 0) {
       throw new HttpErrorLike(404, 'not_found', 'Notification service was not found');
     }
     return noContent();
@@ -415,9 +437,9 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
   router.add('GET', '/api/notification-services/:id/history', async (c) => {
     await requireAdmin(c);
     const { id } = idSchema.parse(c.params);
-    const exists = await first<{ id: string }>(
+    const exists = await pgFirst<{ id: string }>(
       c.env.db,
-      'SELECT id FROM notification_services WHERE id = ?',
+      `SELECT id FROM ${c.env.db.table('notification_services')} WHERE id = $1`,
       [id],
     );
     if (!exists) throw new HttpErrorLike(404, 'not_found', 'Notification service was not found');
@@ -429,9 +451,9 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     await requireAdmin(c);
     const { db, config } = c.env;
     const { id } = idSchema.parse(c.params);
-    const service = await first<NotificationServiceRow>(
+    const service = await pgFirst<NotificationServiceRow>(
       db,
-      'SELECT * FROM notification_services WHERE id = ?',
+      `SELECT * FROM ${db.table('notification_services')} WHERE id = $1`,
       [id],
     );
     if (!service) throw new HttpErrorLike(404, 'not_found', 'Notification service was not found');
@@ -494,7 +516,10 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
   router.add('GET', '/api/badges', async (c) => {
     await requireAdmin(c);
     return json({
-      badges: await all(c.env.db, 'SELECT id, name, color FROM badges ORDER BY lower(name), id'),
+      badges: await pgAll(
+        c.env.db,
+        `SELECT id, name, color FROM ${c.env.db.table('badges')} ORDER BY lower(name), id`,
+      ),
     });
   });
 
@@ -502,9 +527,9 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     await requireAdmin(c);
     const { db } = c.env;
     const input = badgeCreateSchema.parse(await readJson(c.request));
-    const existing = await first<{ id: string; name: string; color: string }>(
+    const existing = await pgFirst<{ id: string; name: string; color: string }>(
       db,
-      'SELECT id, name, color FROM badges WHERE lower(name) = lower(?) LIMIT 1',
+      `SELECT id, name, color FROM ${db.table('badges')} WHERE lower(name) = lower($1) LIMIT 1`,
       [input.name],
     );
     if (existing) return json({ badge: existing });
@@ -524,7 +549,23 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     crypto.getRandomValues(random);
     const color = colors[random[0]! % colors.length]!;
     const id = randomId();
-    await run(db, 'INSERT INTO badges (id, name, color) VALUES (?, ?, ?)', [id, input.name, color]);
+    try {
+      await pgRun(db, `INSERT INTO ${db.table('badges')} (id, name, color) VALUES ($1, $2, $3)`, [
+        id,
+        input.name,
+        color,
+      ]);
+    } catch (error) {
+      if (isPostgresUniqueViolation(error)) {
+        const race = await pgFirst<{ id: string; name: string; color: string }>(
+          db,
+          `SELECT id, name, color FROM ${db.table('badges')} WHERE lower(name) = lower($1) LIMIT 1`,
+          [input.name],
+        );
+        if (race) return json({ badge: race });
+      }
+      throw error;
+    }
     return json({ badge: { id, name: input.name, color } }, { status: 201 });
   });
 
@@ -532,7 +573,7 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
   router.add('GET', '/api/monitors', async (c) => {
     await requireAdmin(c);
     const { db } = c.env;
-    const rows = await all<MonitorRow>(db, `${monitorSelect} ORDER BY m.created_at DESC`);
+    const rows = await pgAll<MonitorRow>(db, `${monitorSelect(db)} ORDER BY m.created_at DESC`);
     return json({ monitors: await monitorSummaries(db, rows, log) });
   });
 
@@ -554,14 +595,17 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const timestamp = nowIso(now());
     const thresholds = input.uptimeThresholds ?? { green: 99.5, lightGreen: 99, orange: 90 };
     const nextCheckAt = nextBoundary(now(), input.intervalSeconds).toISOString();
-    const statements: { sql: string; values: unknown[] }[] = [
-      {
-        sql: `INSERT INTO monitors (id, name, url, interval_seconds, timeout_ms, enabled,
-                dns_diagnostics_enabled, is_public, public_slug, badge_id, uptime_thresholds,
-                outage_threshold, recovery_threshold, repeat_notification_minutes, next_check_at,
-                created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        values: [
+
+    await db.transaction(async (tx) => {
+      await tx.query(
+        `INSERT INTO ${tx.table('monitors')} (
+           id, name, url, interval_seconds, timeout_ms, enabled,
+           dns_diagnostics_enabled, is_public, public_slug, badge_id, uptime_thresholds,
+           outage_threshold, recovery_threshold, repeat_notification_minutes, next_check_at,
+           created_at, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+        [
           id,
           input.name ?? null,
           input.url,
@@ -580,21 +624,21 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
           timestamp,
           timestamp,
         ],
-      },
-    ];
-    for (const regionId of input.regionIds) {
-      statements.push({
-        sql: 'INSERT INTO monitor_regions (monitor_id, region_id) VALUES (?, ?)',
-        values: [id, regionId],
-      });
-    }
-    for (const serviceId of input.notificationServiceIds ?? []) {
-      statements.push({
-        sql: 'INSERT INTO monitor_notification_services (monitor_id, notification_service_id) VALUES (?, ?)',
-        values: [id, serviceId],
-      });
-    }
-    await batch(db, statements);
+      );
+      for (const regionId of input.regionIds) {
+        await tx.query(
+          `INSERT INTO ${tx.table('monitor_regions')} (monitor_id, region_id) VALUES ($1, $2)`,
+          [id, regionId],
+        );
+      }
+      for (const serviceId of input.notificationServiceIds ?? []) {
+        await tx.query(
+          `INSERT INTO ${tx.table('monitor_notification_services')} (monitor_id, notification_service_id) VALUES ($1, $2)`,
+          [id, serviceId],
+        );
+      }
+    });
+
     const row = await getMonitor(db, id);
     if (!row) throw new HttpErrorLike(500, 'internal_error', 'Monitor insert failed');
     return json({ summary: await monitorSummary(db, row, log) }, { status: 201 });
@@ -607,24 +651,15 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const ids = [...new Set(input.monitorIds)];
     const timestamp = nowIso(now());
     const nextCheckAt = nextBoundary(now(), input.intervalSeconds).toISOString();
-    // D1 caps a statement at 100 bound parameters, so expand the id list from a
-    // single JSON bind with json_each instead of one `?` per monitor. The
-    // existence guard ensures a missing monitor leaves every row untouched
-    // before returning the 404.
-    const updated = await all<{ id: string }>(
+
+    const updated = await pgAll<{ id: string }>(
       db,
-      `UPDATE monitors SET interval_seconds = ?, next_check_at = ?, updated_at = ?
-       WHERE id IN (SELECT value FROM json_each(?))
-         AND (SELECT count(*) FROM monitors WHERE id IN (SELECT value FROM json_each(?))) = ?
+      `UPDATE ${db.table('monitors')}
+       SET interval_seconds = $1, next_check_at = $2, updated_at = $3
+       WHERE id = ANY($4::text[])
+         AND (SELECT count(*)::integer FROM ${db.table('monitors')} WHERE id = ANY($4::text[])) = $5
        RETURNING id`,
-      [
-        input.intervalSeconds,
-        nextCheckAt,
-        timestamp,
-        JSON.stringify(ids),
-        JSON.stringify(ids),
-        ids.length,
-      ],
+      [input.intervalSeconds, nextCheckAt, timestamp, ids, ids.length],
     );
     if (updated.length !== ids.length) {
       throw new HttpErrorLike(404, 'not_found', 'One or more monitors were not found');
@@ -638,13 +673,14 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const input = monitorBulkBadgeUpdateSchema.parse(await readJson(c.request));
     if (input.badgeId) await assertBadgeExists(db, input.badgeId);
     const ids = [...new Set(input.monitorIds)];
-    const updated = await all<{ id: string }>(
+    const updated = await pgAll<{ id: string }>(
       db,
-      `UPDATE monitors SET badge_id = ?, updated_at = ?
-       WHERE id IN (SELECT value FROM json_each(?))
-         AND (SELECT count(*) FROM monitors WHERE id IN (SELECT value FROM json_each(?))) = ?
+      `UPDATE ${db.table('monitors')}
+       SET badge_id = $1, updated_at = $2
+       WHERE id = ANY($3::text[])
+         AND (SELECT count(*)::integer FROM ${db.table('monitors')} WHERE id = ANY($3::text[])) = $4
        RETURNING id`,
-      [input.badgeId, nowIso(now()), JSON.stringify(ids), JSON.stringify(ids), ids.length],
+      [input.badgeId, nowIso(now()), ids, ids.length],
     );
     if (updated.length !== ids.length) {
       throw new HttpErrorLike(404, 'not_found', 'One or more monitors were not found');
@@ -657,7 +693,19 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const { id } = idSchema.parse(c.params);
     const monitor = await getMonitor(c.env.db, id);
     if (!monitor) throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
-    return json({ summary: await monitorSummary(c.env.db, monitor, log) });
+    return json({
+      summary: await monitorRequestCache.get(
+        JSON.stringify([
+          monitorCacheNamespace(c.env),
+          c.env.db.schema,
+          'private',
+          monitor.id,
+          monitor.updated_at,
+          'summary',
+        ]),
+        () => monitorSummary(c.env.db, monitor, log),
+      ),
+    });
   });
 
   router.add('PATCH', '/api/monitors/:id', async (c) => {
@@ -709,68 +757,81 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const nextCheckAt = update.intervalSeconds
       ? nextBoundary(now(), merged.intervalSeconds).toISOString()
       : null;
-    const statements: { sql: string; values: unknown[] }[] = [
-      {
-        sql: `UPDATE monitors SET name = ?, url = ?, interval_seconds = ?, timeout_ms = ?, enabled = ?,
-                dns_diagnostics_enabled = ?, is_public = ?, public_slug = ?, badge_id = ?,
-                uptime_thresholds = ?, outage_threshold = ?, recovery_threshold = ?,
-                repeat_notification_minutes = ?, next_check_at = COALESCE(?, next_check_at), updated_at = ?
-              WHERE id = ?`,
-        values: [
-          merged.name ?? null,
-          merged.url,
-          merged.intervalSeconds,
-          merged.timeoutMs,
-          merged.enabled ? 1 : 0,
-          merged.dnsDiagnosticsEnabled ? 1 : 0,
-          merged.isPublic ? 1 : 0,
-          merged.publicSlug ?? null,
-          merged.badgeId ?? null,
-          JSON.stringify(thresholds),
-          merged.outageThreshold ?? 3,
-          merged.recoveryThreshold ?? 2,
-          merged.repeatNotificationMinutes ?? null,
-          nextCheckAt,
-          timestamp,
-          id,
-        ],
-      },
-    ];
-    if (update.regionIds) {
-      statements.push({ sql: 'DELETE FROM monitor_regions WHERE monitor_id = ?', values: [id] });
-      for (const regionId of merged.regionIds) {
-        statements.push({
-          sql: 'INSERT INTO monitor_regions (monitor_id, region_id) VALUES (?, ?)',
-          values: [id, regionId],
-        });
-      }
-    }
-    if (update.notificationServiceIds) {
-      statements.push({
-        sql: 'DELETE FROM monitor_notification_services WHERE monitor_id = ?',
-        values: [id],
+
+    try {
+      await db.transaction(async (tx) => {
+        await tx.query(
+          `UPDATE ${tx.table('monitors')}
+           SET name = $1, url = $2, interval_seconds = $3, timeout_ms = $4, enabled = $5,
+               dns_diagnostics_enabled = $6, is_public = $7, public_slug = $8, badge_id = $9,
+               uptime_thresholds = $10, outage_threshold = $11, recovery_threshold = $12,
+               repeat_notification_minutes = $13, next_check_at = COALESCE($14, next_check_at), updated_at = $15
+           WHERE id = $16`,
+          [
+            merged.name ?? null,
+            merged.url,
+            merged.intervalSeconds,
+            merged.timeoutMs,
+            merged.enabled ? 1 : 0,
+            merged.dnsDiagnosticsEnabled ? 1 : 0,
+            merged.isPublic ? 1 : 0,
+            merged.publicSlug ?? null,
+            merged.badgeId ?? null,
+            JSON.stringify(thresholds),
+            merged.outageThreshold ?? 3,
+            merged.recoveryThreshold ?? 2,
+            merged.repeatNotificationMinutes ?? null,
+            nextCheckAt,
+            timestamp,
+            id,
+          ],
+        );
+
+        if (update.regionIds) {
+          await tx.query(`DELETE FROM ${tx.table('monitor_regions')} WHERE monitor_id = $1`, [id]);
+          for (const regionId of merged.regionIds) {
+            await tx.query(
+              `INSERT INTO ${tx.table('monitor_regions')} (monitor_id, region_id) VALUES ($1, $2)`,
+              [id, regionId],
+            );
+          }
+        }
+
+        if (update.notificationServiceIds) {
+          await tx.query(
+            `DELETE FROM ${tx.table('monitor_notification_services')} WHERE monitor_id = $1`,
+            [id],
+          );
+          for (const serviceId of mergedNotificationIds) {
+            await tx.query(
+              `INSERT INTO ${tx.table('monitor_notification_services')} (monitor_id, notification_service_id) VALUES ($1, $2)`,
+              [id, serviceId],
+            );
+          }
+        }
+
+        if (notificationRulesChanged || notificationMembershipChanged) {
+          await tx.query(
+            `UPDATE ${tx.table('notification_deliveries')}
+             SET status = 'cancelled', lease_until = NULL, lease_token = NULL
+             WHERE monitor_id = $1 AND status IN ('pending', 'sending')`,
+            [id],
+          );
+          await tx.query(
+            `UPDATE ${tx.table('monitor_notification_state')}
+             SET config_fingerprint = 'invalidated', updated_at = $1
+             WHERE monitor_id = $2`,
+            [timestamp, id],
+          );
+        }
       });
-      for (const serviceId of mergedNotificationIds) {
-        statements.push({
-          sql: 'INSERT INTO monitor_notification_services (monitor_id, notification_service_id) VALUES (?, ?)',
-          values: [id, serviceId],
-        });
+    } catch (error) {
+      if (isPostgresUniqueViolation(error)) {
+        throw new HttpErrorLike(409, 'slug_conflict', 'That public monitor slug is already in use');
       }
+      throw error;
     }
-    if (notificationRulesChanged || notificationMembershipChanged) {
-      statements.push(
-        {
-          sql: `UPDATE notification_deliveries SET status = 'cancelled', lease_until = NULL, lease_token = NULL
-                WHERE monitor_id = ? AND status IN ('pending', 'sending')`,
-          values: [id],
-        },
-        {
-          sql: `UPDATE monitor_notification_state SET config_fingerprint = 'invalidated', updated_at = ? WHERE monitor_id = ?`,
-          values: [timestamp, id],
-        },
-      );
-    }
-    await batch(db, statements);
+
     const row = await getMonitor(db, id);
     if (!row) throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
     return json({ summary: await monitorSummary(db, row, log) });
@@ -780,28 +841,43 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     await requireAdmin(c);
     const { db } = c.env;
     const { id } = idSchema.parse(c.params);
-    const monitor = await first<{ id: string }>(db, 'SELECT id FROM monitors WHERE id = ?', [id]);
+    const monitor = await pgFirst<{ id: string }>(
+      db,
+      `SELECT id FROM ${db.table('monitors')} WHERE id = $1`,
+      [id],
+    );
     if (!monitor) throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
     const timestamp = nowIso(now());
-    await batch(db, [
-      { sql: 'DELETE FROM network_diagnostics WHERE monitor_id = ?', values: [id] },
-      { sql: 'DELETE FROM check_runs WHERE monitor_id = ?', values: [id] },
-      { sql: 'DELETE FROM monitor_daily_uptime WHERE monitor_id = ?', values: [id] },
-      { sql: 'DELETE FROM notification_deliveries WHERE monitor_id = ?', values: [id] },
-      { sql: 'DELETE FROM monitor_notification_state WHERE monitor_id = ?', values: [id] },
-      {
-        sql: 'UPDATE monitors SET next_check_at = ?, updated_at = ? WHERE id = ?',
-        values: [timestamp, timestamp, id],
-      },
-    ]);
+
+    await db.transaction(async (tx) => {
+      await tx.query(`DELETE FROM ${tx.table('network_diagnostics')} WHERE monitor_id = $1`, [id]);
+      await tx.query(`DELETE FROM ${tx.table('check_runs')} WHERE monitor_id = $1`, [id]);
+      await tx.query(`DELETE FROM ${tx.table('monitor_daily_uptime')} WHERE monitor_id = $1`, [id]);
+      await tx.query(`DELETE FROM ${tx.table('notification_deliveries')} WHERE monitor_id = $1`, [
+        id,
+      ]);
+      await tx.query(
+        `DELETE FROM ${tx.table('monitor_notification_state')} WHERE monitor_id = $1`,
+        [id],
+      );
+      await tx.query(
+        `UPDATE ${tx.table('monitors')} SET next_check_at = $1, updated_at = $2 WHERE id = $3`,
+        [timestamp, timestamp, id],
+      );
+    });
+
     return noContent();
   });
 
   router.add('DELETE', '/api/monitors/:id', async (c) => {
     await requireAdmin(c);
     const { id } = idSchema.parse(c.params);
-    const result = await run(c.env.db, 'DELETE FROM monitors WHERE id = ?', [id]);
-    if (result.meta.changes === 0)
+    const result = await pgRun(
+      c.env.db,
+      `DELETE FROM ${c.env.db.table('monitors')} WHERE id = $1`,
+      [id],
+    );
+    if ((result.rowCount ?? 0) === 0)
       throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
     return noContent();
   });
@@ -812,16 +888,39 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const { id } = publicReferenceSchema.parse(c.params);
     const monitor = await getPublicMonitor(db, id);
     if (!monitor) throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
-    return json({ summary: toPublicMonitorSummary(await monitorSummary(db, monitor, log)) });
+    const summary = await monitorRequestCache.get(
+      JSON.stringify([
+        monitorCacheNamespace(c.env),
+        db.schema,
+        'public',
+        monitor.id,
+        monitor.updated_at,
+        'summary',
+      ]),
+      async () => toPublicMonitorSummary(await monitorSummary(db, monitor, log)),
+    );
+    return json({ summary });
   });
 
   router.add('GET', '/api/monitors/:id/uptime', async (c) => {
     await requireAdmin(c);
     const { db } = c.env;
     const { id } = idSchema.parse(c.params);
-    if (!(await getMonitor(db, id)))
-      throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
-    return json({ uptime: await monitorUptimePayload(db, id, now()) });
+    const monitor = await getMonitor(db, id);
+    if (!monitor) throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
+    return json({
+      uptime: await monitorRequestCache.get(
+        JSON.stringify([
+          monitorCacheNamespace(c.env),
+          db.schema,
+          'private',
+          id,
+          monitor.updated_at,
+          'uptime',
+        ]),
+        () => monitorUptimePayload(db, id, now()),
+      ),
+    });
   });
 
   router.add('GET', '/api/monitors/public/:id/uptime', async (c) => {
@@ -829,7 +928,19 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const { id } = publicReferenceSchema.parse(c.params);
     const monitor = await getPublicMonitor(db, id);
     if (!monitor) throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
-    return json({ uptime: await monitorUptimePayload(db, monitor.id, now()) });
+    return json({
+      uptime: await monitorRequestCache.get(
+        JSON.stringify([
+          monitorCacheNamespace(c.env),
+          db.schema,
+          'public',
+          monitor.id,
+          monitor.updated_at,
+          'uptime',
+        ]),
+        () => monitorUptimePayload(db, monitor.id, now()),
+      ),
+    });
   });
 
   router.add('GET', '/api/monitors/:id/latency', async (c) => {
@@ -837,9 +948,22 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const { db } = c.env;
     const { id } = idSchema.parse(c.params);
     const { range } = z.object({ range: rangeSchema }).parse(queryObject(c.url));
-    if (!(await getMonitor(db, id)))
-      throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
-    return json(await latencyPayload(db, id, range as RangeKey, now()));
+    const monitor = await getMonitor(db, id);
+    if (!monitor) throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
+    return json(
+      await monitorRequestCache.get(
+        JSON.stringify([
+          monitorCacheNamespace(c.env),
+          db.schema,
+          'private',
+          id,
+          monitor.updated_at,
+          'latency',
+          range,
+        ]),
+        () => latencyPayload(db, id, range as RangeKey, now()),
+      ),
+    );
   });
 
   router.add('GET', '/api/monitors/public/:id/latency', async (c) => {
@@ -848,7 +972,20 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const { range } = z.object({ range: rangeSchema }).parse(queryObject(c.url));
     const monitor = await getPublicMonitor(db, id);
     if (!monitor) throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
-    return json(await latencyPayload(db, monitor.id, range as RangeKey, now()));
+    return json(
+      await monitorRequestCache.get(
+        JSON.stringify([
+          monitorCacheNamespace(c.env),
+          db.schema,
+          'public',
+          monitor.id,
+          monitor.updated_at,
+          'latency',
+          range,
+        ]),
+        () => latencyPayload(db, monitor.id, range as RangeKey, now()),
+      ),
+    );
   });
 
   router.add('GET', '/api/monitors/:id/observations', async (c) => {
@@ -856,16 +993,28 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const { db } = c.env;
     const { id } = idSchema.parse(c.params);
     const query = observationQuerySchema.parse(queryObject(c.url));
-    if (!(await getMonitor(db, id)))
-      throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
+    const monitor = await getMonitor(db, id);
+    if (!monitor) throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
     const cursor = query.cursor ? decodeCursor(query.cursor) : null;
-    const page = await listObservations(db, id, {
-      range: query.range as RangeKey,
-      ...(query.regionId ? { regionId: query.regionId } : {}),
-      cursor,
-      limit: query.limit,
-      now: now(),
-    });
+    const page = await monitorRequestCache.get(
+      JSON.stringify([
+        monitorCacheNamespace(c.env),
+        db.schema,
+        'private',
+        id,
+        monitor.updated_at,
+        'observations',
+        query,
+      ]),
+      () =>
+        listObservations(db, id, {
+          range: query.range as RangeKey,
+          regionId: query.regionId,
+          cursor,
+          limit: query.limit,
+          now: now(),
+        }),
+    );
     return json({
       observations: page.observations,
       nextCursor: page.nextCursor ? base64UrlEncodeJson(page.nextCursor) : null,
@@ -882,7 +1031,7 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const cursor = query.cursor ? decodeDnsCursor(query.cursor) : null;
     const page = await listDnsDiagnostics(db, id, {
       range: query.range,
-      ...(query.regionId ? { regionId: query.regionId } : {}),
+      regionId: query.regionId,
       cursor,
       limit: query.limit,
       now: now(),
@@ -908,7 +1057,20 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     await assertStatusPageSlugAvailable(db, input.publicSlug ?? null, null);
     await assertStatusPageMonitorsExist(db, input);
     const id = randomId();
-    await batch(db, buildStatusPageStatements(id, input, true, nowIso(now())));
+    try {
+      await db.transaction(async (tx) => {
+        await executeStatusPageStatements(tx, id, input, true, nowIso(now()));
+      });
+    } catch (error) {
+      if (isPostgresUniqueViolation(error)) {
+        throw new HttpErrorLike(
+          409,
+          'slug_conflict',
+          'That public status page slug is already in use',
+        );
+      }
+      throw error;
+    }
     return json({ statusPage: await getStatusPage(db, id) }, { status: 201 });
   });
 
@@ -925,20 +1087,43 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
     const { db } = c.env;
     const { id } = idSchema.parse(c.params);
     const input = statusPageSaveSchema.parse(await readJson(c.request));
-    if (!(await first<{ id: string }>(db, 'SELECT id FROM status_pages WHERE id = ?', [id]))) {
+    if (
+      !(await pgFirst<{ id: string }>(
+        db,
+        `SELECT id FROM ${db.table('status_pages')} WHERE id = $1`,
+        [id],
+      ))
+    ) {
       throw new HttpErrorLike(404, 'not_found', 'Status page was not found');
     }
     await assertStatusPageSlugAvailable(db, input.publicSlug ?? null, id);
     await assertStatusPageMonitorsExist(db, input);
-    await batch(db, buildStatusPageStatements(id, input, false, nowIso(now())));
+    try {
+      await db.transaction(async (tx) => {
+        await executeStatusPageStatements(tx, id, input, false, nowIso(now()));
+      });
+    } catch (error) {
+      if (isPostgresUniqueViolation(error)) {
+        throw new HttpErrorLike(
+          409,
+          'slug_conflict',
+          'That public status page slug is already in use',
+        );
+      }
+      throw error;
+    }
     return json({ statusPage: await getStatusPage(db, id) });
   });
 
   router.add('DELETE', '/api/status-pages/:id', async (c) => {
     await requireAdmin(c);
     const { id } = idSchema.parse(c.params);
-    const result = await run(c.env.db, 'DELETE FROM status_pages WHERE id = ?', [id]);
-    if (result.meta.changes === 0)
+    const result = await pgRun(
+      c.env.db,
+      `DELETE FROM ${c.env.db.table('status_pages')} WHERE id = $1`,
+      [id],
+    );
+    if ((result.rowCount ?? 0) === 0)
       throw new HttpErrorLike(404, 'not_found', 'Status page was not found');
     return noContent();
   });
@@ -1049,7 +1234,7 @@ function assertRegionsEnabled(config: ApiConfig, regionIds: readonly RegionId[])
 }
 
 async function assertMonitorSlugAvailable(
-  db: D1Database,
+  db: Database,
   publicSlug: string | null,
   excludedId: string | null,
 ): Promise<void> {
@@ -1057,7 +1242,7 @@ async function assertMonitorSlugAvailable(
 }
 
 async function assertStatusPageSlugAvailable(
-  db: D1Database,
+  db: Database,
   publicSlug: string | null,
   excludedId: string | null,
 ): Promise<void> {
@@ -1065,7 +1250,7 @@ async function assertStatusPageSlugAvailable(
 }
 
 async function assertSlugAvailable(
-  db: D1Database,
+  db: Database,
   table: 'monitors' | 'status_pages',
   resource: 'monitor' | 'status page',
   publicSlug: string | null,
@@ -1073,27 +1258,28 @@ async function assertSlugAvailable(
 ): Promise<void> {
   if (!publicSlug) return;
   const conflict = excludedId
-    ? await first<{ id: string }>(
+    ? await pgFirst<{ id: string }>(
         db,
-        `SELECT id FROM ${table} WHERE public_slug = ? AND id <> ? LIMIT 1`,
+        `SELECT id FROM ${db.table(table)} WHERE public_slug = $1 AND id <> $2 LIMIT 1`,
         [publicSlug, excludedId],
       )
-    : await first<{ id: string }>(db, `SELECT id FROM ${table} WHERE public_slug = ? LIMIT 1`, [
-        publicSlug,
-      ]);
+    : await pgFirst<{ id: string }>(
+        db,
+        `SELECT id FROM ${db.table(table)} WHERE public_slug = $1 LIMIT 1`,
+        [publicSlug],
+      );
   if (conflict) {
     throw new HttpErrorLike(409, 'slug_conflict', `That public ${resource} slug is already in use`);
   }
 }
 
-async function assertStatusPageMonitorsExist(db: D1Database, input: StatusPageSave): Promise<void> {
+async function assertStatusPageMonitorsExist(db: Database, input: StatusPageSave): Promise<void> {
   const uniqueIds = [...new Set(input.groups.flatMap((group) => group.monitorIds))];
   if (uniqueIds.length === 0) return;
-  // One query with json_each avoids a D1 round trip per monitor.
-  const found = await all<{ id: string }>(
+  const found = await pgAll<{ id: string }>(
     db,
-    'SELECT id FROM monitors WHERE id IN (SELECT value FROM json_each(?))',
-    [JSON.stringify(uniqueIds)],
+    `SELECT id FROM ${db.table('monitors')} WHERE id = ANY($1::text[])`,
+    [uniqueIds],
   );
   if (found.length !== uniqueIds.length) {
     const existing = new Set(found.map((row) => row.id));
@@ -1103,7 +1289,7 @@ async function assertStatusPageMonitorsExist(db: D1Database, input: StatusPageSa
 }
 
 async function assertNotificationServicesExist(
-  db: D1Database,
+  db: Database,
   serviceIds: readonly string[],
 ): Promise<void> {
   if (!(await notificationServicesExist(db, serviceIds))) {
@@ -1115,51 +1301,50 @@ async function assertNotificationServicesExist(
   }
 }
 
-async function assertBadgeExists(db: D1Database, badgeId: string | null): Promise<void> {
+async function assertBadgeExists(db: Database, badgeId: string | null): Promise<void> {
   if (!badgeId) return;
   if (!(await badgeExists(db, badgeId))) {
     throw new HttpErrorLike(400, 'invalid_badge', 'The selected badge does not exist');
   }
 }
 
-function buildStatusPageStatements(
+async function executeStatusPageStatements(
+  tx: Database,
   id: string,
   input: StatusPageSave,
   insertPage: boolean,
   timestamp: string,
-): { sql: string; values: unknown[] }[] {
-  const statements: { sql: string; values: unknown[] }[] = [];
+): Promise<void> {
   if (insertPage) {
-    statements.push({
-      sql: 'INSERT INTO status_pages (id, title, public_slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-      values: [id, input.title, input.publicSlug ?? null, timestamp, timestamp],
-    });
+    await tx.query(
+      `INSERT INTO ${tx.table('status_pages')} (id, title, public_slug, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [id, input.title, input.publicSlug ?? null, timestamp, timestamp],
+    );
   } else {
-    statements.push({
-      sql: 'UPDATE status_pages SET title = ?, public_slug = ?, updated_at = ? WHERE id = ?',
-      values: [input.title, input.publicSlug ?? null, timestamp, id],
-    });
-    statements.push({
-      sql: 'DELETE FROM status_page_groups WHERE status_page_id = ?',
-      values: [id],
-    });
+    await tx.query(
+      `UPDATE ${tx.table('status_pages')}
+       SET title = $1, public_slug = $2, updated_at = $3
+       WHERE id = $4`,
+      [input.title, input.publicSlug ?? null, timestamp, id],
+    );
+    await tx.query(`DELETE FROM ${tx.table('status_page_groups')} WHERE status_page_id = $1`, [id]);
   }
   for (const [groupPosition, group] of input.groups.entries()) {
     const groupId = randomId();
-    statements.push({
-      sql: `INSERT INTO status_page_groups (id, status_page_id, title, position, width, show_badges)
-            VALUES (?, ?, ?, ?, ?, ?)`,
-      values: [groupId, id, group.title, groupPosition, group.width, group.showBadges ? 1 : 0],
-    });
+    await tx.query(
+      `INSERT INTO ${tx.table('status_page_groups')} (id, status_page_id, title, position, width, show_badges)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [groupId, id, group.title, groupPosition, group.width, group.showBadges ? 1 : 0],
+    );
     for (const [monitorPosition, monitorId] of group.monitorIds.entries()) {
-      statements.push({
-        sql: `INSERT INTO status_page_monitors (status_page_id, group_id, monitor_id, position)
-              VALUES (?, ?, ?, ?)`,
-        values: [id, groupId, monitorId, monitorPosition],
-      });
+      await tx.query(
+        `INSERT INTO ${tx.table('status_page_monitors')} (status_page_id, group_id, monitor_id, position)
+         VALUES ($1, $2, $3, $4)`,
+        [id, groupId, monitorId, monitorPosition],
+      );
     }
   }
-  return statements;
 }
 
 function decodeCursor(value: string): { startedAt: string; id: string } {

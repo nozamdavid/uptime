@@ -33,7 +33,9 @@ export type {
 
 export interface MonitorLatencyData {
   latency: Omit<LatencyPayload, 'aggregatePoints' | 'aggregateStats'> &
-    Partial<Pick<LatencyPayload, 'aggregatePoints' | 'aggregateStats'>>;
+    Partial<Pick<LatencyPayload, 'aggregatePoints' | 'aggregateStats'>> & {
+      points?: LatencyPayload['aggregatePoints'];
+    };
 }
 
 export interface MonitorDetailResponse extends MonitorLatencyData {
@@ -99,9 +101,276 @@ export interface StatusPageDetail extends StatusPageSummary {
     }>;
   }>;
 }
+export interface TierEntitlements {
+  monitors: number;
+  regions: number;
+  allowedRegionIds: RegionId[];
+  seats: number;
+  statusPages: number;
+  notificationDestinations: number;
+  customDomains: number;
+  intervalSeconds: 300;
+  rawRetentionHours: 24;
+  dailyRetentionDays: 30;
+}
+
+export interface PlanPrice {
+  amount: number;
+  currency: 'usd' | 'eur';
+  interval: 'month';
+}
+
+export interface PlanDefinition {
+  id: string;
+  revision: number;
+  name: string;
+  description: string;
+  price: PlanPrice;
+  entitlements: TierEntitlements;
+  features: string[];
+  active: boolean;
+  published: boolean;
+  preview: boolean;
+}
+
+export interface PublicProductCatalog {
+  revision: number;
+  preview: boolean;
+  billingMode: 'disabled' | 'mock' | 'stripe';
+  plans: PlanDefinition[];
+  capabilities: {
+    checkout: boolean;
+    customDomains: string;
+    notificationProviders: string[];
+  };
+}
+
+export interface ProductCatalog {
+  revision: number;
+  preview: boolean;
+  billingMode: 'disabled' | 'mock' | 'stripe';
+  plans: PlanDefinition[];
+  stripePriceIds?: Record<string, string>;
+}
+
+export interface EffectiveTierOverrides {
+  monitors: number;
+  regions: number;
+  allowedRegionIds: RegionId[];
+}
+
+export interface WorkspaceEntitlementsUsage {
+  monitors: number;
+  statusPages: number;
+  notificationServices: number;
+  enabledMonitors?: number;
+  notificationDestinations?: number;
+  members?: number;
+  pendingInvites?: number;
+  seats?: number;
+}
+
+export interface WorkspaceEntitlementsResponse {
+  tierId: string | null;
+  revision: number | null;
+  generation: number | null;
+  legacyExempt: boolean;
+  entitlements: TierEntitlements | null;
+  overrides: EffectiveTierOverrides | null;
+  usage: WorkspaceEntitlementsUsage;
+  downgrade: {
+    overLimit: boolean;
+    overLimitResources?: string[];
+    pausedMonitorCount: number;
+    pausedMonitors: Array<{ id: string; reason: string }>;
+  } | null;
+}
+
+// --- Billing Types ---
+export interface WorkspaceBillingSubscription {
+  status: string;
+  tierId: string | null;
+  revision: number | null;
+  currentPeriodEnd: number | null;
+  cancelAtPeriodEnd: boolean;
+  graceUntil: number | null;
+  pendingReconciliation: boolean;
+  activationError: string | null;
+  plan: PlanDefinition | null;
+}
+
+export interface WorkspaceBillingResponse {
+  mode: 'disabled' | 'mock' | 'stripe';
+  ready: boolean;
+  setupReasons: string[];
+  simulation: boolean;
+  legacyExempt: boolean;
+  subscription: WorkspaceBillingSubscription | null;
+  effectivePlan: { tierId: string; revision: number };
+  actions: {
+    checkout: boolean;
+    portal: boolean;
+    cancel: boolean;
+    resume: boolean;
+    changePlan: boolean;
+  };
+  managementUrl: string | null;
+  policy: {
+    proration: string;
+    trials: boolean;
+    automaticOverageCharges: boolean;
+    cancellation: string;
+  };
+  mockSession: null | {
+    sessionId: string;
+    nonce: string;
+    expiresAt: number;
+    tierId: string;
+    revision: number;
+    plan: PlanDefinition | null;
+    simulation: boolean;
+  };
+}
+
+export interface WorkspaceBillingCheckoutResponse {
+  mode: 'mock' | 'stripe';
+  simulation: boolean;
+  url: string;
+  sessionId: string;
+  expiresAt: number;
+  tierId: string;
+  revision: number;
+  nonce?: string;
+  plan: PlanDefinition;
+}
+
+export interface WorkspaceBillingPortalResponse {
+  mode: 'mock' | 'stripe';
+  simulation: boolean;
+  url: string;
+}
+
+// --- Custom Domains Types ---
+export type CustomStatusDomainStatus =
+  'creating' | 'pending' | 'active' | 'deleting' | 'delete_failed' | 'deleted';
+
+export interface CustomHostnameCnameInstruction {
+  type: 'CNAME';
+  name: string;
+  target: string;
+  purpose: 'traffic_routing';
+}
+
+export type CustomHostnameValidationRecord =
+  | {
+      type: 'TXT';
+      name: string;
+      value: string;
+      purpose: 'hostname_ownership' | 'ssl_validation';
+    }
+  | {
+      type: 'CNAME';
+      name: string;
+      target: string;
+      purpose: 'ssl_validation';
+    }
+  | {
+      type: 'HTTP';
+      url: string;
+      body: string;
+      purpose: 'ssl_validation';
+    };
+
+export interface CustomStatusDomainDTO {
+  id: string;
+  workspaceId: string;
+  statusPageId: string;
+  hostname: string;
+  providerMode: string;
+  status: CustomStatusDomainStatus;
+  isEligible: boolean;
+  simulationReady: boolean;
+  eligibilityReason: string | null;
+  errorCode: string | null;
+  verifiedAt: string | null;
+  recheckDueAt: string | null;
+  cnameInstruction: CustomHostnameCnameInstruction | null;
+  validationRecords: CustomHostnameValidationRecord[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CustomStatusDomainListResponse {
+  domains: CustomStatusDomainDTO[];
+  quota: number;
+  totalActive: number;
+  hasMore: boolean;
+  nextCursor?: string;
+  mode: string;
+  ready: boolean;
+  setupReasons: string[];
+  simulation: boolean;
+}
+
+export interface CustomStatusDomainSetupResponse {
+  mode: string;
+  ready: boolean;
+  setupReasons: string[];
+  simulation: boolean;
+  cnameTarget: string | null;
+}
+
+export function isValidBillingRedirect(targetUrl: string, expectedOrigin: string): boolean {
+  try {
+    const parsed = new URL(targetUrl, expectedOrigin);
+    if (parsed.origin === expectedOrigin) {
+      return true;
+    }
+    if (parsed.protocol === 'https:') {
+      const host = parsed.hostname.toLowerCase();
+      if (host === 'checkout.stripe.com' || host === 'billing.stripe.com') {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function formatPlanCents(
+  amount: number,
+  currency: 'usd' | 'eur' = 'usd',
+  interval = 'month',
+): string {
+  const formatted = new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: currency.toUpperCase(),
+    minimumFractionDigits: amount % 100 === 0 ? 0 : 2,
+    maximumFractionDigits: 2,
+  }).format(amount / 100);
+  return interval ? `${formatted} / ${interval}` : formatted;
+}
+
+export function deriveTierFeatures(e: TierEntitlements): string[] {
+  return [
+    `${e.monitors} monitors`,
+    `${e.regions} regions per monitor`,
+    `${e.seats} workspace seats`,
+    `${e.statusPages} status pages`,
+    `${e.notificationDestinations} notification destinations`,
+    `${e.customDomains} custom status domains (preview)`,
+    'Five-minute checks',
+    '24-hour detailed history',
+    '30-day daily uptime',
+    'Telegram and Discord',
+  ];
+}
+
 export interface ProductLimits {
   monitors: number;
   regions: number;
+  allowedRegionIds: RegionId[];
   intervalSeconds: number;
   statusPages: number;
   notificationServices: number;
@@ -115,12 +384,112 @@ export interface ProductUsage {
 }
 export interface ProductBudget {
   ceilingUsd: number;
-  baseUsd: number;
-  forecastUsd?: number;
-  externalMonthlyCostUsd?: number;
+  baseUsd?: number | null;
+  forecastUsd?: number | null;
+  cloudflareCostUsd?: number | null;
+  externalMonthlyCostUsd?: number | null;
+  observedAt?: string | null;
   admissionOpen?: boolean;
+  billingWindow?: string;
   coverage?: string;
 }
+export interface PauseRecord {
+  scope: string;
+  paused: boolean;
+  reason: string;
+  actor: string;
+  changedAt: string;
+}
+export interface SchedulingState {
+  paused: boolean;
+  manual: PauseRecord[];
+  automatic: PauseRecord | null;
+  inFlightMayComplete: true;
+  resumeConditions: string[];
+}
+export interface CapacityGrant {
+  monitors: number;
+  regionalTasks: number;
+}
+export interface EffectiveCaps {
+  monitorClaimsPerMinute: number;
+  regionalTasksPerMinute: number;
+  monitorsPerPeriod: number;
+  regionalTasksPerPeriod: number;
+}
+export interface UtilizationRatios {
+  monitorClaims: number;
+  regionalTasks: number;
+}
+export interface CapacityFleet {
+  dispatchesPerMinute: number;
+  configuredWorkspaces: number;
+  safe: boolean;
+}
+export interface Capacity {
+  safe: boolean;
+  intervalSeconds: number;
+  headroomPercent: number;
+  grant: CapacityGrant;
+  actual: CapacityGrant | null;
+  effectiveCaps: EffectiveCaps;
+  utilization: UtilizationRatios;
+  actualUtilization: UtilizationRatios | null;
+  fleet: CapacityFleet;
+  warnings: string[];
+}
+export interface WorkspaceTelemetry {
+  lastSuccessfulTickAt: string | null;
+  oldestOverdueCheckAt: string | null;
+  regionalProbes: Record<string, unknown> | null;
+  reports: {
+    lastSuccessfulAt: string | null;
+    oldestSuccessfulAt?: string | null;
+    stale: boolean | null;
+    failedCount?: number;
+    truncated?: boolean;
+  };
+  notificationFailures: {
+    count: number;
+    truncated: boolean;
+  };
+  targetIncidents?: {
+    downCount: number;
+    truncated: boolean;
+  };
+}
+export interface WorkspaceHealth {
+  workspaceId: string;
+  source: 'hosted' | 'legacy_import' | 'staging_import' | null;
+  scheduling: SchedulingState;
+  schedulingEnforcement?: {
+    observedAt: string | null;
+    confirmed: boolean;
+  };
+  telemetry: WorkspaceTelemetry | null;
+  error: string | null;
+}
+export interface DispatchHealth {
+  oldestPendingAt: string | null;
+  pendingAgeSeconds: number | null;
+  failedCount: number;
+  truncated: boolean;
+  deadLetterCount: null;
+}
+export interface OperatorHealthResponse {
+  generatedAt: string;
+  scheduling: SchedulingState;
+  budget: ProductBudget;
+  dispatch: DispatchHealth;
+  workspaces: WorkspaceHealth[];
+  nextCursor: string | null;
+}
+export interface HistoricalD1Usage {
+  rowsRead: number;
+  rowsWritten: number;
+  storageBytes: number;
+}
+
 export interface OperatorWorkspace {
   id: string;
   name: string;
@@ -128,19 +497,27 @@ export interface OperatorWorkspace {
   ownerHandle: string;
   state: string;
   monitorCount: number;
-  rowsRead: number;
-  rowsWritten: number;
-  storageBytes: number;
+  limits: (ProductLimits & { capacity?: Capacity }) | null;
+  rowsRead: number | null;
+  rowsWritten: number | null;
+  storageBytes: number | null;
+  historicalD1Usage?: HistoricalD1Usage | null;
   lastSeenAt: string | null;
 }
+export type ImportedWorkspaceKind = 'staging_import' | 'legacy_import';
+
+export function isImportedWorkspaceKind(value: unknown): value is ImportedWorkspaceKind {
+  return value === 'staging_import' || value === 'legacy_import';
+}
+
 export interface OperatorSlot {
   bindingName: string;
   databaseId: string;
-  status: 'available' | 'assigned' | 'deleting';
+  status: 'available' | 'assigned' | 'deleting' | 'quarantined';
   admissionEnabled: boolean;
   workspaceId: string | null;
   ownerHandle: string | null;
-  kind?: 'staging_import' | string;
+  kind?: ImportedWorkspaceKind;
 }
 export interface OperatorSlots {
   maxWorkspaces: number;
@@ -174,7 +551,7 @@ export interface ProductSession {
     id: string;
     name: string;
     plan: 'free';
-    kind?: 'staging_import' | string;
+    kind?: ImportedWorkspaceKind;
     state: 'active' | 'waiting_for_capacity' | 'suspended' | 'deleting' | 'deleted' | string;
   };
   isOperator?: boolean;
@@ -191,9 +568,12 @@ export interface WorkspaceMember {
 }
 export interface WorkspaceInvitation {
   id: string;
+  workspaceId?: string;
   inviteeDid: string;
   role: 'maintainer' | 'viewer';
+  createdAt?: string;
   expiresAt?: string;
+  status?: 'pending' | 'expired';
 }
 export interface WorkspaceTarget {
   id: string;
@@ -312,6 +692,11 @@ export const api = {
   signIn: (password: string) =>
     sendJson<{ admin: { email: string } }>('/auth/login', 'POST', { password }),
   signOut: () => request<void>('/auth/logout', { method: 'POST' }),
+  publicPlans: () => publicRequest<PublicProductCatalog>('/plans'),
+  operatorPlans: () => request<ProductCatalog>('/operator/plans'),
+  saveOperatorPlans: (expectedRevision: number, reason: string, catalog: ProductCatalog) =>
+    sendJson<ProductCatalog>('/operator/plans', 'PUT', { expectedRevision, reason, catalog }),
+  workspaceEntitlements: () => request<WorkspaceEntitlementsResponse>('/workspace/entitlements'),
   usage: () =>
     request<{ usage: ProductUsage; limits: ProductLimits | null; budget: ProductBudget }>(
       '/workspace/usage',
@@ -323,7 +708,21 @@ export const api = {
   inviteWorkspaceMember: (did: string, role: 'maintainer' | 'viewer') =>
     sendJson<{ invitation: WorkspaceInvitation }>('/workspace/invitations', 'POST', { did, role }),
   acceptWorkspaceInvitation: (id: string) =>
-    sendJson<{ member: WorkspaceMember }>(`/workspace/invitations/${id}/accept`, 'POST', {}),
+    sendJson<{ workspaceId: string }>(
+      `/workspace/invitations/${encodeURIComponent(id)}/accept`,
+      'POST',
+      {},
+    ),
+  revokeWorkspaceInvitation: (id: string) =>
+    request<{ revoked: true; id: string }>(`/workspace/invitations/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+  resendWorkspaceInvitation: (id: string) =>
+    sendJson<{ invitation: WorkspaceInvitation }>(
+      `/workspace/invitations/${encodeURIComponent(id)}/resend`,
+      'POST',
+      {},
+    ),
   removeWorkspaceMember: (did: string) =>
     request<void>(`/workspace/members/${encodeURIComponent(did)}`, { method: 'DELETE' }),
   exportWorkspace: () => request<unknown>('/workspace/export'),
@@ -342,7 +741,43 @@ export const api = {
       {},
     ),
   operatorWorkspaces: () =>
-    request<{ workspaces: OperatorWorkspace[]; budget: ProductBudget }>('/operator/workspaces'),
+    request<{
+      workspaces: OperatorWorkspace[];
+      availableRegions: RegionDefinition[];
+      budget: ProductBudget;
+    }>('/operator/workspaces'),
+  operatorHealth: (after?: string, limit = 5) => {
+    const params = new URLSearchParams();
+    if (after) params.set('after', after);
+    params.set('limit', String(limit));
+    return request<OperatorHealthResponse>(`/operator/health?${params.toString()}`);
+  },
+  operatorScheduling: (paused: boolean, reason: string) =>
+    sendJson<{ scheduling: SchedulingState }>('/operator/scheduling', 'POST', { paused, reason }),
+  operatorWorkspaceScheduling: (id: string, paused: boolean, reason: string) =>
+    sendJson<{ scheduling: SchedulingState }>(
+      `/operator/workspaces/${encodeURIComponent(id)}/scheduling`,
+      'POST',
+      { paused, reason },
+    ),
+  operatorWorkspaceLimitsPreview: (
+    id: string,
+    input: { monitors: number; regions: number; allowedRegionIds: RegionId[] },
+  ) =>
+    sendJson<{ capacity: Capacity }>(
+      `/operator/workspaces/${encodeURIComponent(id)}/limits/preview`,
+      'POST',
+      input,
+    ),
+  updateOperatorWorkspaceLimits: (
+    id: string,
+    input: { monitors: number; regions: number; allowedRegionIds: RegionId[] },
+  ) =>
+    sendJson<{ limits: ProductLimits }>(
+      `/operator/workspaces/${encodeURIComponent(id)}/limits`,
+      'PATCH',
+      input,
+    ),
   operatorSlots: () => request<OperatorSlots>('/operator/slots'),
   operatorInterest: () => request<OperatorInterest>('/operator/interest'),
   updateOperatorSlots: (maxWorkspaces: number) =>
@@ -355,9 +790,12 @@ export const api = {
     ),
   assignOperatorSlot: (bindingName: string, ownerDid: string) =>
     sendJson<{ workspaceId: string; state: string; bindingName: string }>(
-      `/operator/slots/${encodeURIComponent(bindingName)}/assignment`,
+      '/operator/slots/assignment',
       'POST',
-      { ownerDid },
+      {
+        bindingName,
+        ownerDid,
+      },
     ),
   updateOperatorControls: (input: { admissionOpen: boolean; externalMonthlyCostUsd: number }) =>
     sendJson<{ budget: ProductBudget }>('/operator/controls', 'PATCH', input),
@@ -409,23 +847,23 @@ export const api = {
     return request<NotificationHistoryResponse>(`/notification-history${query}`);
   },
   statusPages: () => request<{ statusPages: StatusPageSummary[] }>('/status-pages'),
-  statusPage: (id: string) =>
-    request<{ statusPage: StatusPageDetail }>(`/status-pages/${id}`).then(
+  publicStatusPage: (id: string) =>
+    publicRequest<{ statusPage: PublicStatusPage }>(`/status-pages/public/${id}`).then(
       (result) => result.statusPage,
     ),
   createStatusPage: (input: StatusPageSave) =>
     sendJson<{ statusPage: StatusPageDetail }>('/status-pages', 'POST', input).then(
       (result) => result.statusPage,
     ),
-  updateStatusPage: (id: string, input: StatusPageSave) =>
-    sendJson<{ statusPage: StatusPageDetail }>(`/status-pages/${id}`, 'PUT', input).then(
+  statusPage: (id: string) =>
+    request<{ statusPage: StatusPageDetail }>(`/status-pages/${id}`).then(
+      (result) => result.statusPage,
+    ),
+  updateStatusPage: (id: string, input: Partial<StatusPageSave>) =>
+    sendJson<{ statusPage: StatusPageDetail }>(`/status-pages/${id}`, 'PATCH', input).then(
       (result) => result.statusPage,
     ),
   deleteStatusPage: (id: string) => request<void>(`/status-pages/${id}`, { method: 'DELETE' }),
-  publicStatusPage: (id: string) =>
-    publicRequest<{ statusPage: PublicStatusPage }>(`/status-pages/public/${id}`).then(
-      (result) => result.statusPage,
-    ),
   observations: (id: string, range: string, cursor?: string) =>
     request<{ observations: Observation[]; nextCursor: string | null }>(
       `/monitors/${id}/observations?range=${range}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
@@ -443,4 +881,85 @@ export const api = {
       `/monitors/${id}/dns-diagnostics?${params.toString()}`,
     ).then((result) => ({ items: result.diagnostics, nextCursor: result.nextCursor }));
   },
+
+  // --- Billing ---
+  workspaceBilling: (): Promise<WorkspaceBillingResponse> =>
+    request<WorkspaceBillingResponse>('/workspace/billing'),
+  startBillingCheckout: (
+    tierId: string,
+    revision: number,
+  ): Promise<WorkspaceBillingCheckoutResponse> =>
+    sendJson<WorkspaceBillingCheckoutResponse>('/workspace/billing/checkout', 'POST', {
+      tierId,
+      revision,
+    }),
+  createBillingPortal: (): Promise<WorkspaceBillingPortalResponse> =>
+    sendJson<WorkspaceBillingPortalResponse>('/workspace/billing/portal', 'POST', {}),
+  cancelBillingSubscription: (): Promise<WorkspaceBillingResponse> =>
+    sendJson<WorkspaceBillingResponse>('/workspace/billing/cancel', 'POST', {}),
+  resumeBillingSubscription: (): Promise<WorkspaceBillingResponse> =>
+    sendJson<WorkspaceBillingResponse>('/workspace/billing/resume', 'POST', {}),
+  confirmMockBilling: (
+    sessionId: string,
+    nonce: string,
+    outcome: 'purchase' | 'cancel' | 'payment_failed' = 'purchase',
+  ): Promise<WorkspaceBillingResponse> =>
+    sendJson<WorkspaceBillingResponse>('/workspace/billing/mock/confirm', 'POST', {
+      sessionId,
+      nonce,
+      outcome,
+    }),
+  cancelMockBilling: (sessionId: string, nonce: string): Promise<WorkspaceBillingResponse> =>
+    sendJson<WorkspaceBillingResponse>('/workspace/billing/mock/cancel', 'POST', {
+      sessionId,
+      nonce,
+    }),
+  simulateMockPaymentFailed: (): Promise<WorkspaceBillingResponse> =>
+    sendJson<WorkspaceBillingResponse>('/workspace/billing/mock/payment-failed', 'POST', {}),
+  changeMockBillingPlan: (tierId: string, revision: number): Promise<WorkspaceBillingResponse> =>
+    sendJson<WorkspaceBillingResponse>('/workspace/billing/mock/change-plan', 'POST', {
+      tierId,
+      revision,
+    }),
+
+  // --- Custom Domains ---
+  customDomains: (params?: {
+    limit?: number;
+    cursor?: string;
+  }): Promise<CustomStatusDomainListResponse> => {
+    const query = new URLSearchParams();
+    if (params?.limit) query.set('limit', String(params.limit));
+    if (params?.cursor) query.set('cursor', params.cursor);
+    const qs = query.toString();
+    return request<CustomStatusDomainListResponse>(
+      `/workspace/custom-domains${qs ? `?${qs}` : ''}`,
+    );
+  },
+  customDomainsSetup: (): Promise<CustomStatusDomainSetupResponse> =>
+    request<CustomStatusDomainSetupResponse>('/workspace/custom-domains/setup'),
+  createCustomDomain: (input: {
+    statusPageId: string;
+    hostname: string;
+  }): Promise<CustomStatusDomainDTO> =>
+    sendJson<CustomStatusDomainDTO>('/workspace/custom-domains', 'POST', input),
+  refreshCustomDomain: (id: string): Promise<CustomStatusDomainDTO> =>
+    sendJson<CustomStatusDomainDTO>(
+      `/workspace/custom-domains/${encodeURIComponent(id)}/refresh`,
+      'POST',
+      {},
+    ),
+  simulateCustomDomain: (
+    id: string,
+    targetStatus: 'ready' | 'pending_validation' | 'failed',
+  ): Promise<CustomStatusDomainDTO> =>
+    sendJson<CustomStatusDomainDTO>(
+      `/workspace/custom-domains/${encodeURIComponent(id)}/simulate`,
+      'POST',
+      { targetStatus },
+    ),
+  deleteCustomDomain: (id: string): Promise<{ id: string; deleted: boolean }> =>
+    request<{ id: string; deleted: boolean }>(
+      `/workspace/custom-domains/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    ),
 };

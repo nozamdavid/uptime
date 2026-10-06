@@ -1,17 +1,14 @@
+import { nowIso, type R2Bucket, type ReportPublicationRow } from '@uptime/cloudflare';
 import {
-  all,
-  first,
-  nowIso,
-  run,
-  type D1Database,
-  type R2Bucket,
-  type ReportPublicationRow,
-} from '@uptime/cloudflare';
+  pgAll as all,
+  pgFirst as first,
+  pgRun as run,
+  type Database,
+} from '@uptime/cloudflare/postgres';
 import type { ReportUptimeClosedDaysCache } from '@uptime/api-worker/queries';
 import type { ReportConfig } from './env.js';
 import { buildReportCohortData } from './reports.js';
 import { reportLeaseSeconds } from './state.js';
-import { startIncidentMonitorRefreshes } from './on-demand-monitor.js';
 
 export function monitorObjectKey(reference: string): string {
   return `public/monitors/${encodeURIComponent(reference)}.json`;
@@ -64,14 +61,17 @@ export interface PublishResult {
 
 /** Individual monitor reports are built on demand, outside the scheduled cohort. */
 export async function desiredPublications(
-  db: D1Database,
+  db: Database,
   reportIntervalSeconds = 60,
 ): Promise<DesiredPublication[]> {
   const pages = await all<{
     id: string;
     public_slug: string | null;
     report_interval_seconds: number;
-  }>(db, 'SELECT id, public_slug, report_interval_seconds FROM status_pages ORDER BY id');
+  }>(
+    db,
+    `SELECT id, public_slug, report_interval_seconds FROM ${db.table('status_pages')} ORDER BY id`,
+  );
   return [
     ...pages.map((page) => ({
       reportKey: `status-page:${page.id}`,
@@ -148,14 +148,14 @@ function timedReportRead<T>(
   });
 }
 
-async function renewReportLease(db: D1Database, token: string | undefined): Promise<void> {
+async function renewReportLease(db: Database, token: string | undefined): Promise<void> {
   if (!token) return;
   const now = new Date();
   const timestamp = nowIso(now);
   const row = await first<{ lease_token: string }>(
     db,
-    `UPDATE jobs SET lease_until = ?, updated_at = ?
-     WHERE name = 'reports' AND lease_token = ? AND lease_until > ? RETURNING lease_token`,
+    `UPDATE ${db.table('jobs')} SET lease_until = $1, updated_at = $2
+     WHERE name = 'reports' AND lease_token = $3 AND lease_until > $4 RETURNING lease_token`,
     [nowIso(new Date(now.getTime() + reportLeaseSeconds * 1_000)), timestamp, token, timestamp],
   );
   if (row?.lease_token !== token) throw new Error('Report publication lease expired or changed');
@@ -204,14 +204,16 @@ function publicationFingerprint(publications: readonly DesiredPublication[]): st
 async function cleanupLegacyPublications(config: ReportConfig): Promise<void> {
   const rows = await all<Pick<ReportPublicationRow, 'report_key' | 'object_key'>>(
     config.db,
-    "SELECT report_key, object_key FROM report_publications WHERE report_key <> 'cohort' ORDER BY report_key LIMIT 20",
+    `SELECT report_key, object_key FROM ${config.db.table('report_publications')} WHERE report_key <> 'cohort' ORDER BY report_key LIMIT 20`,
   );
   for (const row of rows) {
     try {
       await config.reports?.delete(row.object_key);
-      await run(config.db, 'DELETE FROM report_publications WHERE report_key = ?', [
-        row.report_key,
-      ]);
+      await run(
+        config.db,
+        `DELETE FROM ${config.db.table('report_publications')} WHERE report_key = $1`,
+        [row.report_key],
+      );
     } catch {
       // Keep the row so the next publication retries this bounded cleanup.
     }
@@ -251,6 +253,9 @@ export async function publishDueReports(
   }
   await maintainPublicationLease(true);
   const generation = String(now.getTime());
+  const generationNumber = Number(generation);
+  if (!Number.isSafeInteger(generationNumber) || generationNumber < 0)
+    throw new Error('Report generation must be a safe nonnegative epoch millisecond value');
   const generatedAt = nowIso(now);
   const sourceWatermark = generatedAt;
   const cacheObject = await readObjectBody(reports, reportCohortUptimeCacheKey);
@@ -349,50 +354,22 @@ export async function publishDueReports(
   await cleanupLegacyPublications(config);
   await run(
     config.db,
-    `INSERT INTO report_publications (
+    `INSERT INTO ${config.db.table('report_publications')} (
     report_key, kind, object_key, schema_version, generation, generated_at, latest_observation_at, source_watermark, status, updated_at
-  ) VALUES ('cohort', 'index', ?, '1', ?, ?, ?, ?, 'complete', ?)
+  ) VALUES ('cohort', 'index', $1, '1', $2, $3, $4, $5, 'complete', $6)
   ON CONFLICT (report_key) DO UPDATE SET object_key = excluded.object_key, generation = excluded.generation,
     generated_at = excluded.generated_at, latest_observation_at = excluded.latest_observation_at,
     source_watermark = excluded.source_watermark, status = 'complete', attempts = 0, last_error = NULL,
     lease_until = NULL, lease_token = NULL, updated_at = excluded.updated_at`,
     [
       reportCohortPointerKey,
-      Number(generation),
+      generationNumber,
       generatedAt,
       latestObservationAt,
       sourceWatermark,
       generatedAt,
     ],
   );
-  if (config.monitorRefresh) {
-    // Only committed page content may trigger refreshes. Recovery overrides the
-    // summary in the public UI; historical affected regions alone are not issues.
-    const incidentMonitorIds = new Set<string>();
-    for (const page of cohort.statusPages.values()) {
-      for (const group of page.statusPage.groups) {
-        for (const monitor of group.monitors) {
-          const status = monitor.recoveryStatus ?? monitor.status;
-          if (
-            cohort.monitors.get(monitor.id)?.summary.monitor.enabled &&
-            (status === 'down' || status === 'recovering')
-          )
-            incidentMonitorIds.add(monitor.id);
-        }
-      }
-    }
-    try {
-      await startIncidentMonitorRefreshes(
-        { DB: config.db, REPORTS: reports, MONITOR_REFRESH: config.monitorRefresh },
-        [...incidentMonitorIds],
-        now,
-        config.monitorRefreshStartLimit?.() ?? 20,
-      );
-    } catch (error) {
-      // A startup outage must not turn successful cohort publication into failure.
-      log.error({ event: 'monitor-incident-refresh-startup', error: String(error) });
-    }
-  }
   const retained = new Set([generation, ...nextPointer.previousGenerations]);
   for (const expired of pointer
     ? [pointer.generation, ...pointer.previousGenerations].filter((value) => !retained.has(value))

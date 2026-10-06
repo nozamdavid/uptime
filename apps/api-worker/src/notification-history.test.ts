@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { type Database, pgFirst } from '@uptime/cloudflare/postgres';
 import { recordNotificationHistory } from '@uptime/cloudflare';
 
 import { sealProviderConfig } from './credentials.js';
@@ -16,17 +17,16 @@ async function setup(notificationFetch?: typeof fetch): Promise<TestContext> {
     bearerToken: 'secret-token',
   });
   // The history read needs no decryption and must never expose sealed config.
-  ctx.sqlite
-    .prepare(
-      `INSERT INTO notification_services (id, name, provider, config)
-       VALUES (?, 'Webhook', 'webhook', ?)`,
-    )
-    .run(serviceId, sealed);
+  await ctx.db.query(
+    `INSERT INTO ${ctx.db.table('notification_services')} (id, name, provider, config)
+     VALUES ($1, 'Webhook', 'webhook', $2)`,
+    [serviceId, sealed],
+  );
   return ctx;
 }
 
-afterEach(() => {
-  for (const ctx of contexts.splice(0)) ctx.sqlite.close();
+afterEach(async () => {
+  for (const ctx of contexts.splice(0)) await ctx.close();
 });
 
 describe('notification history', () => {
@@ -50,24 +50,22 @@ describe('notification history', () => {
   it('aggregates providers across services with stable newest first pagination', async () => {
     const ctx = await setup();
     const secondSealed = await sealProviderConfig('c'.repeat(32), { handle: 'uptime.test' });
-    ctx.sqlite
-      .prepare(
-        `INSERT INTO notification_services (id, name, provider, config)
-         VALUES (?, 'Bluesky', 'bluesky', ?)`,
-      )
-      .run(secondServiceId, secondSealed);
-    ctx.sqlite
-      .prepare('UPDATE notification_services SET enabled = 0 WHERE id = ?')
-      .run(secondServiceId);
-    expect(
-      (
-        ctx.sqlite
-          .prepare('SELECT enabled FROM notification_services WHERE id = ?')
-          .get(secondServiceId) as {
-          enabled: number;
-        }
-      ).enabled,
-    ).toBe(0);
+    await ctx.db.query(
+      `INSERT INTO ${ctx.db.table('notification_services')} (id, name, provider, config)
+       VALUES ($1, 'Bluesky', 'bluesky', $2)`,
+      [secondServiceId, secondSealed],
+    );
+    await ctx.db.query(
+      `UPDATE ${ctx.db.table('notification_services')} SET enabled = 0 WHERE id = $1`,
+      [secondServiceId],
+    );
+    const row = await pgFirst<{ enabled: number }>(
+      ctx.db,
+      `SELECT enabled FROM ${ctx.db.table('notification_services')} WHERE id = $1`,
+      [secondServiceId],
+    );
+    expect(row?.enabled).toBe(0);
+
     const instant = new Date('2026-09-30T10:00:00.000Z');
     for (let index = 0; index < 29; index += 1) {
       const bluesky = index % 2 === 1;
@@ -146,12 +144,11 @@ describe('notification history', () => {
   it('pages newest first without duplicates and retains monitor snapshots after deletion', async () => {
     const ctx = await setup();
     const monitorId = '30000000-0000-4000-8000-000000000001';
-    ctx.sqlite
-      .prepare(
-        `INSERT INTO monitors (id, name, url, interval_seconds, timeout_ms, next_check_at)
-         VALUES (?, 'Original', 'https://example.test/health', 60, 1000, '2026-09-30T00:00:00.000Z')`,
-      )
-      .run(monitorId);
+    await ctx.db.query(
+      `INSERT INTO ${ctx.db.table('monitors')} (id, name, url, interval_seconds, timeout_ms, next_check_at)
+       VALUES ($1, 'Original', 'https://example.test/health', 60, 1000, '2026-09-30T00:00:00.000Z')`,
+      [monitorId],
+    );
     for (let index = 0; index < 27; index += 1) {
       await recordNotificationHistory(ctx.db, {
         notificationServiceId: serviceId,
@@ -168,7 +165,7 @@ describe('notification history', () => {
         preview: {},
       });
     }
-    ctx.sqlite.prepare('DELETE FROM monitors WHERE id = ?').run(monitorId);
+    await ctx.db.query(`DELETE FROM ${ctx.db.table('monitors')} WHERE id = $1`, [monitorId]);
     const { cookie } = await login(ctx.app);
     const path = `/api/notification-services/${serviceId}/history`;
     const first = (await (await request(ctx.app, path, { cookie })).json()) as {
@@ -275,16 +272,32 @@ describe('notification history', () => {
       sends += 1;
       return new Response('{}', { status: 200 });
     }) as typeof fetch);
-    ctx.sqlite.exec(
-      `CREATE TRIGGER reject_notification_history BEFORE INSERT ON notification_history
-       BEGIN SELECT RAISE(FAIL, 'test write failure'); END`,
+    const notifTable = ctx.db.table('notification_history');
+    const schema = notifTable.split('.')[0]!;
+    await ctx.postgresDb.adminDb.query(
+      `CREATE OR REPLACE FUNCTION ${schema}.reject_notification_history_func()
+       RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN
+         RAISE EXCEPTION 'test write failure';
+       END;
+       $$;
+       DROP TRIGGER IF EXISTS reject_notification_history ON ${notifTable};
+       CREATE TRIGGER reject_notification_history BEFORE INSERT ON ${notifTable}
+       FOR EACH ROW EXECUTE FUNCTION ${schema}.reject_notification_history_func();`,
     );
-    const { cookie } = await login(ctx.app);
-    const response = await request(ctx.app, `/api/notification-services/${serviceId}/test`, {
-      method: 'POST',
-      cookie,
-    });
-    expect(response.status).toBe(200);
-    expect(sends).toBe(1);
+    try {
+      const { cookie } = await login(ctx.app);
+      const response = await request(ctx.app, `/api/notification-services/${serviceId}/test`, {
+        method: 'POST',
+        cookie,
+      });
+      expect(response.status).toBe(200);
+      expect(sends).toBe(1);
+    } finally {
+      await ctx.postgresDb.adminDb.query(
+        `DROP TRIGGER IF EXISTS reject_notification_history ON ${notifTable};
+         DROP FUNCTION IF EXISTS ${schema}.reject_notification_history_func();`,
+      );
+    }
   });
 });

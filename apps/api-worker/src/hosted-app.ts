@@ -1,23 +1,46 @@
 import {
-  all,
-  batch,
-  first,
-  run,
   randomId,
   randomToken,
-  resolveWorkspaceDatabase,
   tenantReportsBucket,
   purgeWorkspaceData,
   type CloudflareEnv,
-  type D1Database,
   toBoolean,
-  isStagingImportedSlot,
-  isStagingImportedWorkspace,
-  resolveStagingImportedDatabase,
+  isRegionId,
+  productionImportedBindingName,
   stagingImportedBindingName,
+  syncWorkspaceProductLimits,
+  savedWorkspaceProductLimits,
+  configuredMonitorBatch,
+  evaluateCapacity,
+  schedulingState,
+  setSchedulingPause,
+  budgetEnforcementDisabled,
+  type ProductLimits,
+  ProductTierError,
+  readProductCatalog,
+  publicProductCatalog,
+  saveProductCatalog,
+  resolveEffectiveEntitlements,
+  syncTierEntitlements,
+  type TierEntitlements,
+  validateProductCatalog,
 } from '@uptime/cloudflare';
+import {
+  pgAll as all,
+  pgFirst as first,
+  pgRun as run,
+  withPostgresRuntime,
+  resolveRuntimeWorkspace,
+  scopePostgresDatabase,
+  type Database,
+  type RuntimePostgresCatalog,
+  type RuntimePostgresSource,
+} from '@uptime/cloudflare/postgres';
+import type { RegionId } from '@uptime/regions';
+import type { StatusPageReportSnapshot } from '@uptime/contracts';
 import { z } from 'zod';
 import { createApiRouter, type LogSink } from './app.js';
+import { monitorRequestCache } from './monitor-cache.js';
 import { createAtprotoAuth, type AtprotoPrincipal } from './atproto-auth.js';
 import { parseApiEnv } from './env.js';
 import {
@@ -38,8 +61,19 @@ import {
   toPublicMonitorSummary,
 } from './queries.js';
 import { assertPublicHttpUrl, UrlPolicyError } from './security.js';
-import { meterDatabase, flushUsage, type MeteredDatabase } from './usage-meter.js';
 import { interestList, interestReturnPath, interestSignup, recordInterest } from './interest.js';
+import { operatorHealth } from './operator-health.js';
+import { getCloudflareUsageReport } from './cloudflare-usage.js';
+import {
+  acceptWorkspaceInvitation,
+  createWorkspaceInvitation,
+  listWorkspaceInvitations,
+  resendWorkspaceInvitation,
+  revokeWorkspaceInvitation,
+  WorkspaceInvitationError,
+} from './workspace-invitations.js';
+import { billingReadiness, billingWebhook, workspaceBillingRequest } from './workspace-billing.js';
+import { handleCustomDomainManagement, handleCustomDomainPublic } from './custom-domain-http.js';
 
 export const hostedLimits = {
   monitors: 3,
@@ -70,8 +104,73 @@ const didSchema = z
   .max(2048)
   .regex(/^did:(plc:[a-z2-7]{24}|web:[A-Za-z0-9._:%-]+)$/);
 const uuid = z.uuid();
+const domainSnapshotSchema = z.looseObject({
+  schemaVersion: z.string(),
+  generatedAt: z.iso.datetime(),
+  latestObservationAt: z.iso.datetime().nullable(),
+  staleAfterSeconds: z.number().positive(),
+  statusPage: z.looseObject({
+    id: z.string(),
+    title: z.string(),
+    publicSlug: z.string().nullable(),
+    groups: z.array(
+      z.looseObject({
+        id: z.string(),
+        title: z.string(),
+        width: z.enum(['full', 'half']),
+        showBadges: z.boolean(),
+        monitors: z.array(
+          z.looseObject({
+            id: z.string(),
+            name: z.string().nullable(),
+            status: z.enum(['up', 'down', 'unknown']),
+            uptimePercentage: z.number().nullable(),
+            configuredRegionCount: z.number().int().nonnegative(),
+            affectedRegionIds: z.array(z.string()),
+            recoveryStatus: z.enum(['up', 'down', 'recovering']).nullable(),
+            days: z.array(z.unknown()),
+          }),
+        ),
+      }),
+    ),
+  }),
+});
 const mutation = (request: Request) => !['GET', 'HEAD', 'OPTIONS'].includes(request.method);
 export const defaultOperatorDid = 'did:plc:lmkzmvv6sdxntwtyxpg7fqqq';
+
+export type HostedRuntimeEnv = CloudflareEnv & {
+  controlDb: Database;
+  catalog: RuntimePostgresCatalog;
+};
+
+async function workspaceSource(env: HostedRuntimeEnv, workspaceId: string) {
+  return (await resolveRuntimeWorkspace(env.controlDb, env.catalog, workspaceId)).source;
+}
+
+async function isImportedWorkspace(env: HostedRuntimeEnv, workspaceId: string) {
+  const row = await first<{ source_database_id: string; schema_name: string }>(
+    env.controlDb,
+    `SELECT source_database_id,schema_name FROM ${env.controlDb.table('postgres_tenant_registry')} WHERE workspace_id=$1 AND status='assigned'`,
+    [workspaceId],
+  );
+  if (!row) return false;
+  const source = env.catalog.sources.find(
+    (source) =>
+      source.sourceDatabaseId === row.source_database_id && source.schema === row.schema_name,
+  );
+  if (!source) throw new Error('Assigned source is outside the runtime catalog');
+  return source.profile !== 'full-hosted';
+}
+
+async function resolveWorkspaceDatabase(env: HostedRuntimeEnv, workspaceId: string) {
+  return (await resolveRuntimeWorkspace(env.controlDb, env.catalog, workspaceId)).db;
+}
+
+const resolveImportedDatabase = resolveWorkspaceDatabase;
+
+function importedKind(source: RuntimePostgresSource) {
+  return source.profile === 'legacy-production' ? 'legacy_import' : 'staging_import';
+}
 
 /** Authorize in the control database before selecting any customer data binding. */
 export async function hostedFetch(
@@ -79,27 +178,48 @@ export async function hostedFetch(
   env: CloudflareEnv,
   context: ExecutionContext,
 ): Promise<Response> {
-  const originalControl = env.CONTROL_DB as D1Database;
-  const meters = new Map<string, MeteredDatabase>();
-  const scopedEnv = { ...env };
-  for (const [name, binding] of Object.entries(env)) {
-    // Service RPC bindings also expose callable `prepare` properties. Keep fetchers intact.
-    if (
-      binding &&
-      typeof (binding as { fetch?: unknown }).fetch !== 'function' &&
-      typeof (binding as D1Database).prepare === 'function'
-    ) {
-      const meter = meterDatabase(binding as D1Database);
-      meters.set(name, meter);
-      scopedEnv[name] = meter.db;
-    }
+  try {
+    return await withPostgresRuntime(env, async (controlDb, catalog) => {
+      const pending: Promise<unknown>[] = [];
+      const scopedContext = {
+        waitUntil(promise: Promise<unknown>) {
+          pending.push(promise);
+        },
+        passThroughOnException() {
+          context.passThroughOnException();
+        },
+      } as ExecutionContext;
+      try {
+        return await hostedRuntimeFetch(request, { ...env, controlDb, catalog }, scopedContext);
+      } finally {
+        // Drain database work before the runtime closes the event's client.
+        while (pending.length) await Promise.allSettled(pending.splice(0));
+      }
+    });
+  } catch {
+    return errorResponse(500, 'internal_error', 'Worker configuration is invalid');
   }
-  env = scopedEnv;
+}
+
+export async function hostedRuntimeFetch(
+  request: Request,
+  env: HostedRuntimeEnv,
+  context: ExecutionContext,
+): Promise<Response> {
+  const originalControl = env.controlDb;
+  const activeProductPolicy: { limits: ProductLimits | null } = { limits: null };
   let response: Response;
   let origins: readonly string[] = [];
   try {
     const config = parseApiEnv(env);
     origins = config.allowedOrigins;
+    // Stripe authenticates this public route by signature over the bounded raw body.
+    if (new URL(request.url).pathname === '/api/billing/webhook' && request.method === 'POST') {
+      return await billingWebhook(
+        { control: originalControl, env, regions: config.enabledRegionIds },
+        request,
+      );
+    }
     if (request.method === 'OPTIONS') response = new Response(null, { status: 204 });
     else {
       assertRequestOrigin(request, origins);
@@ -108,7 +228,7 @@ export async function hostedFetch(
         if (request.headers.get('sec-fetch-site') === 'cross-site')
           throw new HttpErrorLike(403, 'origin_forbidden', 'Cross-site requests are not allowed');
       }
-      const control = env.CONTROL_DB as D1Database;
+      const control = env.controlDb;
       const publicOrigin = requiredString(env.PUBLIC_ORIGIN, 'PUBLIC_ORIGIN');
       const auth = createAtprotoAuth({
         db: control,
@@ -133,7 +253,46 @@ export async function hostedFetch(
         response = auth.metadata();
       else if (path === '/oauth/jwks.json' && request.method === 'GET') response = auth.jwks();
       else if (path === '/health' && request.method === 'GET') response = json({ status: 'ok' });
-      else if (path === '/api/auth/atproto/start' && request.method === 'POST') {
+      else if (path === '/api/plans' && request.method === 'GET') {
+        await consumeBudget(control, `plans:${clientAddress(request)}`, 60, 60);
+        const catalog = await readProductCatalog(control, config.enabledRegionIds);
+        const pricing = publicProductCatalog(catalog);
+        const billing = await billingReadiness(
+          { control, env, regions: config.enabledRegionIds },
+          catalog,
+        );
+        response = json({
+          ...pricing,
+          billing,
+          capabilities: { ...pricing.capabilities, checkout: billing.ready },
+        });
+      } else if (path.startsWith('/api/public/custom-status/')) {
+        await consumeBudget(control, `custom-status:${clientAddress(request)}`, 60, 60);
+        await consumeBudget(control, 'public:global', 20_000, 86_400);
+        response = await handleCustomDomainPublic(request, env, async (target) => {
+          const reportUrl = new URL(
+            `/reports/public/status-pages/${encodeURIComponent(target.publicSlug)}.json`,
+            request.url,
+          );
+          reportUrl.searchParams.set('workspace', target.workspaceId);
+          const report = await publicReport(
+            new Request(reportUrl, { method: 'GET' }),
+            env,
+            target.workspaceId,
+            await activeDatabase(env, target.workspaceId),
+          );
+          if (!report.ok) return null;
+          const parsed = domainSnapshotSchema.safeParse(await report.json());
+          if (!parsed.success) return null;
+          const snapshot = parsed.data as unknown as StatusPageReportSnapshot;
+          if (
+            snapshot.statusPage.id !== target.statusPageId ||
+            snapshot.statusPage.publicSlug !== target.publicSlug
+          )
+            return null;
+          return snapshot;
+        });
+      } else if (path === '/api/auth/atproto/start' && request.method === 'POST') {
         await consumeBudget(control, `login:${clientAddress(request)}`, 5, 600);
         await consumeBudget(control, 'login:global', 1000, 86_400);
         response = await auth.start(request);
@@ -158,7 +317,7 @@ export async function hostedFetch(
         if (!principal) throw new HttpErrorLike(401, 'unauthorized', 'Sign in with AT Protocol');
         const user = await first<{ state: string }>(
           control,
-          'SELECT state FROM users WHERE did = ?',
+          `SELECT state FROM ${control.table('users')} WHERE did = $1`,
           [principal.did],
         );
         if (user && user.state !== 'active')
@@ -172,16 +331,16 @@ export async function hostedFetch(
         if (!principal) throw new HttpErrorLike(401, 'unauthorized', 'Sign in with AT Protocol');
         const user = await first<{ state: string }>(
           control,
-          'SELECT state FROM users WHERE did=?',
+          `SELECT state FROM ${control.table('users')} WHERE did=$1`,
           [principal.did],
         );
         if (user?.state !== 'active')
           throw new HttpErrorLike(403, 'forbidden', 'Imported workspace access denied');
         const workspaceId = uuid.parse(request.headers.get('x-uptime-workspace'));
         const workspace = await accessibleWorkspace(control, principal.did, workspaceId);
-        if (workspace.state !== 'active' || !(await isStagingImportedWorkspace(env, workspaceId)))
+        if (workspace.state !== 'active' || !(await isImportedWorkspace(env, workspaceId)))
           throw new HttpErrorLike(403, 'forbidden', 'Imported workspace access denied');
-        await resolveStagingImportedDatabase(env, workspaceId);
+        await resolveImportedDatabase(env, workspaceId);
         response = json({
           user: principal,
           importedWorkspaceId: workspaceId,
@@ -197,13 +356,13 @@ export async function hostedFetch(
         await consumeBudget(control, 'public:global', 20_000, 86_400);
         const workspaceId = uuid.parse(url.searchParams.get('workspace'));
         const db = await activeDatabase(env, workspaceId);
-        const imported = await isStagingImportedWorkspace(env, workspaceId);
-        if (!imported) await enforceHostedRequest(request, db);
+        const imported = await isImportedWorkspace(env, workspaceId);
+        if (!imported) await enforceHostedRequest(request, db, undefined, config.enabledRegionIds);
         response = path.startsWith('/reports/')
           ? await publicReport(request, env, workspaceId, db)
           : imported
             ? await importedRequest(request, env, workspaceId)
-            : await dispatch(request, url, db, config);
+            : await dispatch(request, url, db, config, undefined, workspaceId);
         response = await redactPublicUrls(response);
       } else {
         const principal = await auth.principal(request);
@@ -211,7 +370,7 @@ export async function hostedFetch(
         await consumeBudget(control, `user:${principal.did}`, 120, 60);
         const user = await first<{ state: string }>(
           control,
-          'SELECT state FROM users WHERE did = ?',
+          `SELECT state FROM ${control.table('users')} WHERE did = $1`,
           [principal.did],
         );
         if (user && user.state !== 'active')
@@ -220,7 +379,7 @@ export async function hostedFetch(
         if (toBoolean(env.INTEREST_CHECK_ONLY) && !isOperator) {
           const membership = await first(
             control,
-            'SELECT workspace_id FROM memberships WHERE did=? LIMIT 1',
+            `SELECT workspace_id FROM ${control.table('memberships')} WHERE did=$1 LIMIT 1`,
             [principal.did],
           );
           if (!membership)
@@ -242,7 +401,7 @@ export async function hostedFetch(
               : { ...workspace, role: 'owner' as Role };
           await run(
             control,
-            'UPDATE workspaces SET last_seen_at = ? WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)',
+            `UPDATE ${control.table('workspaces')} SET last_seen_at = $1 WHERE id = $2 AND (last_seen_at IS NULL OR last_seen_at < $3)`,
             [
               new Date().toISOString(),
               selected.id,
@@ -250,7 +409,7 @@ export async function hostedFetch(
             ],
           );
           if (path === '/api/auth/session' && request.method === 'GET') {
-            const imported = await isStagingImportedWorkspace(env, selected.id);
+            const imported = await isImportedWorkspace(env, selected.id);
             response = json({
               user: principal,
               workspace: {
@@ -258,25 +417,117 @@ export async function hostedFetch(
                 name: selected.name,
                 state: selected.state,
                 plan: 'free',
-                ...(imported ? { kind: 'staging_import' } : {}),
+                ...(imported
+                  ? { kind: importedKind(await workspaceSource(env, selected.id)) }
+                  : {}),
               },
               role: selected.role,
               isOperator,
-              limits: imported ? null : hostedLimits,
+              limits: imported
+                ? null
+                : productLimitsResponse(
+                    await getWorkspaceProductLimits(env, selected.id, config.enabledRegionIds),
+                  ),
               usage: await workspaceUsage(env, selected),
-              budget: await budgetSummary(control),
+              budget: await budgetSummary(control, env),
               workspaces: await all(
                 control,
-                `SELECT w.id, w.name, w.state, m.role FROM workspaces w JOIN memberships m ON m.workspace_id = w.id WHERE m.did = ? AND w.state <> 'deleted'`,
+                `SELECT w.id, w.name, w.state, m.role FROM ${control.table('workspaces')} w JOIN ${control.table('memberships')} m ON m.workspace_id = w.id WHERE m.did = $1 AND w.state <> 'deleted'`,
                 [principal.did],
               ),
             });
+          } else if (
+            path === '/api/workspace/custom-domains' ||
+            path.startsWith('/api/workspace/custom-domains/')
+          ) {
+            response = await handleCustomDomainManagement(
+              request,
+              env,
+              {
+                workspaceId: selected.id,
+                actorDid: principal.did,
+                role: selected.role === 'maintainer' ? 'member' : (selected.role ?? 'viewer'),
+              },
+              { withWriteLease: (id, execute) => withWorkspaceWriteLease(control, id, execute) },
+            );
+          } else if (
+            path === '/api/workspace/billing' ||
+            path.startsWith('/api/workspace/billing/')
+          ) {
+            response = await workspaceBillingRequest(
+              { control, env, regions: config.enabledRegionIds },
+              request,
+              selected,
+              principal.did,
+            );
+          } else if (path === '/api/workspace/entitlements' && request.method === 'GET') {
+            if (await isImportedWorkspace(env, selected.id)) {
+              response = json({
+                legacyExempt: true,
+                entitlements: null,
+                overrides: null,
+                usage: await workspaceUsage(env, selected),
+                downgrade: null,
+              });
+            } else {
+              const effective = await resolveEffectiveEntitlements(
+                control,
+                selected.id,
+                config.enabledRegionIds,
+              );
+              const db = await activeDatabase(env, selected.id);
+              // Reads calculate from the current authoritative policy without writing tenant state.
+              const enabled = await all<{ id: string; regions: number; disallowed: number }>(
+                db,
+                `SELECT m.id,(SELECT count(*)::integer FROM ${db.table('monitor_regions')} WHERE monitor_id=m.id) AS regions,
+                  (SELECT count(*)::integer FROM ${db.table('monitor_regions')} WHERE monitor_id=m.id AND NOT (region_id = ANY($1::text[]))) AS disallowed FROM ${db.table('monitors')} m WHERE enabled=1 ORDER BY created_at,id`,
+                [effective.entitlements.allowedRegionIds],
+              );
+              const pausedMonitors = enabled
+                .filter(
+                  (m, index) =>
+                    index >= effective.entitlements.monitors ||
+                    m.regions > effective.entitlements.regions ||
+                    m.disallowed > 0,
+                )
+                .map((m) => ({ id: m.id, reason: 'product_quota_or_region_policy' }));
+              const resources = await workspaceUsage(env, selected);
+              const seats = await first<{ members: number; pendingInvites: number }>(
+                control,
+                `SELECT (SELECT count(*)::integer FROM ${control.table('memberships')} WHERE workspace_id=$1) AS members,
+                  (SELECT count(*)::integer FROM ${control.table('workspace_invitations')} WHERE workspace_id=$2 AND created_at>$3) AS "pendingInvites"`,
+                [selected.id, selected.id, new Date(Date.now() - 7 * 86_400_000).toISOString()],
+              );
+              const usage = {
+                ...resources,
+                enabledMonitors: enabled.length,
+                notificationDestinations: resources?.notificationServices ?? 0,
+                members: seats?.members ?? 0,
+                pendingInvites: seats?.pendingInvites ?? 0,
+                seats: (seats?.members ?? 0) + (seats?.pendingInvites ?? 0),
+              };
+              const overLimitResources = Object.entries({
+                monitors: (resources?.monitors ?? 0) > effective.entitlements.monitors,
+                statusPages: (resources?.statusPages ?? 0) > effective.entitlements.statusPages,
+                notificationDestinations:
+                  usage.notificationDestinations > effective.entitlements.notificationDestinations,
+                seats: usage.seats > effective.entitlements.seats,
+              })
+                .filter(([, over]) => over)
+                .map(([name]) => name);
+              response = json({
+                ...effective,
+                usage,
+                downgrade: {
+                  overLimit: pausedMonitors.length > 0 || overLimitResources.length > 0,
+                  overLimitResources,
+                  pausedMonitorCount: pausedMonitors.length,
+                  pausedMonitors,
+                },
+              });
+            }
           } else if (path.startsWith('/api/workspace')) {
-            const execute = () => workspaceRequest(request, env, principal, selected);
-            response =
-              mutation(request) && path.startsWith('/api/workspace/targets')
-                ? await withWorkspaceWriteLease(control, selected.id, execute)
-                : await execute();
+            response = await workspaceRequest(request, env, principal, selected);
           } else {
             if (selected.state !== 'active')
               throw new HttpErrorLike(
@@ -300,12 +551,51 @@ export async function hostedFetch(
                 3600,
               );
             }
-            const imported = await isStagingImportedWorkspace(env, selected.id);
-            if (!imported) await enforceHostedRequest(request, db);
-            const execute = () =>
-              imported
-                ? importedRequest(request, env, selected.id)
-                : dispatch(request, url, db, config, principal);
+            const imported = await isImportedWorkspace(env, selected.id);
+            const execute = async () => {
+              if (imported) return importedRequest(request, env, selected.id);
+              const limits = await getWorkspaceProductLimits(
+                env,
+                selected.id,
+                config.enabledRegionIds,
+              );
+              activeProductPolicy.limits = limits;
+              if (mutation(request))
+                await withWorkspacePolicy(env, selected.id, async (tx, tenant) => {
+                  await syncTierEntitlements(
+                    tenant,
+                    await resolveEffectiveEntitlements(tx, selected.id, config.enabledRegionIds),
+                  );
+                });
+              await enforceHostedRequest(request, db, limits, config.enabledRegionIds);
+              const allowed = new Set(limits.allowedRegionIds);
+              const tenantConfig = {
+                ...config,
+                enabledRegionIds: config.enabledRegionIds.filter((region) => allowed.has(region)),
+                enabledRegions: config.enabledRegions.filter((region) => allowed.has(region.id)),
+              };
+              // Editing or disabling retained monitors must not require deleting old region configuration.
+              if (request.method === 'PATCH' && /^\/api\/monitors\/[a-f0-9-]{36}$/.test(path)) {
+                const body = (await readJson(request.clone() as unknown as Request)) as Record<
+                  string,
+                  unknown
+                >;
+                if (body && body.regionIds === undefined) {
+                  const saved = await all<{ region_id: RegionId }>(
+                    db,
+                    `SELECT region_id FROM ${db.table('monitor_regions')} WHERE monitor_id=$1`,
+                    [path.split('/').at(-1)],
+                  );
+                  tenantConfig.enabledRegionIds = [
+                    ...new Set([
+                      ...tenantConfig.enabledRegionIds,
+                      ...saved.map((r) => r.region_id),
+                    ]),
+                  ];
+                }
+              }
+              return dispatch(request, url, db, tenantConfig, principal, selected.id);
+            };
             response = mutation(request)
               ? await withWorkspaceWriteLease(control, selected.id, execute)
               : await execute();
@@ -314,10 +604,16 @@ export async function hostedFetch(
       }
     }
   } catch (error) {
-    if (error instanceof HttpErrorLike)
+    if (
+      error instanceof HttpErrorLike ||
+      error instanceof WorkspaceInvitationError ||
+      error instanceof ProductTierError
+    )
       response = errorResponse(error.status, error.code, error.message);
     else if (error instanceof UrlPolicyError)
       response = errorResponse(400, error.code, error.message);
+    else if (error instanceof Error && /workspace_seat_limit/.test(error.message))
+      response = errorResponse(409, 'member_limit', 'Workspace seat quota is full');
     else if (error instanceof z.ZodError)
       response = errorResponse(
         400,
@@ -328,7 +624,15 @@ export async function hostedFetch(
       error instanceof Error &&
       /free_(monitor|region|notification|status|policy)_limit/.test(error.message)
     )
-      response = errorResponse(409, 'free_limit', 'This operation exceeds the free plan limits');
+      response = errorResponse(
+        409,
+        'product_limit',
+        /free_monitor_limit/.test(error.message)
+          ? `This workspace can save up to ${activeProductPolicy.limits?.monitors ?? hostedLimits.monitors} monitors`
+          : /free_region_limit/.test(error.message)
+            ? `This workspace can use up to ${activeProductPolicy.limits?.regions ?? hostedLimits.regions} regions per monitor`
+            : 'This operation exceeds the hosted product limits',
+      );
     else {
       log.error?.({ event: 'hosted_request_failed' }, 'Hosted request failed');
       response = errorResponse(500, 'internal_error', 'Request could not be completed');
@@ -338,32 +642,16 @@ export async function hostedFetch(
   for (const [key, value] of Object.entries(corsHeaders(request, origins))) headers.set(key, value);
   headers.set('x-content-type-options', 'nosniff');
   headers.set('referrer-policy', 'no-referrer');
-  context.waitUntil(
-    (async () => {
-      for (const [binding, meter] of meters) {
-        if (!meter.usage.rowsRead && !meter.usage.rowsWritten && !meter.usage.storageBytes)
-          continue;
-        const slot =
-          binding === 'CONTROL_DB'
-            ? { workspace_id: '__control__' }
-            : await first<{ workspace_id: string }>(
-                originalControl,
-                `SELECT workspace_id FROM tenant_slots WHERE binding_name = ?`,
-                [binding],
-              );
-        if (slot?.workspace_id) await flushUsage(originalControl, slot.workspace_id, meter.usage);
-      }
-    })().catch(() => log.warn({ event: 'usage_meter_failed' }, 'Usage metering failed')),
-  );
   return new Response(response.body, { status: response.status, headers });
 }
 
 async function dispatch(
   request: Request,
   url: URL,
-  db: D1Database,
+  db: Database,
   config: ReturnType<typeof parseApiEnv>,
   principal?: AtprotoPrincipal,
+  monitorCacheScope?: string,
 ) {
   const matched = router.match(request.method as 'GET', url.pathname);
   if (!matched)
@@ -381,6 +669,7 @@ async function dispatch(
       config,
       now: () => new Date(),
       log,
+      ...(monitorCacheScope ? { monitorCacheScope } : {}),
       ...(principal ? { principal: { ...principal, id: principal.did } } : {}),
     },
   });
@@ -393,14 +682,18 @@ function requiredString(value: unknown, name: string) {
 
 async function importedRequest(
   request: Request,
-  env: CloudflareEnv,
+  env: HostedRuntimeEnv,
   workspaceId: string,
   report = false,
 ) {
   const binding = env[report ? 'IMPORTED_REPORTER' : 'IMPORTED_API'] as
     { fetch(request: Request): Promise<Response> } | undefined;
-  if (env.ENVIRONMENT !== 'staging' || !binding || typeof binding.fetch !== 'function')
-    throw new HttpErrorLike(503, 'imported_unavailable', 'Imported staging service is unavailable');
+  if (
+    !(await isImportedWorkspace(env, workspaceId)) ||
+    !binding ||
+    typeof binding.fetch !== 'function'
+  )
+    throw new HttpErrorLike(503, 'imported_unavailable', 'Imported service is unavailable');
   const url = new URL(request.url);
   url.searchParams.delete('workspace');
   const headers = new Headers(request.headers);
@@ -443,46 +736,92 @@ const stagingReservedSlotNames = [
   'STAGING_OPERATOR_DB',
   'STAGING_TEST_DB_001',
   'STAGING_TEST_DB_002',
-  stagingImportedBindingName,
 ] as const;
-function isStagingReservedSlot(env: CloudflareEnv, bindingName: string | undefined) {
-  return (
-    env.ENVIRONMENT === 'staging' &&
-    stagingReservedSlotNames.includes(bindingName as (typeof stagingReservedSlotNames)[number])
-  );
+const importedBindingNames = [stagingImportedBindingName, productionImportedBindingName] as const;
+function reservedSlotNames(env: CloudflareEnv): readonly string[] {
+  return [
+    ...(env.ENVIRONMENT === 'staging' ? stagingReservedSlotNames : []),
+    ...importedBindingNames,
+  ];
 }
-async function activeDatabase(env: CloudflareEnv, id: string) {
+function isReservedSlot(env: CloudflareEnv, bindingName: string | undefined) {
+  return reservedSlotNames(env).includes(bindingName ?? '');
+}
+async function activeDatabase(env: HostedRuntimeEnv, id: string) {
   const workspace = await first<Workspace>(
-    env.CONTROL_DB as D1Database,
-    'SELECT * FROM workspaces WHERE id = ? AND state = ?',
+    env.controlDb,
+    `SELECT * FROM ${env.controlDb.table('workspaces')} WHERE id = $1 AND state = $2`,
     [id, 'active'],
   );
   if (!workspace) throw new HttpErrorLike(404, 'not_found', 'Workspace was not found');
-  if (await isStagingImportedWorkspace(env, id)) return resolveStagingImportedDatabase(env, id);
+  if (await isImportedWorkspace(env, id)) return resolveImportedDatabase(env, id);
   return resolveWorkspaceDatabase(env, id);
 }
-async function accessibleWorkspace(control: D1Database, did: string, id: string) {
+async function accessibleWorkspace(control: Database, did: string, id: string) {
   const workspace = await first<Workspace>(
     control,
-    `SELECT w.*, m.role FROM workspaces w JOIN memberships m ON m.workspace_id = w.id WHERE w.id = ? AND m.did = ? AND w.state <> 'deleted'`,
+    `SELECT w.*, m.role FROM ${control.table('workspaces')} w JOIN ${control.table('memberships')} m ON m.workspace_id = w.id WHERE w.id = $1 AND m.did = $2 AND w.state <> 'deleted'`,
     [id, did],
   );
   if (!workspace) throw new HttpErrorLike(403, 'forbidden', 'Workspace access denied');
   return workspace;
 }
 
+async function withWorkspacePolicy<T>(
+  env: HostedRuntimeEnv,
+  workspaceId: string,
+  execute: (control: Database, tenant: Database) => Promise<T>,
+): Promise<T> {
+  return env.controlDb.transaction(async (tx) => {
+    const workspace = await first(
+      tx,
+      `SELECT id FROM ${tx.table('workspaces')} WHERE id=$1 AND state IN ('active','suspended') FOR NO KEY UPDATE`,
+      [workspaceId],
+    );
+    if (!workspace)
+      throw new HttpErrorLike(409, 'workspace_unavailable', 'Workspace is not provisioned');
+    const row = await first<{ source_database_id: string; schema_name: string }>(
+      tx,
+      `SELECT source_database_id,schema_name FROM ${tx.table('postgres_tenant_registry')} WHERE workspace_id=$1 AND status='assigned' FOR SHARE`,
+      [workspaceId],
+    );
+    const source =
+      row &&
+      env.catalog.sources.find(
+        (source) =>
+          source.sourceDatabaseId === row.source_database_id && source.schema === row.schema_name,
+      );
+    if (!source || source.profile !== 'full-hosted')
+      throw new Error('Hosted source identity is unavailable');
+    const tenant = scopePostgresDatabase(tx, source);
+    const marker = await first<{ workspace_id: string; database_id: string; marker_count: number }>(
+      tenant,
+      `SELECT workspace_id,database_id,(SELECT count(*)::integer FROM ${tenant.table('workspace_metadata')}) AS marker_count FROM ${tenant.table('workspace_metadata')} WHERE id=1 FOR NO KEY UPDATE`,
+    );
+    if (
+      marker?.workspace_id !== workspaceId ||
+      marker.database_id !== source.sourceDatabaseId ||
+      marker.marker_count !== 1
+    )
+      throw new Error('Tenant identity mismatch');
+    return execute(tx, tenant);
+  });
+}
+
 /** Drain in-flight API writes before deletion, using the same fence as scheduled work. */
 async function withWorkspaceWriteLease(
-  control: D1Database,
+  control: Database,
   workspaceId: string,
   execute: () => Promise<Response>,
+  allowSuspended = false,
 ) {
   const token = randomToken(16);
   const now = new Date();
+  const statePredicate = allowSuspended ? "state IN ('active','suspended')" : "state = 'active'";
   const lease = await first(
     control,
-    `UPDATE workspaces SET execution_lease_token = ?, execution_lease_until = ?
-    WHERE id = ? AND state = 'active' AND (execution_lease_until IS NULL OR execution_lease_until <= ?) RETURNING id`,
+    `UPDATE ${control.table('workspaces')} SET execution_lease_token = $1, execution_lease_until = $2
+    WHERE id = $3 AND ${statePredicate} AND (execution_lease_until IS NULL OR execution_lease_until <= $4) RETURNING id`,
     [token, new Date(now.getTime() + 16 * 60_000).toISOString(), workspaceId, now.toISOString()],
   );
   if (!lease)
@@ -496,7 +835,7 @@ async function withWorkspaceWriteLease(
   } finally {
     await run(
       control,
-      'UPDATE workspaces SET execution_lease_token = NULL, execution_lease_until = NULL WHERE id = ? AND execution_lease_token = ?',
+      `UPDATE ${control.table('workspaces')} SET execution_lease_token = NULL, execution_lease_until = NULL WHERE id = $1 AND execution_lease_token = $2`,
       [workspaceId, token],
     );
   }
@@ -504,20 +843,20 @@ async function withWorkspaceWriteLease(
 
 /** Retry an interrupted allocation using its reserved slot. Slots are never reused automatically. */
 export async function ensureWorkspace(
-  env: CloudflareEnv,
+  env: HostedRuntimeEnv,
   principal: AtprotoPrincipal,
 ): Promise<Workspace> {
-  const control = env.CONTROL_DB as D1Database;
+  const control = env.controlDb;
   const timestamp = new Date().toISOString();
   await run(
     control,
-    `INSERT INTO users(did,handle,state,created_at,updated_at,last_seen_at) VALUES(?,?,'active',?,?,?) ON CONFLICT(did) DO UPDATE SET handle = excluded.handle, updated_at = excluded.updated_at, last_seen_at = excluded.last_seen_at`,
+    `INSERT INTO ${control.table('users')}(did,handle,state,created_at,updated_at,last_seen_at) VALUES($1,$2,'active',$3,$4,$5) ON CONFLICT(did) DO UPDATE SET handle = excluded.handle, updated_at = excluded.updated_at, last_seen_at = excluded.last_seen_at`,
     [principal.did, principal.handle, timestamp, timestamp, timestamp],
   );
   await run(
     control,
-    `INSERT INTO workspaces(id,owner_did,name,state,plan,created_at,updated_at,last_seen_at,next_dispatch_at)
-    VALUES(?,?,?,'waiting_for_capacity','free',?,?,?,?) ON CONFLICT(owner_did) DO NOTHING`,
+    `INSERT INTO ${control.table('workspaces')}(id,owner_did,name,state,plan,created_at,updated_at,last_seen_at,next_dispatch_at)
+    VALUES($1,$2,$3,'waiting_for_capacity','free',$4,$5,$6,$7) ON CONFLICT(owner_did) DO NOTHING`,
     [
       randomId(),
       principal.did,
@@ -530,140 +869,307 @@ export async function ensureWorkspace(
   );
   const workspace = await first<Workspace>(
     control,
-    'SELECT * FROM workspaces WHERE owner_did = ?',
+    `SELECT * FROM ${control.table('workspaces')} WHERE owner_did = $1`,
     [principal.did],
   );
   if (!workspace) throw new Error('Workspace provisioning failed');
   if (workspace.state === 'deleted' || workspace.state === 'deleting') return workspace;
   await run(
     control,
-    `INSERT INTO memberships(workspace_id,did,role,created_at) VALUES(?,?,'owner',?) ON CONFLICT(workspace_id,did) DO NOTHING`,
+    `INSERT INTO ${control.table('memberships')}(workspace_id,did,role,created_at) VALUES($1,$2,'owner',$3) ON CONFLICT(workspace_id,did) DO NOTHING`,
     [workspace.id, principal.did, timestamp],
   );
   return provisionWorkspace(env, workspace);
 }
 
 async function provisionWorkspace(
-  env: CloudflareEnv,
+  env: HostedRuntimeEnv,
   workspace: Workspace,
   options: { operatorActivation?: boolean; bindingName?: string } = {},
 ): Promise<Workspace> {
-  const control = env.CONTROL_DB as D1Database;
+  const control = env.controlDb;
   const timestamp = new Date().toISOString();
   const operatorActivation = options.operatorActivation === true;
   const explicitBinding = typeof options.bindingName === 'string';
-  if (workspace.state === 'waiting_for_capacity') {
-    const budget = await budgetSummary(control);
-    if (
-      (operatorActivation || budget.admissionOpen) &&
-      budget.forecastUsd < (operatorActivation ? budget.ceilingUsd : 15)
-    ) {
-      await run(
-        control,
-        `UPDATE tenant_slots SET workspace_id = ?, status = 'assigned'
-        WHERE binding_name = (SELECT s.binding_name FROM tenant_slots s
-          WHERE s.status = 'available' AND s.workspace_id IS NULL
-          ${explicitBinding ? 'AND s.binding_name = ?' : ''}
-          ${!explicitBinding && env.ENVIRONMENT === 'staging' ? `AND s.binding_name NOT IN (${stagingReservedSlotNames.map(() => '?').join(',')})` : ''}
-          ${explicitBinding ? '' : 'AND NOT EXISTS (SELECT 1 FROM tenant_slot_controls c WHERE c.binding_name = s.binding_name AND c.admission_enabled = 0)'}
-          ORDER BY s.binding_name LIMIT 1)
-        AND NOT EXISTS (SELECT 1 FROM tenant_slots WHERE workspace_id = ?)
-        ${
-          explicitBinding && isStagingReservedSlot(env, options.bindingName)
-            ? ''
-            : `AND (SELECT count(*) FROM tenant_slots s3
-          WHERE s3.status = 'assigned'
-          ${env.ENVIRONMENT === 'staging' ? `AND s3.binding_name NOT IN (${stagingReservedSlotNames.map(() => '?').join(',')})` : ''}) <
-          (SELECT max_workspaces FROM service_controls WHERE id = 1)`
-        }
-        ${
-          explicitBinding
-            ? `AND ((COALESCE((SELECT admission_enabled FROM tenant_slot_controls c WHERE c.binding_name = ?),1) = 0 AND
-              (SELECT count(*) FROM tenant_slots s2 WHERE s2.status = 'available' AND s2.workspace_id IS NULL
-                AND COALESCE((SELECT admission_enabled FROM tenant_slot_controls c2 WHERE c2.binding_name = s2.binding_name),1)=1) >= ${minimumAvailableSlots(env)}) OR
-             (COALESCE((SELECT admission_enabled FROM tenant_slot_controls c WHERE c.binding_name = ?),1) = 1 AND
-              (SELECT count(*) FROM tenant_slots s2 WHERE s2.status = 'available' AND s2.workspace_id IS NULL
-                AND COALESCE((SELECT admission_enabled FROM tenant_slot_controls c2 WHERE c2.binding_name = s2.binding_name),1)=1) > ${minimumAvailableSlots(env)}))`
-            : `AND (SELECT count(*) FROM tenant_slots s
-          WHERE s.status = 'available' AND s.workspace_id IS NULL
-          AND NOT EXISTS (SELECT 1 FROM tenant_slot_controls c WHERE c.binding_name = s.binding_name AND c.admission_enabled = 0))
-          > ${minimumAvailableSlots(env)}`
-        }`,
-        [
-          workspace.id,
-          ...(explicitBinding ? [options.bindingName!] : []),
-          ...(!explicitBinding && env.ENVIRONMENT === 'staging' ? stagingReservedSlotNames : []),
-          workspace.id,
-          ...(explicitBinding &&
-          !isStagingReservedSlot(env, options.bindingName) &&
-          env.ENVIRONMENT === 'staging'
-            ? stagingReservedSlotNames
-            : []),
-          ...(!explicitBinding && env.ENVIRONMENT === 'staging' ? stagingReservedSlotNames : []),
-          ...(explicitBinding ? [options.bindingName!, options.bindingName!] : []),
-        ],
-      );
-    }
-    const slot = await first<{ binding_name: string; database_id: string }>(
+  const reservedInExplicitCapacity = explicitBinding && isReservedSlot(env, options.bindingName);
+  if (explicitBinding) {
+    const physical = await first<{ source_database_id: string; schema_name: string }>(
       control,
-      "SELECT binding_name,database_id FROM tenant_slots WHERE workspace_id = ? AND status = 'assigned'",
-      [workspace.id],
+      `SELECT r.source_database_id,r.schema_name FROM ${control.table('postgres_tenant_registry')} r JOIN ${control.table('tenant_slots')} s ON s.database_id=r.source_database_id WHERE s.binding_name=$1`,
+      [options.bindingName],
     );
-    if (slot) {
-      const db = env[slot.binding_name] as D1Database | undefined;
-      if (!db || typeof db.prepare !== 'function') throw new Error('Tenant binding is unavailable');
-      if (isStagingImportedSlot(env, slot.binding_name, slot.database_id)) {
-        await run(
-          db,
-          'INSERT INTO staging_workspace_identity(id,workspace_id,database_id) VALUES(1,?,?) ON CONFLICT(id) DO NOTHING',
-          [workspace.id, slot.database_id],
+    const source =
+      physical &&
+      env.catalog.sources.find(
+        (source) =>
+          source.sourceDatabaseId === physical.source_database_id &&
+          source.schema === physical.schema_name,
+      );
+    if (source && source.profile !== 'full-hosted') {
+      return control.transaction(async (tx) => {
+        const current = await first<Workspace>(
+          tx,
+          `SELECT * FROM ${tx.table('workspaces')} WHERE id=$1 AND state IN ('waiting_for_capacity','active','suspended') FOR NO KEY UPDATE`,
+          [workspace.id],
         );
-        await resolveStagingImportedDatabase(env, workspace.id);
+        if (!current)
+          throw new HttpErrorLike(
+            409,
+            'workspace_unavailable',
+            'Imported workspace is unavailable',
+          );
+        const registry = await first<{ status: string; workspace_id: string | null }>(
+          tx,
+          `SELECT status,workspace_id FROM ${tx.table('postgres_tenant_registry')} WHERE source_database_id=$1 AND schema_name=$2 FOR UPDATE`,
+          [source.sourceDatabaseId, source.schema],
+        );
+        if (
+          !registry ||
+          !(
+            (registry.status === 'available' && registry.workspace_id === null) ||
+            (registry.status === 'assigned' && registry.workspace_id === workspace.id)
+          )
+        )
+          throw new HttpErrorLike(409, 'slot_unavailable', 'Imported source is unavailable');
         await run(
-          control,
-          "UPDATE workspaces SET state='active',updated_at=? WHERE id=? AND state='waiting_for_capacity'",
+          tx,
+          `UPDATE ${tx.table('postgres_tenant_registry')} SET workspace_id=$1,status='assigned',updated_at=$2 WHERE source_database_id=$3`,
+          [workspace.id, timestamp, source.sourceDatabaseId],
+        );
+        const tenant = scopePostgresDatabase(tx, source);
+        let markers = await all<{ id: number; workspace_id: string; database_id: string }>(
+          tenant,
+          `SELECT id,workspace_id,database_id FROM ${tenant.table(source.identityTable!)} FOR NO KEY UPDATE`,
+        );
+        // Staging's explicit first assignment creates its historical three-column marker.
+        // An existing marker, and every production marker, must retain its identity.
+        if (
+          markers.length === 0 &&
+          source.profile === 'legacy-staging' &&
+          env.ENVIRONMENT === 'staging'
+        ) {
+          await run(
+            tenant,
+            `INSERT INTO ${tenant.table(source.identityTable!)}(id,workspace_id,database_id)
+             VALUES(1,$1,$2) ON CONFLICT(id) DO NOTHING`,
+            [workspace.id, source.sourceDatabaseId],
+          );
+          markers = await all(
+            tenant,
+            `SELECT id,workspace_id,database_id FROM ${tenant.table(source.identityTable!)} FOR NO KEY UPDATE`,
+          );
+        }
+        if (
+          markers.length !== 1 ||
+          markers[0]!.id !== 1 ||
+          markers[0]!.workspace_id !== workspace.id ||
+          markers[0]!.database_id !== source.sourceDatabaseId
+        )
+          throw new HttpErrorLike(
+            409,
+            'imported_identity_mismatch',
+            'Imported source identity must be preserved',
+          );
+        await run(
+          tx,
+          `UPDATE ${tx.table('tenant_slots')} SET workspace_id=$1,status='assigned' WHERE database_id=$2`,
+          [workspace.id, source.sourceDatabaseId],
+        );
+        if (current.state === 'waiting_for_capacity') {
+          await run(
+            tx,
+            `UPDATE ${tx.table('workspaces')} SET state='active',updated_at=$1 WHERE id=$2`,
+            [timestamp, workspace.id],
+          );
+          current.state = 'active';
+        }
+        return current;
+      });
+    }
+  }
+  if (workspace.state === 'waiting_for_capacity') {
+    // Manual operator activation skips the cost-admission gate. Slot, reserve, and workspace-cap
+    // checks below still apply, and monitoring dispatch enforces budget pauses on its own.
+    const budget = operatorActivation ? null : await budgetSummary(control, env);
+    if (
+      operatorActivation ||
+      (budget !== null &&
+        budget.admissionOpen &&
+        (budget.enforcementDisabled || (budget.forecastUsd !== null && budget.forecastUsd < 15)))
+    ) {
+      await control.transaction(async (tx) => {
+        // Serialize global admission and the reserve before selecting a physical source.
+        const settings = await first<{ max_workspaces: number }>(
+          tx,
+          `SELECT max_workspaces FROM ${tx.table('service_controls')} WHERE id=1 FOR UPDATE`,
+        );
+        const current = await first<Workspace>(
+          tx,
+          `SELECT * FROM ${tx.table('workspaces')} WHERE id=$1 FOR NO KEY UPDATE`,
+          [workspace.id],
+        );
+        if (current?.state !== 'waiting_for_capacity') return;
+        const already = await first<{
+          source_database_id: string;
+          schema_name: string;
+          status: string;
+        }>(
+          tx,
+          `SELECT source_database_id,schema_name,status FROM ${tx.table('postgres_tenant_registry')} WHERE workspace_id=$1 FOR UPDATE`,
+          [workspace.id],
+        );
+        if (already) {
+          const source = env.catalog.sources.find(
+            (source) =>
+              source.sourceDatabaseId === already.source_database_id &&
+              source.schema === already.schema_name,
+          );
+          if (!source || already.status !== 'assigned')
+            throw new Error('Reserved source identity is unavailable');
+          const tenant = scopePostgresDatabase(tx, source);
+          const markers = await all<{ id: number; workspace_id: string; database_id: string }>(
+            tenant,
+            `SELECT id,workspace_id,database_id FROM ${tenant.table(source.identityTable!)} FOR NO KEY UPDATE`,
+          );
+          if (
+            markers.length !== 1 ||
+            markers[0]!.id !== 1 ||
+            markers[0]!.workspace_id !== workspace.id ||
+            markers[0]!.database_id !== source.sourceDatabaseId
+          )
+            throw new Error('Tenant identity mismatch');
+          if (source.profile === 'full-hosted')
+            await syncTierEntitlements(
+              tenant,
+              await resolveEffectiveEntitlements(
+                tx,
+                workspace.id,
+                parseApiEnv(env).enabledRegionIds,
+              ),
+            );
+          await run(
+            tx,
+            `UPDATE ${tx.table('workspaces')} SET state='active',updated_at=$1 WHERE id=$2`,
+            [timestamp, workspace.id],
+          );
+          return;
+        }
+        const inventory = await all<{
+          source_database_id: string;
+          schema_name: string;
+          status: string;
+          binding_name: string | null;
+          admission_enabled: number;
+        }>(
+          tx,
+          `SELECT r.*,s.binding_name,COALESCE(c.admission_enabled,1) AS admission_enabled
+           FROM ${tx.table('postgres_tenant_registry')} r
+           LEFT JOIN ${tx.table('tenant_slots')} s ON s.database_id=r.source_database_id
+           LEFT JOIN ${tx.table('tenant_slot_controls')} c ON c.binding_name=s.binding_name
+           ORDER BY r.source_database_id FOR UPDATE OF r`,
+        );
+        const publicRows = inventory.filter(
+          (row) =>
+            env.catalog.sources.some(
+              (source) =>
+                source.sourceDatabaseId === row.source_database_id &&
+                source.schema === row.schema_name &&
+                source.profile === 'full-hosted',
+            ) && !isReservedSlot(env, row.binding_name ?? undefined),
+        );
+        const available = publicRows.filter(
+          (row) => row.status === 'available' && row.admission_enabled === 1,
+        );
+        const candidate = explicitBinding
+          ? inventory.find(
+              (row) => row.binding_name === options.bindingName && row.status === 'available',
+            )
+          : available[0];
+        if (!candidate) return;
+        const source = env.catalog.sources.find(
+          (source) =>
+            source.sourceDatabaseId === candidate.source_database_id &&
+            source.schema === candidate.schema_name,
+        );
+        if (!source) throw new Error('Physical source is outside the runtime catalog');
+        const imported = source.profile !== 'full-hosted';
+        if (imported && !explicitBinding)
+          throw new Error('Legacy sources require explicit assignment');
+        if (!imported) {
+          if (
+            !reservedInExplicitCapacity &&
+            publicRows.filter((row) => row.status === 'assigned').length >=
+              (settings?.max_workspaces ?? 10)
+          )
+            return;
+          if (
+            available.length - (available.includes(candidate) ? 1 : 0) <
+            minimumAvailableSlots(env)
+          )
+            return;
+        }
+        await run(
+          tx,
+          `UPDATE ${tx.table('postgres_tenant_registry')} SET workspace_id=$1,status='assigned',updated_at=$2 WHERE source_database_id=$3`,
+          [workspace.id, timestamp, source.sourceDatabaseId],
+        );
+        const tenant = scopePostgresDatabase(tx, source);
+        const markerTable = source.identityTable!;
+        const markers = await all<{ id: number; workspace_id: string; database_id: string }>(
+          tenant,
+          `SELECT id,workspace_id,database_id FROM ${tenant.table(markerTable)} FOR NO KEY UPDATE`,
+        );
+        if (
+          markers.length > 1 ||
+          (markers.length === 1 &&
+            (markers[0]!.id !== 1 ||
+              markers[0]!.workspace_id !== workspace.id ||
+              markers[0]!.database_id !== source.sourceDatabaseId))
+        )
+          throw new Error('Tenant identity mismatch');
+        if (!markers.length) {
+          if (imported) throw new Error('Legacy import identity marker must already exist');
+          const contents = await first<{ n: number }>(
+            tenant,
+            `SELECT ((SELECT count(*) FROM ${tenant.table('monitors')})+(SELECT count(*) FROM ${tenant.table('notification_services')})+(SELECT count(*) FROM ${tenant.table('status_pages')}))::integer AS n`,
+          );
+          if (contents?.n !== 0) throw new Error('Only empty databases may enter the tenant pool');
+          await run(
+            tenant,
+            `INSERT INTO ${tenant.table('workspace_metadata')}(id,workspace_id,database_id,plan,routing_generation) VALUES(1,$1,$2,'free',1)`,
+            [workspace.id, source.sourceDatabaseId],
+          );
+        }
+        if (!imported)
+          await syncTierEntitlements(
+            tenant,
+            await resolveEffectiveEntitlements(tx, workspace.id, parseApiEnv(env).enabledRegionIds),
+          );
+        await run(
+          tx,
+          `UPDATE ${tx.table('tenant_slots')} SET workspace_id=$1,status='assigned' WHERE database_id=$2`,
+          [workspace.id, source.sourceDatabaseId],
+        );
+        await run(
+          tx,
+          `UPDATE ${tx.table('workspaces')} SET state='active',updated_at=$1 WHERE id=$2 AND state='waiting_for_capacity'`,
           [timestamp, workspace.id],
         );
-        workspace.state = 'active';
-        return workspace;
-      }
-      // The identity guard also prevents exposing an incorrectly inventoried database.
-      const metadata = await first<{ workspace_id: string }>(
-        db,
-        'SELECT workspace_id FROM workspace_metadata WHERE id = 1',
-      );
-      if (metadata && metadata.workspace_id !== workspace.id)
-        throw new Error('Tenant identity mismatch');
-      if (!metadata) {
-        const contents = await first<{ n: number }>(
-          db,
-          'SELECT (SELECT count(*) FROM monitors) + (SELECT count(*) FROM notification_services) + (SELECT count(*) FROM status_pages) AS n',
-        );
-        if (contents?.n !== 0) throw new Error('Only empty databases may enter the tenant pool');
-        await run(
-          db,
-          "INSERT INTO workspace_metadata(id,workspace_id,database_id,plan,routing_generation) VALUES(1,?,?,'free',1) ON CONFLICT(id) DO NOTHING",
-          [workspace.id, slot.database_id],
-        );
-        const confirmed = await first<{ workspace_id: string }>(
-          db,
-          'SELECT workspace_id FROM workspace_metadata WHERE id = 1',
-        );
-        if (confirmed?.workspace_id !== workspace.id) throw new Error('Tenant identity mismatch');
-      }
-      await run(
-        control,
-        "UPDATE workspaces SET state = 'active', updated_at = ? WHERE id = ? AND state = 'waiting_for_capacity'",
-        [timestamp, workspace.id],
-      );
-      workspace.state = 'active';
+      });
     }
+    const current = await first<Workspace>(
+      control,
+      `SELECT * FROM ${control.table('workspaces')} WHERE id=$1`,
+      [workspace.id],
+    );
+    if (current) Object.assign(workspace, current);
+    if (current?.state === 'active') await resolveWorkspaceDatabase(env, workspace.id);
   }
   return workspace;
 }
 
 export async function consumeBudget(
-  control: D1Database,
+  control: Database,
   key: string,
   maximum: number,
   seconds: number,
@@ -674,110 +1180,263 @@ export async function consumeBudget(
   ).toISOString();
   const row = await first<{ count: number }>(
     control,
-    `INSERT INTO request_budgets(key,window_started_at,count) VALUES(?,?,1)
-    ON CONFLICT(key) DO UPDATE SET count = CASE WHEN window_started_at = excluded.window_started_at THEN count + 1 ELSE 1 END,
+    `INSERT INTO ${control.table('request_budgets')} AS budget(key,window_started_at,count) VALUES($1,$2,1)
+    ON CONFLICT(key) DO UPDATE SET count = CASE WHEN budget.window_started_at = excluded.window_started_at THEN budget.count + 1 ELSE 1 END,
       window_started_at = excluded.window_started_at
-    WHERE window_started_at <> excluded.window_started_at OR count < ? RETURNING count`,
+    WHERE budget.window_started_at <> excluded.window_started_at OR budget.count < $3 RETURNING count`,
     [key, window, maximum],
   );
   if (!row) throw new HttpErrorLike(429, 'rate_limited', 'Request limit reached. Try again later');
 }
 
-export async function budgetSummary(control: D1Database) {
+export async function budgetSummary(
+  control: Database,
+  env?: Record<string, unknown>,
+  now = new Date(),
+) {
   const settings = await first<{
     monthly_budget_usd: number;
     admission_open: number;
     external_monthly_cost_usd: number;
-  }>(control, 'SELECT * FROM service_controls WHERE id = 1');
-  const now = new Date();
-  const since = new Date(now.getTime() - 30 * 86_400_000).toISOString().slice(0, 10);
-  const usage = await first<{
-    reads: number;
-    writes: number;
-    storage: number;
-    first_day: string | null;
-  }>(
-    control,
-    `SELECT COALESCE(SUM(rows_read),0) AS reads, COALESCE(SUM(rows_written),0) AS writes, MIN(day) AS first_day,
-      (SELECT COALESCE(SUM(bytes),0) FROM (SELECT MAX(storage_bytes) AS bytes FROM workspace_usage_daily GROUP BY workspace_id)) AS storage
-      FROM workspace_usage_daily WHERE day >= ?`,
-    [since],
-  );
-  const factor =
-    31 /
-    Math.max(
-      1,
-      Math.min(
-        31,
-        usage?.first_day
-          ? Math.floor((now.getTime() - Date.parse(usage.first_day)) / 86_400_000) + 1
-          : 1,
-      ),
-    );
+  }>(control, `SELECT * FROM ${control.table('service_controls')} WHERE id = 1`);
+  let observedAt: string | null = null;
+  let cloudflareCostUsd: number | null = null;
+  if (typeof env?.CURRENT_BUDGET_USAGE_JSON === 'string') {
+    try {
+      const value = z
+        .object({
+          month: z.string(),
+          observedAt: z.iso.datetime(),
+          cloudflareCostUsd: z.number().finite().nonnegative(),
+        })
+        .parse(JSON.parse(env.CURRENT_BUDGET_USAGE_JSON));
+      const age = now.getTime() - Date.parse(value.observedAt);
+      if (value.month === now.toISOString().slice(0, 7) && age >= 0 && age <= 3_600_000) {
+        observedAt = value.observedAt;
+        cloudflareCostUsd = value.cloudflareCostUsd;
+      }
+    } catch {
+      /* Invalid observations remain unknown. */
+    }
+  }
   const forecastUsd =
-    5 +
-    Number(settings?.external_monthly_cost_usd ?? 0) +
-    (Math.max(0, Number(usage?.reads ?? 0) * factor - 25_000_000_000) / 1_000_000) * 0.001 +
-    Math.max(0, Number(usage?.writes ?? 0) * factor - 50_000_000) / 1_000_000 +
-    Math.max(0, Number(usage?.storage ?? 0) / 1_000_000_000 - 5) * 0.75;
+    cloudflareCostUsd === null
+      ? null
+      : cloudflareCostUsd + Number(settings?.external_monthly_cost_usd ?? 0);
+  const enforcementDisabled = budgetEnforcementDisabled(env);
   return {
     ceilingUsd: Math.min(20, Number(settings?.monthly_budget_usd ?? 20)),
-    baseUsd: 5,
+    baseUsd: null,
     externalMonthlyCostUsd: Number(settings?.external_monthly_cost_usd ?? 0),
-    forecastUsd: Math.round(forecastUsd * 100) / 100,
-    admissionOpen: settings?.admission_open === 1 && forecastUsd < 15,
-    billingWindow: 'rolling_31_days',
+    forecastUsd,
+    cloudflareCostUsd,
+    observedAt,
+    enforcementDisabled,
+    // The admission setting still applies. Only the cost forecast condition is skipped.
+    admissionOpen:
+      settings?.admission_open === 1 &&
+      (enforcementDisabled ||
+        (forecastUsd !== null &&
+          forecastUsd < Math.min(15, Number(settings?.monthly_budget_usd ?? 20)))),
+    billingWindow: 'current_calendar_month',
     coverage:
-      'Measured D1 API, control and coordinator work over a rolling 31-day window, plus manually entered other costs. Workers CPU, queues, R2 and provider billing need Cloudflare alerts.',
+      'Current observed Cloudflare cost plus manually entered external costs. PostgreSQL statements and duration are telemetry only.',
   };
 }
 
-async function workspaceUsage(env: CloudflareEnv, workspace: Workspace) {
+async function workspaceUsage(env: HostedRuntimeEnv, workspace: Workspace) {
   if (!['active', 'suspended'].includes(workspace.state))
     return { monitors: 0, statusPages: 0, notificationServices: 0 };
-  const db = (await isStagingImportedWorkspace(env, workspace.id))
-    ? await resolveStagingImportedDatabase(env, workspace.id)
+  const db = (await isImportedWorkspace(env, workspace.id))
+    ? await resolveImportedDatabase(env, workspace.id)
     : await resolveWorkspaceDatabase(env, workspace.id);
   return await first<{ monitors: number; statusPages: number; notificationServices: number }>(
     db,
-    `SELECT (SELECT count(*) FROM monitors) AS monitors, (SELECT count(*) FROM status_pages) AS statusPages, (SELECT count(*) FROM notification_services) AS notificationServices`,
+    `SELECT (SELECT count(*)::integer FROM ${db.table('monitors')}) AS monitors, (SELECT count(*)::integer FROM ${db.table('status_pages')}) AS "statusPages", (SELECT count(*)::integer FROM ${db.table('notification_services')}) AS "notificationServices"`,
   );
 }
 
-async function slotInventory(env: CloudflareEnv) {
-  const control = env.CONTROL_DB as D1Database;
+async function getWorkspaceProductLimits(
+  env: HostedRuntimeEnv,
+  workspaceId: string,
+  configuredRegionIds: readonly RegionId[] = parseApiEnv(env).enabledRegionIds,
+): Promise<TierEntitlements> {
+  return (await resolveEffectiveEntitlements(env.controlDb, workspaceId, configuredRegionIds))
+    .entitlements;
+}
+
+function productLimitsResponse(limits: ProductLimits) {
+  return {
+    ...hostedLimits,
+    monitors: limits.monitors,
+    regions: limits.regions,
+    allowedRegionIds: limits.allowedRegionIds,
+    ...('statusPages' in limits
+      ? {
+          statusPages: (limits as TierEntitlements).statusPages,
+          notificationServices: (limits as TierEntitlements).notificationDestinations,
+          seats: (limits as TierEntitlements).seats,
+          customDomains: (limits as TierEntitlements).customDomains,
+        }
+      : {}),
+  };
+}
+
+async function operatorWorkspaceLimits(
+  env: HostedRuntimeEnv,
+  workspace: Workspace,
+  configuredRegionIds: readonly RegionId[],
+) {
+  if (!['active', 'suspended', 'waiting_for_capacity'].includes(workspace.state)) return null;
+  if (await isImportedWorkspace(env, workspace.id)) return null;
+  const slot = await first(
+    env.controlDb,
+    `SELECT source_database_id FROM ${env.controlDb.table('postgres_tenant_registry')} WHERE workspace_id = $1 AND status = 'assigned'`,
+    [workspace.id],
+  );
+  if (!slot && workspace.state !== 'waiting_for_capacity') return null;
+  const limits = await getWorkspaceProductLimits(env, workspace.id, configuredRegionIds);
+  const settings = await first<{ max_workspaces: number }>(
+    env.controlDb,
+    `SELECT max_workspaces FROM ${env.controlDb.table('service_controls')} WHERE id=1`,
+  );
+  return {
+    ...productLimitsResponse(limits),
+    capacity: evaluateCapacity(
+      limits,
+      configuredMonitorBatch(env),
+      null,
+      settings?.max_workspaces ?? 10,
+    ),
+  };
+}
+
+async function workspaceCapacity(
+  env: HostedRuntimeEnv,
+  workspaceId: string,
+  limits: ProductLimits,
+) {
+  const workspace = await first<Workspace>(
+    env.controlDb,
+    `SELECT * FROM ${env.controlDb.table('workspaces')} WHERE id=$1`,
+    [workspaceId],
+  );
+  if (!workspace) throw new HttpErrorLike(404, 'workspace_not_found', 'Workspace was not found');
+  if (!['active', 'suspended', 'waiting_for_capacity'].includes(workspace.state))
+    throw new HttpErrorLike(
+      409,
+      'limits_unsupported',
+      'Product limits cannot be edited in this workspace state',
+    );
+  let actual: { monitors: number; regionalTasks: number } | null;
+  if (workspace.state === 'waiting_for_capacity') {
+    const reserved = await first(
+      env.controlDb,
+      `SELECT source_database_id FROM ${env.controlDb.table('postgres_tenant_registry')} WHERE workspace_id=$1`,
+      [workspaceId],
+    );
+    if (reserved)
+      throw new HttpErrorLike(
+        409,
+        'workspace_busy',
+        'Workspace provisioning must finish before editing limits',
+      );
+    actual = { monitors: 0, regionalTasks: 0 };
+  } else {
+    const db = await resolveWorkspaceDatabase(env, workspaceId);
+    actual = await first<{ monitors: number; regionalTasks: number }>(
+      db,
+      `SELECT count(*)::integer AS monitors, COALESCE(sum((SELECT count(*) FROM ${db.table('monitor_regions')} mr
+        WHERE mr.monitor_id=m.id)),0)::integer AS "regionalTasks" FROM ${db.table('monitors')} m WHERE enabled=1`,
+    );
+  }
+  const settings = await first<{ max_workspaces: number }>(
+    env.controlDb,
+    `SELECT max_workspaces FROM ${env.controlDb.table('service_controls')} WHERE id=1`,
+  );
+  return evaluateCapacity(
+    limits,
+    configuredMonitorBatch(env),
+    actual,
+    settings?.max_workspaces ?? 10,
+  );
+}
+
+function parseProductLimits(value: unknown): ProductLimits {
+  const input = z
+    .object({
+      monitors: z.number().int().min(0).max(1000),
+      regions: z.number().int().min(1).max(9),
+      allowedRegionIds: z.array(z.string()).min(1).max(9),
+    })
+    .strict()
+    .parse(value);
+  const seen = new Set<string>();
+  const allowedRegionIds: RegionId[] = [];
+  for (const region of input.allowedRegionIds) {
+    if (!isRegionId(region))
+      throw new HttpErrorLike(400, 'region_invalid', `Unknown region: ${region}`);
+    if (seen.has(region))
+      throw new HttpErrorLike(
+        400,
+        'region_duplicate',
+        `Region ${region} was listed more than once`,
+      );
+    seen.add(region);
+    allowedRegionIds.push(region);
+  }
+  if (input.regions > allowedRegionIds.length)
+    throw new HttpErrorLike(
+      400,
+      'region_limit_invalid',
+      'The regions limit cannot exceed the number of allowed regions',
+    );
+  return { ...input, allowedRegionIds };
+}
+
+async function slotInventory(env: HostedRuntimeEnv) {
+  const control = env.controlDb;
   const rows = await all<{
     binding_name: string;
     database_id: string;
-    status: 'available' | 'assigned' | 'deleting';
+    status: 'available' | 'assigned' | 'deleting' | 'quarantined';
     workspace_id: string | null;
     owner_handle: string | null;
     admission_enabled: number;
   }>(
     control,
-    `SELECT s.*, u.handle AS owner_handle, COALESCE(c.admission_enabled,1) AS admission_enabled
-    FROM tenant_slots s LEFT JOIN tenant_slot_controls c ON c.binding_name=s.binding_name
-    LEFT JOIN workspaces w ON w.id=s.workspace_id LEFT JOIN users u ON u.did=w.owner_did
+    `SELECT r.source_database_id AS database_id,COALESCE(s.binding_name,r.source_database_id) AS binding_name,r.status,r.workspace_id, u.handle AS owner_handle, COALESCE(c.admission_enabled,1) AS admission_enabled
+    FROM ${control.table('postgres_tenant_registry')} r LEFT JOIN ${control.table('tenant_slots')} s ON s.database_id=r.source_database_id
+    LEFT JOIN ${control.table('tenant_slot_controls')} c ON c.binding_name=s.binding_name
+    LEFT JOIN ${control.table('workspaces')} w ON w.id=r.workspace_id LEFT JOIN ${control.table('users')} u ON u.did=w.owner_did
     ORDER BY s.binding_name`,
   );
-  const configured = rows.filter((slot) => {
-    const binding = env[slot.binding_name] as D1Database | undefined;
-    return binding && typeof binding.prepare === 'function';
-  });
+  const configured = rows.filter((slot) =>
+    env.catalog.sources.some((source) => source.sourceDatabaseId === slot.database_id),
+  );
+  const publicSlots = rows.filter(
+    (slot) => !isImportedSlot(env, slot.binding_name, slot.database_id),
+  );
+  const configuredPublicSlots = configured.filter(
+    (slot) => !isImportedSlot(env, slot.binding_name, slot.database_id),
+  );
   const settings = await first<{ max_workspaces: number }>(
     control,
-    'SELECT max_workspaces FROM service_controls WHERE id=1',
+    `SELECT max_workspaces FROM ${control.table('service_controls')} WHERE id=1`,
   );
   return {
     maxWorkspaces: settings?.max_workspaces ?? 10,
-    configuredSlots: configured.length,
-    assignedSlots: rows.filter((slot) => slot.status === 'assigned').length,
-    availableSlots: configured.filter(
+    configuredSlots: configuredPublicSlots.length,
+    assignedSlots: publicSlots.filter((slot) => slot.status === 'assigned').length,
+    availableSlots: configuredPublicSlots.filter(
       (slot) => slot.status === 'available' && !slot.workspace_id && slot.admission_enabled === 1,
     ).length,
-    heldSlots: rows.filter((slot) => slot.status === 'available' && slot.admission_enabled === 0)
-      .length,
-    quarantinedSlots: rows.filter((slot) => slot.status === 'deleting').length,
+    heldSlots: publicSlots.filter(
+      (slot) => slot.status === 'available' && slot.admission_enabled === 0,
+    ).length,
+    quarantinedSlots: publicSlots.filter((slot) =>
+      ['deleting', 'quarantined'].includes(slot.status),
+    ).length,
     slots: rows.map((slot) => ({
       bindingName: slot.binding_name,
       databaseId: slot.database_id,
@@ -785,58 +1444,201 @@ async function slotInventory(env: CloudflareEnv) {
       admissionEnabled: slot.admission_enabled === 1,
       workspaceId: slot.workspace_id,
       ownerHandle: slot.owner_handle,
-      ...(isStagingImportedSlot(env, slot.binding_name, slot.database_id)
-        ? { kind: 'staging_import' }
+      ...(isImportedSlot(env, slot.binding_name, slot.database_id)
+        ? {
+            kind: importedKind(
+              env.catalog.sources.find((source) => source.sourceDatabaseId === slot.database_id)!,
+            ),
+          }
         : {}),
     })),
   };
 }
 
-async function operatorRequest(request: Request, env: CloudflareEnv, principal: AtprotoPrincipal) {
-  const control = env.CONTROL_DB as D1Database;
+function isImportedSlot(env: HostedRuntimeEnv, _bindingName: string, databaseId: string) {
+  return env.catalog.sources.some(
+    (source) => source.sourceDatabaseId === databaseId && source.profile !== 'full-hosted',
+  );
+}
+
+async function operatorRequest(
+  request: Request,
+  env: HostedRuntimeEnv,
+  principal: AtprotoPrincipal,
+) {
+  const control = env.controlDb;
   const path = new URL(request.url).pathname;
+  if (path === '/api/operator/plans' && request.method === 'GET')
+    return json(await readProductCatalog(control, parseApiEnv(env).enabledRegionIds));
+  if (path === '/api/operator/plans' && request.method === 'PUT') {
+    const input = z
+      .object({
+        expectedRevision: z.number().int().min(0),
+        reason: z.string().trim().min(1).max(500),
+        catalog: z.unknown(),
+      })
+      .parse(await readJson(request));
+    const config = parseApiEnv(env);
+    const catalog = validateProductCatalog(input.catalog, config.enabledRegionIds);
+    if (
+      (catalog.billingMode === 'mock' && config.environment === 'production') ||
+      (catalog.billingMode === 'stripe' && !catalog.preview)
+    ) {
+      const readiness = await billingReadiness(
+        { control, env, regions: config.enabledRegionIds },
+        catalog,
+      );
+      if (!readiness.ready)
+        throw new HttpErrorLike(400, 'billing_setup', readiness.setupReasons.join('; '));
+    }
+    return json(
+      await saveProductCatalog(
+        control,
+        parseApiEnv(env).enabledRegionIds,
+        input.catalog,
+        input.expectedRevision,
+        principal.did,
+        input.reason,
+      ),
+    );
+  }
+  if (path === '/api/operator/cloudflare-usage' && request.method === 'GET')
+    return json(
+      await getCloudflareUsageReport({
+        ...(typeof env.CLOUDFLARE_ACCOUNT_ID === 'string'
+          ? { accountId: env.CLOUDFLARE_ACCOUNT_ID }
+          : {}),
+      }),
+    );
+  if (path === '/api/operator/health' && request.method === 'GET')
+    return json(await operatorHealth(env, new URL(request.url), await budgetSummary(control, env)));
+  const scheduling = path.match(/^\/api\/operator(?:\/workspaces\/([^/]+))?\/scheduling$/);
+  if (scheduling && request.method === 'POST') {
+    const input = z
+      .object({ paused: z.boolean(), reason: z.string().trim().min(1).max(500) })
+      .strict()
+      .parse(await readJson(request));
+    const id = scheduling[1] ? uuid.parse(scheduling[1]) : undefined;
+    if (
+      id &&
+      !(await first(control, `SELECT id FROM ${control.table('workspaces')} WHERE id=$1`, [id]))
+    )
+      throw new HttpErrorLike(404, 'workspace_not_found', 'Workspace was not found');
+    await setSchedulingPause(control, id ?? 'fleet', input.paused, input.reason, principal.did);
+    return json({
+      scheduling: await schedulingState(control, id, {
+        ignoreBudget: budgetEnforcementDisabled(env),
+      }),
+    });
+  }
+  const preview = path.match(/^\/api\/operator\/workspaces\/([^/]+)\/limits\/preview$/);
+  if (preview && request.method === 'POST') {
+    const id = uuid.parse(preview[1]);
+    if (await isImportedWorkspace(env, id))
+      throw new HttpErrorLike(
+        409,
+        'limits_unsupported',
+        'Imported workspaces are exempt from product quotas',
+      );
+    const input = parseProductLimits(await readJson(request));
+    const configured = parseApiEnv(env).enabledRegionIds;
+    if (input.allowedRegionIds.some((region) => !configured.includes(region)))
+      throw new HttpErrorLike(400, 'region_unavailable', 'A requested region is not configured');
+    return json({ capacity: await workspaceCapacity(env, id, input) });
+  }
   if (path === '/api/operator/interest' && request.method === 'GET')
     return json(await interestList(control));
   if (path === '/api/operator/slots' && request.method === 'GET')
     return json(await slotInventory(env));
   if (path === '/api/operator/slots' && request.method === 'PATCH') {
-    const inventory = await slotInventory(env);
     const input = z
       .object({
         maxWorkspaces: z.number().int().min(1).max(10),
       })
       .parse(await readJson(request));
-    await run(control, 'UPDATE service_controls SET max_workspaces=? WHERE id=1', [
-      input.maxWorkspaces,
-    ]);
-    await audit(control, null, principal.did, 'workspace_capacity', input);
+    await control.transaction(async (tx) => {
+      const updated = await run(
+        tx,
+        `UPDATE ${tx.table('service_controls')} SET max_workspaces=$1 WHERE id=1 AND max_workspaces<>$1`,
+        [input.maxWorkspaces],
+      );
+      if (updated.rowCount) await audit(tx, null, principal.did, 'workspace_capacity', input);
+    });
     return json(await slotInventory(env));
   }
   const slotAssignment = path.match(/^\/api\/operator\/slots\/([A-Z][A-Z0-9_]{0,63})\/assignment$/);
   if (slotAssignment && request.method === 'POST') {
     const bindingName = slotAssignment[1]!;
     const input = z.object({ ownerDid: didSchema }).parse(await readJson(request));
-    const binding = env[bindingName] as D1Database | undefined;
-    if (!binding || typeof binding.prepare !== 'function')
-      throw new HttpErrorLike(409, 'slot_unavailable', 'Slot is not bound to this deployment');
     const slot = await first<{
       binding_name: string;
+      database_id: string;
       status: 'available' | 'assigned' | 'deleting';
       workspace_id: string | null;
-    }>(control, 'SELECT binding_name,status,workspace_id FROM tenant_slots WHERE binding_name=?', [
-      bindingName,
-    ]);
+    }>(
+      control,
+      `SELECT s.binding_name,r.source_database_id AS database_id,r.status,r.workspace_id FROM ${control.table('tenant_slots')} s JOIN ${control.table('postgres_tenant_registry')} r ON r.source_database_id=s.database_id WHERE s.binding_name=$1`,
+      [bindingName],
+    );
     if (!slot)
       throw new HttpErrorLike(409, 'slot_unavailable', 'Only an unused slot can be assigned');
+    const source = env.catalog.sources.find(
+      (source) => source.sourceDatabaseId === slot.database_id,
+    );
+    if (!source)
+      throw new HttpErrorLike(
+        409,
+        'slot_unavailable',
+        'Physical source is outside the runtime catalog',
+      );
+    const binding = scopePostgresDatabase(control, source);
+    if (source.profile === 'legacy-production') {
+      const identity = await first<{
+        id: number;
+        workspace_id: string;
+        database_id: string;
+        marker_count: number;
+      }>(
+        binding,
+        `SELECT id,workspace_id,database_id,(SELECT count(*)::integer FROM ${binding.table(source.identityTable!)}) AS marker_count
+         FROM ${binding.table(source.identityTable!)} WHERE id=1`,
+      );
+      if (
+        identity?.id !== 1 ||
+        identity.marker_count !== 1 ||
+        identity.database_id !== source.sourceDatabaseId
+      )
+        throw new HttpErrorLike(
+          409,
+          'imported_identity_mismatch',
+          'The production import marker is missing or invalid',
+        );
+      const markedWorkspace = await first<{ id: string; owner_did: string; role: string }>(
+        control,
+        `SELECT w.id,w.owner_did,m.role FROM ${control.table('workspaces')} w JOIN ${control.table('memberships')} m ON m.workspace_id=w.id
+         WHERE w.id=$1 AND m.did=$2`,
+        [identity.workspace_id, input.ownerDid],
+      );
+      if (
+        !markedWorkspace ||
+        markedWorkspace.owner_did !== input.ownerDid ||
+        markedWorkspace.role !== 'owner'
+      )
+        throw new HttpErrorLike(
+          409,
+          'imported_owner_mismatch',
+          'The production import must remain attached to its marked workspace owner',
+        );
+    }
 
     const user = await first<{ did: string; handle: string; state: string }>(
       control,
-      'SELECT did,handle,state FROM users WHERE did=?',
+      `SELECT did,handle,state FROM ${control.table('users')} WHERE did=$1`,
       [input.ownerDid],
     );
     const interest = await first<{ did: string; handle: string }>(
       control,
-      'SELECT did,handle FROM interest_signups WHERE did=?',
+      `SELECT did,handle FROM ${control.table('interest_signups')} WHERE did=$1`,
       [input.ownerDid],
     );
     if (user && user.state !== 'active')
@@ -849,9 +1651,11 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
         'The selected user has not joined the interest list',
       );
 
-    const existing = await first<Workspace>(control, 'SELECT * FROM workspaces WHERE owner_did=?', [
-      input.ownerDid,
-    ]);
+    const existing = await first<Workspace>(
+      control,
+      `SELECT * FROM ${control.table('workspaces')} WHERE owner_did=$1`,
+      [input.ownerDid],
+    );
     if (slot.status !== 'available') {
       if (slot.status === 'assigned' && slot.workspace_id === existing?.id) {
         if (existing.state === 'waiting_for_capacity') {
@@ -889,7 +1693,7 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
     if (existing) {
       const assigned = await first<{ binding_name: string }>(
         control,
-        "SELECT binding_name FROM tenant_slots WHERE workspace_id=? AND status='assigned'",
+        `SELECT s.binding_name FROM ${control.table('postgres_tenant_registry')} r JOIN ${control.table('tenant_slots')} s ON s.database_id=r.source_database_id WHERE r.workspace_id=$1 AND r.status='assigned'`,
         [existing.id],
       );
       if (assigned && assigned.binding_name !== bindingName)
@@ -910,7 +1714,7 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
     const timestamp = new Date().toISOString();
     await run(
       control,
-      `INSERT INTO users(did,handle,state,created_at,updated_at,last_seen_at) VALUES(?,?,'active',?,?,?)
+      `INSERT INTO ${control.table('users')}(did,handle,state,created_at,updated_at,last_seen_at) VALUES($1,$2,'active',$3,$4,$5)
        ON CONFLICT(did) DO UPDATE SET handle=excluded.handle,updated_at=excluded.updated_at,last_seen_at=excluded.last_seen_at`,
       [input.ownerDid, ownerHandle, timestamp, timestamp, timestamp],
     );
@@ -918,8 +1722,8 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
       existing ??
       (await first<Workspace>(
         control,
-        `INSERT INTO workspaces(id,owner_did,name,state,plan,created_at,updated_at,last_seen_at,next_dispatch_at)
-         VALUES(?,?,?,'waiting_for_capacity','free',?,?,?,?) RETURNING *`,
+        `INSERT INTO ${control.table('workspaces')}(id,owner_did,name,state,plan,created_at,updated_at,last_seen_at,next_dispatch_at)
+         VALUES($1,$2,$3,'waiting_for_capacity','free',$4,$5,$6,$7) ON CONFLICT(owner_did) DO UPDATE SET owner_did=excluded.owner_did RETURNING *`,
         [
           randomId(),
           input.ownerDid,
@@ -933,7 +1737,7 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
     if (!workspace) throw new Error('Workspace provisioning failed');
     await run(
       control,
-      `INSERT INTO memberships(workspace_id,did,role,created_at) VALUES(?,?,'owner',?) ON CONFLICT(workspace_id,did) DO NOTHING`,
+      `INSERT INTO ${control.table('memberships')}(workspace_id,did,role,created_at) VALUES($1,$2,'owner',$3) ON CONFLICT(workspace_id,did) DO NOTHING`,
       [workspace.id, input.ownerDid, timestamp],
     );
     const provisioned = await provisionWorkspace(env, workspace, {
@@ -944,7 +1748,7 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
       throw new HttpErrorLike(
         409,
         'capacity_unavailable',
-        'The selected slot cannot be assigned while preserving capacity and budget limits',
+        'The selected slot cannot be assigned while preserving capacity limits',
       );
     await audit(control, provisioned.id, principal.did, 'slot_assignment', {
       bindingName,
@@ -963,29 +1767,50 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
   if (slotAdmission && request.method === 'POST') {
     const bindingName = slotAdmission[1]!;
     const input = z.object({ enabled: z.boolean() }).parse(await readJson(request));
+    const slot = await first<{ database_id: string }>(
+      control,
+      `SELECT database_id FROM ${control.table('tenant_slots')} WHERE binding_name=$1`,
+      [bindingName],
+    );
     if (
-      env.ENVIRONMENT === 'staging' &&
-      bindingName === stagingImportedBindingName &&
-      input.enabled
+      !slot ||
+      !env.catalog.sources.some((source) => source.sourceDatabaseId === slot.database_id)
     )
+      throw new HttpErrorLike(
+        409,
+        'slot_unavailable',
+        'Physical source is outside the runtime catalog',
+      );
+    if (isImportedSlot(env, bindingName, slot.database_id) && input.enabled)
       throw new HttpErrorLike(
         409,
         'explicit_assignment_required',
         'Imported data can only be assigned explicitly',
       );
-    const binding = env[bindingName] as D1Database | undefined;
-    if (!binding || typeof binding.prepare !== 'function')
-      throw new HttpErrorLike(409, 'slot_unavailable', 'Slot is not bound to this deployment');
-    const updated = await first(
-      control,
-      `INSERT INTO tenant_slot_controls(binding_name,admission_enabled)
-      SELECT binding_name, ? FROM tenant_slots WHERE binding_name=? AND status='available' AND workspace_id IS NULL
-      AND (? = 1 OR (SELECT count(*) FROM tenant_slots s
-        WHERE s.status='available' AND s.workspace_id IS NULL
-        AND COALESCE((SELECT admission_enabled FROM tenant_slot_controls c WHERE c.binding_name=s.binding_name),1)=1) > ?)
+    const updated = await control.transaction(async (tx) => {
+      await first(tx, `SELECT id FROM ${tx.table('service_controls')} WHERE id=1 FOR UPDATE`);
+      return first(
+        tx,
+        `INSERT INTO ${tx.table('tenant_slot_controls')}(binding_name,admission_enabled)
+      SELECT s.binding_name, $1::integer FROM ${tx.table('tenant_slots')} s JOIN ${tx.table('postgres_tenant_registry')} r ON r.source_database_id=s.database_id WHERE s.binding_name=$2 AND r.status='available' AND r.workspace_id IS NULL
+      AND ($3::integer = 1 OR (SELECT count(*) FROM ${tx.table('postgres_tenant_registry')} r2
+        JOIN ${tx.table('tenant_slots')} s2 ON s2.database_id=r2.source_database_id
+        WHERE r2.status='available' AND r2.workspace_id IS NULL AND NOT (s2.binding_name = ANY($5::text[]))
+        AND r2.source_database_id = ANY($6::text[])
+        AND COALESCE((SELECT admission_enabled FROM ${tx.table('tenant_slot_controls')} c WHERE c.binding_name=s2.binding_name),1)=1) > $4)
       ON CONFLICT(binding_name) DO UPDATE SET admission_enabled=excluded.admission_enabled RETURNING binding_name`,
-      [input.enabled ? 1 : 0, bindingName, input.enabled ? 1 : 0, minimumAvailableSlots(env)],
-    );
+        [
+          input.enabled ? 1 : 0,
+          bindingName,
+          input.enabled ? 1 : 0,
+          minimumAvailableSlots(env),
+          reservedSlotNames(env),
+          env.catalog.sources
+            .filter((source) => source.profile === 'full-hosted')
+            .map((source) => source.sourceDatabaseId),
+        ],
+      );
+    });
     if (!updated)
       throw new HttpErrorLike(
         409,
@@ -1006,10 +1831,12 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
     >(
       control,
       `SELECT w.*, u.handle AS owner_handle, COALESCE(SUM(d.rows_read),0) AS rows_read, COALESCE(SUM(d.rows_written),0) AS rows_written, COALESCE(MAX(d.storage_bytes),0) AS storage_bytes
-       FROM workspaces w JOIN users u ON u.did = w.owner_did LEFT JOIN workspace_usage_daily d ON d.workspace_id = w.id AND d.day >= ? GROUP BY w.id ORDER BY w.created_at DESC LIMIT 100`,
+       FROM ${control.table('workspaces')} w JOIN ${control.table('users')} u ON u.did = w.owner_did LEFT JOIN ${control.table('workspace_usage_daily')} d ON d.workspace_id = w.id AND d.day >= $1 GROUP BY w.id,u.handle ORDER BY w.created_at DESC LIMIT 100`,
       [new Date().toISOString().slice(0, 7) + '-01'],
     );
+    const configuredRegionIds = parseApiEnv(env).enabledRegionIds;
     return json({
+      availableRegions: parseApiEnv(env).enabledRegions,
       workspaces: await Promise.all(
         rows.map(async (row) => ({
           id: row.id,
@@ -1018,14 +1845,190 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
           ownerDid: row.owner_did,
           ownerHandle: row.owner_handle,
           monitorCount: (await workspaceUsage(env, row))?.monitors ?? 0,
-          rowsRead: row.rows_read,
-          rowsWritten: row.rows_written,
-          storageBytes: row.storage_bytes,
+          limits: await operatorWorkspaceLimits(env, row, configuredRegionIds),
+          rowsRead: null,
+          rowsWritten: null,
+          storageBytes: null,
+          historicalD1Usage: {
+            rowsRead: Number(row.rows_read),
+            rowsWritten: Number(row.rows_written),
+            storageBytes: Number(row.storage_bytes),
+          },
           lastSeenAt: row.last_seen_at,
         })),
       ),
-      budget: await budgetSummary(control),
+      budget: await budgetSummary(control, env),
     });
+  }
+  const productLimits = path.match(/^\/api\/operator\/workspaces\/([^/]+)\/limits$/);
+  if (productLimits && request.method === 'PATCH') {
+    const id = uuid.parse(productLimits[1]);
+    const input = parseProductLimits(await readJson(request));
+    const configuredRegionIds = parseApiEnv(env).enabledRegionIds;
+    const unavailable = input.allowedRegionIds.find(
+      (region) => !configuredRegionIds.includes(region),
+    );
+    if (unavailable)
+      throw new HttpErrorLike(
+        400,
+        'region_unavailable',
+        `Region ${unavailable} is not configured for this deployment`,
+      );
+    const workspace = await first<Workspace>(
+      control,
+      `SELECT * FROM ${control.table('workspaces')} WHERE id = $1`,
+      [id],
+    );
+    if (!workspace) throw new HttpErrorLike(404, 'workspace_not_found', 'Workspace was not found');
+    if (await isImportedWorkspace(env, id))
+      throw new HttpErrorLike(
+        409,
+        'limits_unsupported',
+        'Product limits are not supported for imported monitor workspaces',
+      );
+    if (workspace.state === 'waiting_for_capacity') {
+      return control.transaction(async (tx) => {
+        // Provisioning takes the same row lock before assigning a tenant.
+        const current = await first<Workspace & { execution_lease_until: string | null }>(
+          tx,
+          `SELECT * FROM ${tx.table('workspaces')} WHERE id=$1 FOR NO KEY UPDATE`,
+          [id],
+        );
+        if (current?.state !== 'waiting_for_capacity')
+          throw new HttpErrorLike(
+            409,
+            'workspace_busy',
+            'Workspace state changed. Refresh before editing limits',
+          );
+        if (
+          current.execution_lease_until &&
+          current.execution_lease_until > new Date().toISOString()
+        )
+          throw new HttpErrorLike(
+            409,
+            'workspace_busy',
+            'Workspace is processing another operation. Try again shortly',
+          );
+        const capacity = await workspaceCapacity({ ...env, controlDb: tx }, id, input);
+        if (!capacity.safe)
+          throw new HttpErrorLike(409, 'capacity_exceeded', capacity.warnings.join('; '));
+        await run(
+          tx,
+          `INSERT INTO ${tx.table('workspace_product_limits')}(workspace_id,monitors,regions,allowed_region_ids,updated_at)
+           VALUES($1,$2,$3,$4,$5)
+           ON CONFLICT(workspace_id) DO UPDATE SET monitors=excluded.monitors,
+             regions=excluded.regions,allowed_region_ids=excluded.allowed_region_ids,updated_at=excluded.updated_at`,
+          [
+            id,
+            input.monitors,
+            input.regions,
+            JSON.stringify(input.allowedRegionIds),
+            new Date().toISOString(),
+          ],
+        );
+        await audit(tx, id, principal.did, 'workspace_product_limits', input);
+        return json({ limits: productLimitsResponse(input) });
+      });
+    }
+    if (!['active', 'suspended'].includes(workspace.state))
+      throw new HttpErrorLike(
+        409,
+        'workspace_unprovisioned',
+        'Product limits require a provisioned hosted workspace',
+      );
+    const slot = await first<{ binding_name: string }>(
+      control,
+      `SELECT source_database_id FROM ${control.table('postgres_tenant_registry')} WHERE workspace_id = $1 AND status = 'assigned'`,
+      [id],
+    );
+    if (!slot)
+      throw new HttpErrorLike(
+        409,
+        'workspace_unprovisioned',
+        'Product limits require a provisioned hosted workspace',
+      );
+
+    return withWorkspaceWriteLease(
+      control,
+      id,
+      async () => {
+        const capacity = await workspaceCapacity(env, id, input);
+        if (!capacity.safe)
+          throw new HttpErrorLike(409, 'capacity_exceeded', capacity.warnings.join('; '));
+        return withWorkspacePolicy(env, id, async (control, db) => {
+          const previous = await savedWorkspaceProductLimits(control, id, configuredRegionIds);
+          await syncWorkspaceProductLimits(db, previous);
+          const counts = await first<{ monitors: number }>(
+            db,
+            `SELECT count(*)::integer AS monitors FROM ${db.table('monitors')}`,
+          );
+          if (Number(counts?.monitors ?? 0) > input.monitors)
+            throw new HttpErrorLike(
+              409,
+              'limits_conflict',
+              `This workspace already has ${counts?.monitors ?? 0} saved monitors. Remove monitors before lowering the limit to ${input.monitors}`,
+            );
+          // Stale rows must survive while the operator grants replacement regions.
+          const conflictingMonitor = await first<{
+            id: string;
+            configured_region_count: number;
+            configured_disallowed_count: number;
+          }>(
+            db,
+            `SELECT m.id,
+                  count(*) FILTER (WHERE mr.region_id=ANY($1::text[]))::integer AS configured_region_count,
+                  count(*) FILTER (WHERE mr.region_id=ANY($1::text[]) AND NOT (mr.region_id=ANY($2::text[])))::integer AS configured_disallowed_count
+           FROM ${db.table('monitors')} m LEFT JOIN ${db.table('monitor_regions')} mr ON mr.monitor_id = m.id
+           GROUP BY m.id
+           HAVING count(*) FILTER (WHERE mr.region_id=ANY($1::text[])) > $3 OR count(*) FILTER (WHERE mr.region_id=ANY($1::text[]) AND NOT (mr.region_id=ANY($2::text[]))) > 0
+           LIMIT 1`,
+            [configuredRegionIds, input.allowedRegionIds, input.regions],
+          );
+          if (conflictingMonitor)
+            throw new HttpErrorLike(
+              409,
+              'limits_conflict',
+              `Saved monitor ${conflictingMonitor.id} uses ${conflictingMonitor.configured_region_count} configured regions or a region outside the new policy. Update its regions before lowering this limit`,
+            );
+
+          const saved = await first<{
+            monitors: number;
+            regions: number;
+            allowed_region_ids: string;
+          }>(
+            control,
+            `SELECT monitors,regions,allowed_region_ids FROM ${control.table('workspace_product_limits')} WHERE workspace_id=$1`,
+            [id],
+          );
+          if (
+            saved &&
+            saved.monitors === input.monitors &&
+            saved.regions === input.regions &&
+            saved.allowed_region_ids === JSON.stringify(input.allowedRegionIds)
+          )
+            return json({ limits: productLimitsResponse(input) });
+          await syncWorkspaceProductLimits(db, input);
+          await run(
+            control,
+            `INSERT INTO ${control.table('workspace_product_limits')}(workspace_id,monitors,regions,allowed_region_ids,updated_at)
+             VALUES($1,$2,$3,$4,$5)
+             ON CONFLICT(workspace_id) DO UPDATE SET monitors=excluded.monitors,
+               regions=excluded.regions, allowed_region_ids=excluded.allowed_region_ids,
+               updated_at=excluded.updated_at`,
+            [
+              id,
+              input.monitors,
+              input.regions,
+              JSON.stringify(input.allowedRegionIds),
+              new Date().toISOString(),
+            ],
+          );
+          await audit(control, id, principal.did, 'workspace_product_limits', input);
+          return json({ limits: productLimitsResponse(input) });
+        });
+      },
+      true,
+    );
   }
   const state = path.match(/^\/api\/operator\/workspaces\/([^/]+)\/state$/);
   if (state && request.method === 'POST') {
@@ -1033,23 +2036,31 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
     const input = z
       .object({ state: z.enum(['active', 'suspended']), reason: z.string().trim().min(1).max(500) })
       .parse(await readJson(request));
-    const workspace = await first<Workspace>(control, 'SELECT * FROM workspaces WHERE id = ?', [
-      id,
-    ]);
+    const workspace = await first<Workspace>(
+      control,
+      `SELECT * FROM ${control.table('workspaces')} WHERE id = $1`,
+      [id],
+    );
+    if (
+      workspace &&
+      ['active', 'suspended'].includes(workspace.state) &&
+      workspace.state === input.state
+    )
+      return json({ id, state: input.state });
     if (workspace?.state === 'waiting_for_capacity' && input.state === 'active') {
       const provisioned = await provisionWorkspace(env, workspace, { operatorActivation: true });
       if (provisioned.state !== 'active')
         throw new HttpErrorLike(
           409,
           'capacity_unavailable',
-          'Activation needs an available database slot, space under the workspace limit, and a forecast below the budget ceiling',
+          'Activation needs an available database slot and space under the workspace limit.',
         );
       await audit(control, id, principal.did, 'workspace_state', input);
       return json({ id, state: provisioned.state });
     }
     const updated = await first(
       control,
-      "UPDATE workspaces SET state = ?, updated_at = ? WHERE id = ? AND state IN ('active','suspended') RETURNING id",
+      `UPDATE ${control.table('workspaces')} SET state = $1, updated_at = $2 WHERE id = $3 AND state IN ('active','suspended') AND state<>$1 RETURNING id`,
       [input.state, new Date().toISOString(), id],
     );
     if (!updated)
@@ -1065,19 +2076,21 @@ async function operatorRequest(request: Request, env: CloudflareEnv, principal: 
     const input = z
       .object({ admissionOpen: z.boolean(), externalMonthlyCostUsd: z.number().min(0).max(10000) })
       .parse(await readJson(request));
-    await run(
-      control,
-      'UPDATE service_controls SET admission_open = ?, external_monthly_cost_usd = ? WHERE id = 1',
-      [input.admissionOpen ? 1 : 0, input.externalMonthlyCostUsd],
-    );
-    await audit(control, null, principal.did, 'service_controls', input);
-    return json({ budget: await budgetSummary(control) });
+    await control.transaction(async (tx) => {
+      const updated = await run(
+        tx,
+        `UPDATE ${tx.table('service_controls')} SET admission_open=$1,external_monthly_cost_usd=$2 WHERE id=1 AND (admission_open<>$1 OR external_monthly_cost_usd<>$2)`,
+        [input.admissionOpen ? 1 : 0, input.externalMonthlyCostUsd],
+      );
+      if (updated.rowCount) await audit(tx, null, principal.did, 'service_controls', input);
+    });
+    return json({ budget: await budgetSummary(control, env) });
   }
   throw new HttpErrorLike(404, 'not_found', 'Operator endpoint was not found');
 }
 
 async function audit(
-  control: D1Database,
+  control: Database,
   workspaceId: string | null,
   did: string,
   event: string,
@@ -1085,109 +2098,83 @@ async function audit(
 ) {
   await run(
     control,
-    'INSERT INTO workspace_events(id,workspace_id,event,actor_did,created_at,details) VALUES(?,?,?,?,?,?)',
+    `INSERT INTO ${control.table('workspace_events')}(id,workspace_id,event,actor_did,created_at,details) VALUES($1,$2,$3,$4,$5,$6)`,
     [randomId(), workspaceId, event, did, new Date().toISOString(), JSON.stringify(details)],
   );
 }
 
 async function workspaceRequest(
   request: Request,
-  env: CloudflareEnv,
+  env: HostedRuntimeEnv,
   principal: AtprotoPrincipal,
   workspace: Workspace,
 ): Promise<Response> {
   const path = new URL(request.url).pathname;
-  const control = env.CONTROL_DB as D1Database;
+  const control = env.controlDb;
   if (path === '/api/workspace/usage' && request.method === 'GET')
     return json({
       usage: await workspaceUsage(env, workspace),
-      limits: (await isStagingImportedWorkspace(env, workspace.id)) ? null : hostedLimits,
-      budget: await budgetSummary(control),
+      limits: (await isImportedWorkspace(env, workspace.id))
+        ? null
+        : productLimitsResponse(await getWorkspaceProductLimits(env, workspace.id)),
+      budget: await budgetSummary(control, env),
     });
   if (path === '/api/workspace/members' && request.method === 'GET')
     return json({
       members: await all(
         control,
-        `SELECT m.did, u.handle, m.role FROM memberships m JOIN users u ON u.did = m.did WHERE workspace_id = ?`,
+        `SELECT m.did, u.handle, m.role, m.created_at AS "createdAt" FROM ${control.table('memberships')} m JOIN ${control.table('users')} u ON u.did = m.did WHERE workspace_id = $1`,
         [workspace.id],
       ),
       invitations:
         workspace.role === 'owner'
-          ? await all(
-              control,
-              'SELECT id, invitee_did AS inviteeDid, role FROM workspace_invitations WHERE workspace_id = ?',
-              [workspace.id],
-            )
+          ? (
+              await listWorkspaceInvitations(control, {
+                workspaceId: workspace.id,
+                actorDid: principal.did,
+              })
+            ).invitations
           : [],
     });
   const accept = path.match(/^\/api\/workspace\/invitations\/([^/]+)\/accept$/);
   if (accept && request.method === 'POST') {
-    const invitation = await first<{ workspace_id: string; role: Role }>(
-      control,
-      "SELECT i.workspace_id, i.role FROM workspace_invitations i JOIN workspaces w ON w.id = i.workspace_id WHERE i.id = ? AND i.invitee_did = ? AND i.created_at >= ? AND w.state = 'active'",
-      [uuid.parse(accept[1]), principal.did, new Date(Date.now() - 7 * 86_400_000).toISOString()],
+    return json(
+      await acceptWorkspaceInvitation(control, {
+        invitationId: uuid.parse(accept[1]),
+        principalDid: principal.did,
+      }),
     );
-    if (!invitation) throw new HttpErrorLike(404, 'not_found', 'Invitation was not found');
-    await batch(control, [
-      {
-        sql: `INSERT INTO memberships(workspace_id,did,role,created_at) SELECT ?,?,?,? WHERE (SELECT count(*) FROM memberships WHERE workspace_id = ?) < 3 ON CONFLICT(workspace_id,did) DO NOTHING`,
-        values: [
-          invitation.workspace_id,
-          principal.did,
-          invitation.role,
-          new Date().toISOString(),
-          invitation.workspace_id,
-        ],
-      },
-    ]);
-    const member = await first(
-      control,
-      'SELECT did FROM memberships WHERE workspace_id = ? AND did = ?',
-      [invitation.workspace_id, principal.did],
+  }
+  const invitationAction = path.match(/^\/api\/workspace\/invitations\/([^/]+)(\/resend)?$/);
+  if (
+    invitationAction &&
+    ((request.method === 'POST' && invitationAction[2]) ||
+      (request.method === 'DELETE' && !invitationAction[2]))
+  ) {
+    ownerOnly(workspace);
+    const options = {
+      workspaceId: workspace.id,
+      invitationId: uuid.parse(invitationAction[1]),
+      actorDid: principal.did,
+    };
+    return json(
+      request.method === 'POST'
+        ? await resendWorkspaceInvitation(control, options)
+        : await revokeWorkspaceInvitation(control, options),
     );
-    if (!member)
-      throw new HttpErrorLike(409, 'member_limit', 'Free workspaces allow three members');
-    await run(control, 'DELETE FROM workspace_invitations WHERE id = ?', [accept[1]]);
-    await audit(control, invitation.workspace_id, principal.did, 'invitation_accepted', {});
-    return json({ workspaceId: invitation.workspace_id });
   }
   if (path === '/api/workspace/invitations' && request.method === 'POST') {
     ownerOnly(workspace);
     const input = z
       .object({ did: didSchema, role: z.enum(['maintainer', 'viewer']) })
       .parse(await readJson(request));
-    if (input.did === principal.did)
-      throw new HttpErrorLike(400, 'invalid_invitation', 'Owner is already a member');
-    const id = randomId();
-    await run(
-      control,
-      'DELETE FROM workspace_invitations WHERE workspace_id = ? AND created_at < ?',
-      [workspace.id, new Date(Date.now() - 7 * 86_400_000).toISOString()],
-    );
-    const created = await first<{ id: string }>(
-      control,
-      `INSERT INTO workspace_invitations(id,workspace_id,invitee_did,role,created_at)
-      SELECT ?,?,?,?,? WHERE (SELECT count(*) FROM memberships WHERE workspace_id = ?) + (SELECT count(*) FROM workspace_invitations WHERE workspace_id = ?) < 3
-      ON CONFLICT(workspace_id,invitee_did) DO UPDATE SET role = excluded.role RETURNING id`,
-      [
-        id,
-        workspace.id,
-        input.did,
-        input.role,
-        new Date().toISOString(),
-        workspace.id,
-        workspace.id,
-      ],
-    );
-    if (!created)
-      throw new HttpErrorLike(
-        409,
-        'member_limit',
-        'Free workspaces allow three members including pending invitations',
-      );
-    await audit(control, workspace.id, principal.did, 'invitation_created', input);
     return json(
-      { invitation: { id: created.id, inviteeDid: input.did, role: input.role } },
+      await createWorkspaceInvitation(control, {
+        workspaceId: workspace.id,
+        actorDid: principal.did,
+        inviteeDid: input.did,
+        role: input.role,
+      }),
       { status: 201 },
     );
   }
@@ -1197,32 +2184,46 @@ async function workspaceRequest(
     const did = didSchema.parse(decodeURIComponent(member[1]!));
     if (did === workspace.owner_did)
       throw new HttpErrorLike(409, 'owner_required', 'The owner cannot be removed');
-    await run(control, 'DELETE FROM memberships WHERE workspace_id = ? AND did = ?', [
-      workspace.id,
-      did,
-    ]);
-    await run(
-      control,
-      'DELETE FROM workspace_invitations WHERE workspace_id = ? AND invitee_did = ?',
-      [workspace.id, did],
-    );
-    await audit(control, workspace.id, principal.did, 'member_removed', { did });
+    await control.transaction(async (tx) => {
+      await first(tx, `SELECT id FROM ${tx.table('workspaces')} WHERE id=$1 FOR NO KEY UPDATE`, [
+        workspace.id,
+      ]);
+      const removed = await run(
+        tx,
+        `DELETE FROM ${tx.table('memberships')} WHERE workspace_id=$1 AND did=$2`,
+        [workspace.id, did],
+      );
+      const revoked = await run(
+        tx,
+        `DELETE FROM ${tx.table('workspace_invitations')} WHERE workspace_id=$1 AND invitee_did=$2`,
+        [workspace.id, did],
+      );
+      if (removed.rowCount || revoked.rowCount)
+        await audit(tx, workspace.id, principal.did, 'member_removed', { did });
+    });
     return json({ removed: true });
   }
   if (path === '/api/workspace' && request.method === 'DELETE') {
     ownerOnly(workspace);
-    if (await isStagingImportedWorkspace(env, workspace.id))
+    if (await isImportedWorkspace(env, workspace.id))
       throw new HttpErrorLike(
         409,
         'imported_data_protected',
-        'Imported staging history cannot be deleted through workspace settings',
+        'Imported history cannot be deleted through workspace settings',
       );
     await run(
       control,
-      "UPDATE workspaces SET state = 'deleting', updated_at = ? WHERE id = ? AND state <> 'deleted'",
+      `UPDATE ${control.table('workspaces')} SET state = 'deleting', updated_at = $1 WHERE id = $2 AND state <> 'deleted'`,
       [new Date().toISOString(), workspace.id],
     );
-    const complete = await purgeWorkspaceData({ ...env, CONTROL_DB: control }, workspace.id);
+    const complete = await purgeWorkspaceData(
+      {
+        controlDb: control,
+        catalog: env.catalog.sources,
+        ...(env.REPORTS ? { REPORTS: env.REPORTS } : {}),
+      },
+      workspace.id,
+    );
     return json({ state: complete ? 'deleted' : 'deleting' }, { status: complete ? 200 : 202 });
   }
   if (workspace.state !== 'active')
@@ -1230,116 +2231,29 @@ async function workspaceRequest(
   const db = await activeDatabase(env, workspace.id);
   if (path === '/api/workspace/export' && request.method === 'GET') {
     ownerOnly(workspace);
-    const imported = await isStagingImportedWorkspace(env, workspace.id);
+    const imported = await isImportedWorkspace(env, workspace.id);
     // Credential material, OAuth tokens and private delivery payloads never leave through exports.
     return json({
       version: 1,
       exportedAt: new Date().toISOString(),
       workspace: { id: workspace.id, name: workspace.name },
-      monitors: await all(db, `SELECT * FROM monitors LIMIT ${imported ? 1000 : 3}`),
-      regions: await all(db, 'SELECT * FROM monitor_regions'),
-      statusPages: await all(db, `SELECT * FROM status_pages LIMIT ${imported ? 100 : 1}`),
-      groups: await all(db, 'SELECT * FROM status_page_groups'),
-      pageMonitors: await all(db, 'SELECT * FROM status_page_monitors'),
-      uptime: await all(db, 'SELECT * FROM monitor_daily_uptime ORDER BY day DESC LIMIT 90'),
+      monitors: await all(db, `SELECT * FROM ${db.table('monitors')} LIMIT 1000`),
+      regions: await all(db, `SELECT * FROM ${db.table('monitor_regions')}`),
+      statusPages: await all(db, `SELECT * FROM ${db.table('status_pages')} LIMIT 1000`),
+      groups: await all(db, `SELECT * FROM ${db.table('status_page_groups')}`),
+      pageMonitors: await all(db, `SELECT * FROM ${db.table('status_page_monitors')}`),
+      uptime: await all(
+        db,
+        `SELECT * FROM ${db.table('monitor_daily_uptime')} ORDER BY day DESC LIMIT 90`,
+      ),
       destinations: await all(
         db,
-        `SELECT id,name,provider,enabled FROM notification_services LIMIT ${imported ? 100 : 3}`,
+        `SELECT id,name,provider,enabled FROM ${db.table('notification_services')} LIMIT 1000`,
       ),
     });
   }
-  if (path === '/api/workspace/targets' && request.method === 'GET')
-    return json({
-      targets: await all(
-        db,
-        'SELECT id, origin, expires_at AS expiresAt, verified_at AS verifiedAt FROM verified_targets ORDER BY created_at DESC LIMIT 20',
-      ),
-    });
   if (mutation(request) && workspace.role === 'viewer')
     throw new HttpErrorLike(403, 'forbidden', 'Viewer access is read only');
-  if (path === '/api/workspace/targets' && request.method === 'POST') {
-    const input = z.object({ origin: z.string().url() }).parse(await readJson(request));
-    const url = monitorUrl(input.origin);
-    const existing = await first<{ id: string; token: string; verified_at: string | null }>(
-      db,
-      'SELECT * FROM verified_targets WHERE origin = ?',
-      [url.origin],
-    );
-    const token = existing?.token ?? randomToken();
-    const id = existing?.id ?? randomId();
-    if (!existing) {
-      const inserted = await first(
-        db,
-        'INSERT INTO verified_targets(id,origin,token,expires_at,created_at) SELECT ?,?,?,?,? WHERE (SELECT count(*) FROM verified_targets) < 20 RETURNING id',
-        [
-          id,
-          url.origin,
-          token,
-          new Date(Date.now() + 86_400_000).toISOString(),
-          new Date().toISOString(),
-        ],
-      );
-      if (!inserted) throw new HttpErrorLike(409, 'target_limit', 'Maximum twenty target domains');
-    } else if (!existing.verified_at)
-      await run(db, 'UPDATE verified_targets SET expires_at = ? WHERE id = ?', [
-        new Date(Date.now() + 86_400_000).toISOString(),
-        id,
-      ]);
-    return json({
-      id,
-      origin: url.origin,
-      token,
-      verificationUrl: `${url.origin}/.well-known/uptime-verification.txt`,
-    });
-  }
-  const verify = path.match(/^\/api\/workspace\/targets\/([^/]+)\/verify$/);
-  if (verify && request.method === 'POST') {
-    await consumeBudget(control, `verify:${workspace.id}`, 5, 600);
-    const target = await first<{ origin: string; token: string }>(
-      db,
-      'SELECT origin, token FROM verified_targets WHERE id = ? AND expires_at > ?',
-      [uuid.parse(verify[1]), new Date().toISOString()],
-    );
-    if (!target)
-      throw new HttpErrorLike(
-        404,
-        'challenge_expired',
-        'Create a new target verification challenge',
-      );
-    monitorUrl(target.origin);
-    const result = await fetch(`${target.origin}/.well-known/uptime-verification.txt`, {
-      redirect: 'manual',
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!result.ok || !result.body)
-      throw new HttpErrorLike(400, 'verification_failed', 'Verification file could not be fetched');
-    const reader = result.body.getReader();
-    let text = '';
-    let length = 0;
-    try {
-      while (true) {
-        const part = await reader.read();
-        if (part.done) break;
-        length += part.value.length;
-        if (length > 2048)
-          throw new HttpErrorLike(400, 'verification_failed', 'Verification file is too large');
-        text += new TextDecoder().decode(part.value);
-      }
-    } finally {
-      await reader.cancel();
-    }
-    if (text.trim() !== target.token)
-      throw new HttpErrorLike(
-        400,
-        'verification_failed',
-        'Verification file contents do not match',
-      );
-    await run(db, 'UPDATE verified_targets SET verified_at = ? WHERE id = ?', [
-      new Date().toISOString(),
-      verify[1],
-    ]);
-    return json({ verified: true });
-  }
   throw new HttpErrorLike(404, 'not_found', 'Workspace endpoint was not found');
 }
 
@@ -1359,24 +2273,54 @@ function monitorUrl(value: string) {
   return url;
 }
 
-async function enforceHostedRequest(request: Request, db: D1Database) {
+async function enforceHostedRequest(
+  request: Request,
+  db: Database,
+  limits: ProductLimits | undefined,
+  configuredRegionIds: readonly RegionId[],
+) {
   const url = new URL(request.url);
-  if (
-    /\/(latency|observations)$/.test(url.pathname) &&
-    ['7d', '30d'].includes(url.searchParams.get('range') ?? '')
-  )
-    throw new HttpErrorLike(400, 'retention_limit', 'Detailed history is available for 24 hours');
   if (url.pathname.includes('/dns-diagnostics'))
     throw new HttpErrorLike(403, 'free_limit', 'DNS diagnostics are unavailable in this release');
   if (!mutation(request)) return;
+  if (!limits) throw new Error('Hosted product policy was not loaded before a mutation');
   const body = (await readJson(request.clone() as unknown as Request)) as
     Record<string, unknown> | undefined;
   if (body && url.pathname.startsWith('/api/monitors') && request.method !== 'DELETE') {
+    const requestedRegions = body.regionIds;
+    if (Array.isArray(requestedRegions)) {
+      if (requestedRegions.length > limits.regions)
+        throw new HttpErrorLike(
+          409,
+          'region_limit',
+          `This workspace allows up to ${limits.regions} regions per monitor`,
+        );
+      const distinctRegions = new Set<string>();
+      const availableAllowedRegions = new Set(
+        limits.allowedRegionIds.filter((region) => configuredRegionIds.includes(region)),
+      );
+      for (const value of requestedRegions) {
+        if (typeof value !== 'string' || !isRegionId(value))
+          throw new HttpErrorLike(400, 'region_invalid', `Unknown region: ${String(value)}`);
+        if (distinctRegions.has(value))
+          throw new HttpErrorLike(
+            400,
+            'region_duplicate',
+            `Region ${value} was listed more than once`,
+          );
+        if (!availableAllowedRegions.has(value))
+          throw new HttpErrorLike(
+            400,
+            'region_unavailable',
+            `Region ${value} is not configured and allowed for this workspace`,
+          );
+        distinctRegions.add(value);
+      }
+    }
     if (
       (body.intervalSeconds !== undefined && body.intervalSeconds !== 300) ||
       (body.timeoutMs !== undefined && Number(body.timeoutMs) > 10000) ||
       body.dnsDiagnosticsEnabled === true ||
-      (Array.isArray(body.regionIds) && body.regionIds.length > 3) ||
       (body.outageThreshold !== undefined && body.outageThreshold !== 2) ||
       (body.recoveryThreshold !== undefined && body.recoveryThreshold !== 1) ||
       body.repeatNotificationMinutes != null
@@ -1384,21 +2328,21 @@ async function enforceHostedRequest(request: Request, db: D1Database) {
       throw new HttpErrorLike(
         400,
         'free_limit',
-        'Free monitors use five-minute checks, up to three regions, ten-second timeouts, two failed rounds and one recovery round',
+        `Hosted monitors use five-minute checks, up to ${limits.regions} regions, ten-second timeouts, two failed rounds and one recovery round`,
       );
     if (typeof body.url === 'string') {
-      const target = monitorUrl(body.url);
-      if (
-        !(await first(
-          db,
-          'SELECT id FROM verified_targets WHERE origin = ? AND verified_at IS NOT NULL',
-          [target.origin],
-        ))
-      )
+      monitorUrl(body.url);
+    }
+    if (request.method === 'POST' && url.pathname === '/api/monitors') {
+      const current = await first<{ count: number }>(
+        db,
+        `SELECT count(*)::integer AS count FROM ${db.table('monitors')}`,
+      );
+      if (Number(current?.count ?? 0) >= limits.monitors)
         throw new HttpErrorLike(
-          403,
-          'target_unverified',
-          'Verify ownership of this target domain before creating its monitor',
+          409,
+          'monitor_limit',
+          `This workspace already has ${current?.count ?? 0} saved monitors, its limit is ${limits.monitors}`,
         );
     }
   }
@@ -1441,15 +2385,55 @@ async function redactPublicUrls(response: Response) {
 
 async function publicReport(
   request: Request,
-  env: CloudflareEnv,
+  env: HostedRuntimeEnv,
   workspaceId: string,
-  db: D1Database,
+  db: Database,
 ) {
-  if (!env.REPORTS) throw new HttpErrorLike(503, 'reports_unavailable', 'Reports are unavailable');
   const url = new URL(request.url);
-  const imported = await isStagingImportedWorkspace(env, workspaceId);
-  if (imported && /^\/reports\/public\/monitors\//.test(url.pathname))
-    return importedRequest(request, env, workspaceId, true);
+  const monitorMatch = /^\/reports\/public\/monitors\/([A-Za-z0-9.-]+)\.json$/.exec(url.pathname);
+  if (monitorMatch) {
+    const monitor = await getPublicMonitor(db, monitorMatch[1]!);
+    if (!monitor) throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
+    const body = await monitorRequestCache.get(
+      JSON.stringify([workspaceId, db.schema, 'report', monitor.id, monitor.updated_at]),
+      async () => {
+        const now = new Date();
+        const [summary, uptime, ...latencies] = await Promise.all([
+          monitorSummary(db, monitor, log),
+          monitorUptimePayload(db, monitor.id, now),
+          ...(['1h', '24h', '7d', '30d'] as const).map((range) =>
+            latencyPayload(db, monitor.id, range, now),
+          ),
+        ]);
+        const latestObservationAt = Object.values(summary.latestByRegion).reduce<string | null>(
+          (latest, item) =>
+            item && (!latest || item.startedAt > latest) ? item.startedAt : latest,
+          null,
+        );
+        return {
+          schemaVersion: '1',
+          generatedAt: now.toISOString(),
+          staleAfterSeconds: 60,
+          latestObservationAt,
+          summary: toPublicMonitorSummary(
+            !latestObservationAt || now.getTime() - Date.parse(latestObservationAt) > 420_000
+              ? { ...summary, status: 'unknown' }
+              : summary,
+          ),
+          uptime,
+          latency: latencies[1],
+          latencyByRange: Object.fromEntries(
+            ['1h', '24h', '7d', '30d'].map((range, index) => [range, latencies[index]]),
+          ),
+        };
+      },
+    );
+    if (!(await getPublicMonitor(db, monitorMatch[1]!)))
+      throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
+    return json(body);
+  }
+  if (!env.REPORTS) throw new HttpErrorLike(503, 'reports_unavailable', 'Reports are unavailable');
+  const imported = await isImportedWorkspace(env, workspaceId);
   const bucket = imported ? env.REPORTS : tenantReportsBucket(env.REPORTS, workspaceId);
   const cohortKey = async (suffix: string) => {
     const pointer = await bucket.get('public/cohort.json');
@@ -1467,7 +2451,7 @@ async function publicReport(
       .parse(await object.json());
     const current = await all<{ id: string; public_slug: string | null }>(
       db,
-      'SELECT id, public_slug FROM status_pages LIMIT 1',
+      `SELECT id, public_slug FROM ${db.table('status_pages')} ORDER BY created_at,id LIMIT 1000`,
     );
     snapshot.statusPages = snapshot.statusPages.filter((page) =>
       current.some((item) => item.id === page.id && item.public_slug === page.publicSlug),
@@ -1482,36 +2466,6 @@ async function publicReport(
   const entity =
     match[1] === 'monitors' ? await getPublicMonitor(db, id) : await getPublicStatusPage(db, id);
   if (!entity) throw new HttpErrorLike(404, 'not_found', 'Report was not found');
-  if (match[1] === 'monitors') {
-    const monitor = await getPublicMonitor(db, id);
-    if (!monitor) throw new HttpErrorLike(404, 'not_found', 'Monitor was not found');
-    const now = new Date();
-    const [summary, uptime, latency, shortLatency] = await Promise.all([
-      monitorSummary(db, monitor, log),
-      monitorUptimePayload(db, monitor.id, now),
-      latencyPayload(db, monitor.id, '24h', now),
-      latencyPayload(db, monitor.id, '1h', now),
-    ]);
-    const latestObservationAt = Object.values(summary.latestByRegion).reduce<string | null>(
-      (latest, item) => (item && (!latest || item.startedAt > latest) ? item.startedAt : latest),
-      null,
-    );
-    const generatedAt = latestObservationAt ?? summary.monitor.updatedAt;
-    const stale = !latestObservationAt || now.getTime() - Date.parse(latestObservationAt) > 420_000;
-    const publicSummary = toPublicMonitorSummary(
-      stale ? { ...summary, status: 'unknown' } : summary,
-    );
-    return json({
-      schemaVersion: '1',
-      generatedAt,
-      staleAfterSeconds: 420,
-      latestObservationAt,
-      summary: publicSummary,
-      uptime,
-      latency,
-      latencyByRange: { '24h': latency, '1h': shortLatency },
-    });
-  }
   const page = await getPublicStatusPage(db, id);
   if (!page) throw new HttpErrorLike(404, 'not_found', 'Report was not found');
   const key = await cohortKey(

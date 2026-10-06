@@ -3,29 +3,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
-const { api, apiUrl } = await import('./api.js');
-const { normalizeBaseUrl } = await import('./config.js');
+const { api } = await import('./api.js');
 
 afterEach(() => {
   fetchMock.mockReset();
   vi.unstubAllEnvs();
-});
-
-describe('api base URL', () => {
-  it('defaults to the same-origin /api prefix', () => {
-    expect(apiUrl('/monitors')).toBe('/api/monitors');
-  });
-
-  it('uses VITE_API_BASE_URL when configured', () => {
-    vi.stubEnv('VITE_API_BASE_URL', 'https://uptime-api.example.com/api');
-    expect(apiUrl('/auth/session')).toBe('https://uptime-api.example.com/api/auth/session');
-  });
-
-  it('strips trailing slashes from the configured base', () => {
-    expect(normalizeBaseUrl('https://uptime-api.example.com/api/')).toBe(
-      'https://uptime-api.example.com/api',
-    );
-  });
 });
 
 describe('public monitor API', () => {

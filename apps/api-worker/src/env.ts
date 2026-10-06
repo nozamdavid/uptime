@@ -31,7 +31,7 @@ const envSchema = z.object({
   WEB_ORIGIN: z.string().optional(),
   ALLOWED_ORIGINS: z.string().optional(),
   ENVIRONMENT: z.string().optional(),
-  // AES-GCM key material for provider credentials stored in D1.
+  // AES-GCM key material for stored provider credentials.
   CREDENTIAL_ENCRYPTION_SECRET: z.string().min(32),
   DISABLE_RATE_LIMIT: envBoolean.optional(),
 });
@@ -64,9 +64,11 @@ function parseOrigins(source: {
 }
 
 export function parseApiEnv(source: CloudflareEnv): ApiConfig {
-  const env = source.CONTROL_DB
-    ? envSchema.omit({ ADMIN_EMAIL: true, ADMIN_PASSWORD_HASH: true }).parse(source)
-    : envSchema.parse(source);
+  const env =
+    source.POSTGRES_RUNTIME_CATALOG !== undefined &&
+    source.POSTGRES_SOURCE_DATABASE_ID === undefined
+      ? envSchema.omit({ ADMIN_EMAIL: true, ADMIN_PASSWORD_HASH: true }).parse(source)
+      : envSchema.parse(source);
   const enabledRegionIds = parseRegionsList(env.REGIONS_LIST);
   const environment = env.ENVIRONMENT;
   const sessionCookieSecure = env.SESSION_COOKIE_SECURE ?? environment === 'production';

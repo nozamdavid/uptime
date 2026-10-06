@@ -8,6 +8,8 @@
   },
   "scripts": {
     "dev": "wrangler dev --config ../../deploy/cloudflare/coordinator/wrangler.toml --test-scheduled",
+    "build:node": "esbuild src/node-main.ts --bundle --platform=node --target=node24 --format=esm --external:pg-native --sourcemap --outfile=dist/node/scheduler.mjs --banner:js=\"import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);\"",
+    "start:node": "node dist/node/scheduler.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
@@ -19,6 +21,8 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250829.0",
+    "@types/node": "^24.3.0",
+    "esbuild": "0.25.12",
     "wrangler": "^4.35.0"
   }
 }

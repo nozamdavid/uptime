@@ -1,29 +1,34 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
-  atprotoAuthSchema,
   createAtprotoAuth,
+  withPostgresLease,
   type AtprotoAuthConfig,
   type AtprotoClientLike,
   workersOAuthRuntime,
 } from './atproto-auth.js';
 import type { RuntimeImplementation } from '@atproto/oauth-client';
 import { WebcryptoKey } from '@atproto/jwk-webcrypto';
-import { createD1Adapter, createTestDatabase } from '@uptime/cloudflare/testing';
+import { type Database, pgFirst } from '@uptime/cloudflare/postgres';
+import { createControlFixture, type ControlTestFixture } from './testing/control-fixture.js';
 
-const databases: ReturnType<typeof createTestDatabase>[] = [];
+let fixture: ControlTestFixture;
 
-afterEach(() => {
-  for (const database of databases.splice(0)) database.close();
+beforeAll(async () => {
+  fixture = await createControlFixture();
+}, 60_000);
+
+afterAll(async () => {
+  await fixture?.close();
 });
 
-describe('AT Protocol OAuth authentication', () => {
+describe('AT Protocol OAuth authentication', { timeout: 60_000 }, () => {
   it('returns failed interest authorization to its retry page', async () => {
     const fake = fakeClient();
     fake.client.callback = async () => {
       throw new Error('Authorization denied');
     };
-    const auth = createAuth(fake.client, { successPath: '/app', failurePath: '/' });
+    const auth = createAuth(fixture.db, fake.client, { successPath: '/app', failurePath: '/' });
     const response = await auth.callback(
       new Request('https://api.example.com/api/auth/atproto/callback'),
     );
@@ -31,7 +36,7 @@ describe('AT Protocol OAuth authentication', () => {
   });
 
   it('publishes official SDK metadata for the Worker callback', async () => {
-    const metadata = (await createSdkAuth().metadata().json()) as {
+    const metadata = (await createSdkAuth(fixture.db).metadata().json()) as {
       client_id: string;
       redirect_uris: string[];
       scope: string;
@@ -44,7 +49,7 @@ describe('AT Protocol OAuth authentication', () => {
   });
 
   it('uses official virtual localhost metadata for a loopback development callback', async () => {
-    const metadata = (await createSdkAuth({
+    const metadata = (await createSdkAuth(fixture.db, {
       publicOrigin: 'http://127.0.0.1:5176',
       cookieSecure: false,
       allowLocalHttp: true,
@@ -67,7 +72,7 @@ describe('AT Protocol OAuth authentication', () => {
 
   it('binds the callback to the initiating browser and creates a hashed local session', async () => {
     const fake = fakeClient();
-    const auth = createAuth(fake.client);
+    const auth = createAuth(fixture.db, fake.client);
     const start = await auth.start(
       new Request('https://api.example.com/api/auth/atproto/start', {
         method: 'POST',
@@ -99,20 +104,22 @@ describe('AT Protocol OAuth authentication', () => {
       handle: 'alice.bsky.social',
     });
 
-    const database = databases[0]!;
-    const stored = database.prepare('SELECT token_hash FROM atproto_login_sessions').get() as {
-      token_hash: string;
-    };
-    expect(stored.token_hash).not.toBe(sessionCookie);
+    const stored = await pgFirst<{ token_hash: string }>(
+      fixture.db,
+      `SELECT token_hash FROM ${fixture.db.table('atproto_login_sessions')} WHERE did = $1`,
+      ['did:plc:alice'],
+    );
+    expect(stored?.token_hash).toBeDefined();
+    expect(stored?.token_hash).not.toBe(sessionCookie);
   });
 
   it('rejects a missing or tampered browser binding before it creates a session', async () => {
     const fake = fakeClient();
-    const auth = createAuth(fake.client);
+    const auth = createAuth(fixture.db, fake.client);
     await auth.start(
       new Request('https://api.example.com/api/auth/atproto/start', {
         method: 'POST',
-        body: JSON.stringify({ handle: 'alice.bsky.social' }),
+        body: JSON.stringify({ handle: 'tamper.bsky.social' }),
       }),
     );
     const response = await auth.callback(
@@ -122,19 +129,21 @@ describe('AT Protocol OAuth authentication', () => {
     );
     expect(response.status).toBe(303);
     expect(response.headers.get('location')).toBe('/?auth_error=atproto');
-    const database = databases[0]!;
-    expect(database.prepare('SELECT count(*) AS count FROM atproto_login_sessions').get()).toEqual({
-      count: 0,
-    });
+    const row = await pgFirst<{ count: string | number }>(
+      fixture.db,
+      `SELECT count(*) AS count FROM ${fixture.db.table('atproto_login_sessions')} WHERE handle = $1`,
+      ['tamper.bsky.social'],
+    );
+    expect(Number(row?.count ?? 0)).toBe(0);
   });
 
   it('does not accept an OAuth callback twice', async () => {
     const fake = fakeClient();
-    const auth = createAuth(fake.client);
+    const auth = createAuth(fixture.db, fake.client);
     const start = await auth.start(
       new Request('https://api.example.com/api/auth/atproto/start', {
         method: 'POST',
-        body: JSON.stringify({ handle: 'alice.bsky.social' }),
+        body: JSON.stringify({ handle: 'twice.bsky.social' }),
       }),
     );
     const cookie = cookieValue(start.headers.get('set-cookie'));
@@ -157,6 +166,7 @@ describe('AT Protocol OAuth authentication', () => {
     };
     const logs: Record<string, unknown>[] = [];
     const auth = createAuth(
+      fixture.db,
       fake.client,
       { publicOrigin: 'http://127.0.0.1:5176', cookieSecure: false, allowLocalHttp: true },
       { warn: (bindings) => logs.push(bindings) },
@@ -177,11 +187,14 @@ describe('AT Protocol OAuth authentication', () => {
 
   it('never redirects OAuth callbacks to an external return path', async () => {
     const fake = fakeClient();
-    const auth = createAuth(fake.client);
+    const auth = createAuth(fixture.db, fake.client);
     const start = await auth.start(
       new Request('https://api.example.com/api/auth/atproto/start', {
         method: 'POST',
-        body: JSON.stringify({ handle: 'alice.bsky.social', returnTo: 'https://attacker.example' }),
+        body: JSON.stringify({
+          handle: 'external.bsky.social',
+          returnTo: 'https://attacker.example',
+        }),
       }),
     );
     const cookie = cookieValue(start.headers.get('set-cookie'));
@@ -221,6 +234,7 @@ describe('AT Protocol OAuth authentication', () => {
       },
     };
     const auth = createSdkAuth(
+      fixture.db,
       { allowLocalHttp: true },
       async (input) => {
         const url = new URL(input instanceof Request ? input.url : input.toString());
@@ -295,11 +309,14 @@ describe('AT Protocol OAuth authentication', () => {
     expect(authorize.searchParams.get('request_uri')).toBe('urn:test:request');
     expect(requests).toContain('https://auth.example/par');
     expect(createdDpopKey).toBe(true);
-    const database = databases.at(-1)!;
-    const stored = database.prepare('SELECT encrypted_payload FROM atproto_oauth_states').get() as {
-      encrypted_payload: string;
-    };
-    expect(stored.encrypted_payload).not.toContain('alice.bsky.social');
+
+    const stored = await pgFirst<{ encrypted_payload: string }>(
+      fixture.db,
+      `SELECT encrypted_payload FROM ${fixture.db.table('atproto_oauth_states')}`,
+    );
+    expect(stored?.encrypted_payload).toBeDefined();
+    expect(stored?.encrypted_payload).not.toContain('alice.bsky.social');
+
     const cookie = cookieValue(response.headers.get('set-cookie'));
     const callback = await auth.callback(
       new Request(
@@ -311,22 +328,104 @@ describe('AT Protocol OAuth authentication', () => {
     );
     expect(callback.status).toBe(303);
     expect(callback.headers.get('location')).toBe('/');
-    expect(database.prepare('SELECT count(*) AS count FROM atproto_oauth_sessions').get()).toEqual({
-      count: 1,
+
+    const sessionCount = await pgFirst<{ count: string | number }>(
+      fixture.db,
+      `SELECT count(*) AS count FROM ${fixture.db.table('atproto_oauth_sessions')} WHERE did = $1`,
+      [testDid],
+    );
+    expect(Number(sessionCount?.count ?? 0)).toBe(1);
+  });
+
+  describe('PostgreSQL lease claim/release token fencing under concurrency', () => {
+    it('serializes concurrent contenders and prevents overlapping execution', async () => {
+      const conn2 = await fixture.openConnection();
+      const lockName = 'session-mutex-test';
+      const events: string[] = [];
+
+      const contender1 = withPostgresLease(fixture.db, lockName, async () => {
+        events.push('start:1');
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        events.push('end:1');
+        return 1;
+      });
+
+      // Small delay to ensure contender1 claims first
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const contender2 = withPostgresLease(conn2, lockName, async () => {
+        events.push('start:2');
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        events.push('end:2');
+        return 2;
+      });
+
+      const [res1, res2] = await Promise.all([contender1, contender2]);
+      expect(res1).toBe(1);
+      expect(res2).toBe(2);
+
+      // Must be completely serialized: 1 starts, 1 ends, then 2 starts, 2 ends
+      expect(events).toEqual(['start:1', 'end:1', 'start:2', 'end:2']);
+    });
+
+    it('fences expired lease token so late releaser does not delete newer active lease', async () => {
+      const lockName = 'fence-token-test';
+      const expiredPastIso = new Date(Date.now() - 60_000).toISOString();
+
+      // Seed an expired lease with an old token
+      await fixture.db.query(
+        `INSERT INTO ${fixture.db.table('atproto_oauth_locks')} (name, token, lease_until)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (name) DO UPDATE SET token = EXCLUDED.token, lease_until = EXCLUDED.lease_until`,
+        [lockName, 'old-stale-token', expiredPastIso],
+      );
+
+      // Contender claims the expired lease with a new token
+      let activeTokenInAction: string | null = null;
+      await withPostgresLease(fixture.db, lockName, async () => {
+        // While active, read the current token
+        const row = await pgFirst<{ token: string }>(
+          fixture.db,
+          `SELECT token FROM ${fixture.db.table('atproto_oauth_locks')} WHERE name = $1`,
+          [lockName],
+        );
+        activeTokenInAction = row?.token ?? null;
+        expect(activeTokenInAction).not.toBe('old-stale-token');
+
+        // Late releaser tries to delete using the OLD token
+        await fixture.db.query(
+          `DELETE FROM ${fixture.db.table('atproto_oauth_locks')} WHERE name = $1 AND token = $2`,
+          [lockName, 'old-stale-token'],
+        );
+
+        // Active lease must NOT be deleted because token fencing protected it!
+        const stillActive = await pgFirst<{ token: string }>(
+          fixture.db,
+          `SELECT token FROM ${fixture.db.table('atproto_oauth_locks')} WHERE name = $1`,
+          [lockName],
+        );
+        expect(stillActive?.token).toBe(activeTokenInAction);
+      });
+
+      // After normal release with matching token, lock is cleared
+      const afterRelease = await pgFirst<{ token: string }>(
+        fixture.db,
+        `SELECT token FROM ${fixture.db.table('atproto_oauth_locks')} WHERE name = $1`,
+        [lockName],
+      );
+      expect(afterRelease).toBeNull();
     });
   });
 });
 
 function createAuth(
+  db: Database,
   client: AtprotoClientLike,
   overrides: Partial<AtprotoAuthConfig> = {},
   log?: { warn(bindings: Record<string, unknown>, message: string): void },
 ) {
-  const database = createTestDatabase();
-  databases.push(database);
-  database.exec(atprotoAuthSchema);
   return createAtprotoAuth({
-    db: createD1Adapter(database),
+    db,
     config: { ...config(), ...overrides },
     createClient: () => client,
     ...(log ? { log } : {}),
@@ -334,16 +433,14 @@ function createAuth(
 }
 
 function createSdkAuth(
+  db: Database,
   overrides: Partial<AtprotoAuthConfig> = {},
   oauthFetch?: typeof fetch,
   log?: { warn(bindings: Record<string, unknown>, message: string): void },
   oauthRuntime?: RuntimeImplementation,
 ) {
-  const database = createTestDatabase();
-  databases.push(database);
-  database.exec(atprotoAuthSchema);
   return createAtprotoAuth({
-    db: createD1Adapter(database),
+    db,
     config: { ...config(), ...overrides },
     ...(oauthFetch ? { oauthFetch } : {}),
     ...(log ? { log } : {}),

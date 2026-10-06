@@ -11,6 +11,7 @@
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
+    "test:postgres": "pnpm --filter @uptime/cloudflare test:postgres",
     "format:check": "prettier --check .",
     "generate:wrangler": "node scripts/generate-wrangler-configs.ts",
     "db:migrate:local": "pnpm --filter @uptime/api-worker exec wrangler d1 migrations apply uptime --local --config ../../deploy/cloudflare/api/wrangler.toml",

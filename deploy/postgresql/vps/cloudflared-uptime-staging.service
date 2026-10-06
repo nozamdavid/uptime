@@ -1,0 +1,15 @@
+[Unit]
+Description=Cloudflare Tunnel for Uptime PostgreSQL Staging
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/cloudflared/uptime-staging-postgres.env
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate run
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
