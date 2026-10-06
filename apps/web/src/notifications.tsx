@@ -9,6 +9,7 @@ import type { FormEvent } from 'react';
 
 import { api, isImportedWorkspaceKind, RequestError } from './api.js';
 import { NotificationHistoryView } from './notification-history.js';
+import { Select } from './select.js';
 import { useProductSession } from './product-shell.js';
 
 interface EditorState {
@@ -176,7 +177,7 @@ export function NotificationsPage() {
           <h1>Notifications</h1>
           <p>Send outage, recovery, and optional reminder messages to your team.</p>
         </div>
-        {!editor && !historyService && (
+        {!editor && !historyService && (services?.length ?? 0) > 0 && (
           <button className="button button--primary" onClick={() => setEditor(emptyEditor)}>
             Add service
           </button>
@@ -217,8 +218,8 @@ export function NotificationsPage() {
         </div>
       ) : services.length === 0 && !error ? (
         <div className="state state--empty" role="status">
-          <p>No notification services yet.</p>
-          <button className="button button--quiet" onClick={() => setEditor(emptyEditor)}>
+          <p>No notification services yet. Send outage, recovery, and optional reminder messages to your team.</p>
+          <button className="button button--primary" onClick={() => setEditor(emptyEditor)}>
             Add service
           </button>
         </div>
@@ -238,6 +239,12 @@ export function NotificationsPage() {
                         ? 'Discord webhook configured'
                         : 'Configuration saved'}
                 </p>
+                <small
+                  className="notification-card__delivery"
+                  title="Delivery history contains actual timestamps"
+                >
+                  Last delivery: unavailable
+                </small>
               </div>
               <div className="notification-card__actions">
                 <label className="notification-enabled">
@@ -278,7 +285,7 @@ export function NotificationsPage() {
                     )
                   }
                 >
-                  Test
+                  Send test notification
                 </button>
                 <button
                   className="button button--quiet"
@@ -380,23 +387,19 @@ function NotificationServiceEditor({
             onChange={(event) => set('name', event.target.value)}
           />
         </label>
-        <label className="field">
-          <span>Provider</span>
-          <select
+        <div className="field">
+          <label htmlFor="notification-provider">Provider</label>
+          <Select<NotificationProviderKind>
+            id="notification-provider"
             value={value.provider}
             disabled={editing}
-            onChange={(event) => set('provider', event.target.value as NotificationProviderKind)}
-          >
-            {Object.entries(providerLabels)
+            onChange={(provider) => set('provider', provider)}
+            options={(Object.entries(providerLabels) as [NotificationProviderKind, string][])
               .filter(([kind]) => !hostedFree || kind === 'telegram' || kind === 'discord')
-              .map(([kind, label]) => (
-                <option key={kind} value={kind}>
-                  {label}
-                </option>
-              ))}
-          </select>
+              .map(([kind, label]) => ({ value: kind, label }))}
+          />
           {editing && <small>The provider cannot be changed after creation.</small>}
-        </label>
+        </div>
       </div>
 
       <ProviderFields value={value} set={set} editing={editing} />
@@ -604,17 +607,19 @@ function ProviderFields({
       <>
         {text('SMTP host', 'host')}
         {text('Port', 'port')}
-        <label className="field">
-          <span>Security</span>
-          <select
+        <div className="field">
+          <label htmlFor="notification-smtp-security">Security</label>
+          <Select<EditorState['security']>
+            id="notification-smtp-security"
             value={value.security}
-            onChange={(event) => set('security', event.target.value as EditorState['security'])}
-          >
-            <option value="starttls">STARTTLS</option>
-            <option value="tls">TLS</option>
-            <option value="none">None</option>
-          </select>
-        </label>
+            onChange={(security) => set('security', security)}
+            options={[
+              { value: 'starttls', label: 'STARTTLS' },
+              { value: 'tls', label: 'TLS' },
+              { value: 'none', label: 'None' },
+            ]}
+          />
+        </div>
         {text('Username', 'username', false)}
         {secret('Password', 'password', 'Optional password', { required: false })}
         {mailFields}

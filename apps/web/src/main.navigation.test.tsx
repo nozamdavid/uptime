@@ -129,4 +129,108 @@ describe('private section navigation', () => {
 
     await act(async () => root.unmount());
   });
+
+  it('controls mobile nav with toggle and Escape, and keeps monitor counts accurate without guessed 0', async () => {
+    window.history.replaceState({}, '', '/app');
+    apiMock.session.mockResolvedValue({
+      user: { did: 'did:plc:test', handle: 'test.example' },
+      workspace: { id: 'workspace-1', name: 'Test', plan: 'free', state: 'active' },
+      workspaces: [],
+      isOperator: false,
+      role: 'owner',
+    });
+    apiMock.monitors.mockResolvedValue({
+      monitors: [
+        {
+          monitor: { id: 'm1', name: 'API', url: 'https://api.example.com' },
+          status: 'down',
+        },
+        {
+          monitor: { id: 'm2', name: 'Web', url: 'https://web.example.com' },
+          status: 'up',
+        },
+      ],
+    });
+
+    const { router } = await import('./main.js');
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(RouterProvider, { router }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Overview renders exactly one primary Add monitor button and quiet refresh button
+    const addButtons = [...container.querySelectorAll<HTMLButtonElement>('button')].filter(
+      (btn) => btn.textContent?.trim() === 'Add monitor',
+    );
+    expect(addButtons).toHaveLength(1);
+    expect(addButtons[0]!.classList.contains('button--primary')).toBe(true);
+
+    const refreshButtons = [...container.querySelectorAll<HTMLButtonElement>('button')].filter(
+      (btn) => btn.textContent?.trim() === 'Refresh',
+    );
+    expect(refreshButtons).toHaveLength(1);
+    expect(refreshButtons[0]!.classList.contains('button--quiet')).toBe(true);
+
+    const toggle = container.querySelector<HTMLButtonElement>('.admin-mobile-bar__toggle')!;
+    const nav = container.querySelector<HTMLElement>('nav.ut-nav')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(nav.classList.contains('is-open')).toBe(false);
+
+    // Open mobile nav via toggle
+    await act(async () => {
+      toggle.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(nav.classList.contains('is-open')).toBe(true);
+
+    // Close via Escape
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(nav.classList.contains('is-open')).toBe(false);
+
+    // Down count is accurate (1 down)
+    const monitorItem = container.querySelector('.ut-nav__items li')!;
+    expect(monitorItem.textContent).toContain('1 down');
+
+    // Counts update when monitors change
+    apiMock.monitors.mockResolvedValue({
+      monitors: [
+        {
+          monitor: { id: 'm1', name: 'API', url: 'https://api.example.com' },
+          status: 'up',
+        },
+      ],
+    });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('uptime:monitors-changed'));
+      await Promise.resolve();
+    });
+    expect(monitorItem.textContent).toContain('1');
+    expect(monitorItem.textContent).not.toContain('down');
+
+    // When monitor list is empty, never display guessed 0
+    apiMock.monitors.mockResolvedValue({ monitors: [] });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('uptime:monitors-changed'));
+      await Promise.resolve();
+    });
+    expect(monitorItem.querySelector('.ut-count')).toBeNull();
+
+    // In empty state, exactly one primary Add monitor CTA remains
+    const emptyAddButtons = [...container.querySelectorAll<HTMLButtonElement>('button')].filter(
+      (btn) => btn.textContent?.trim() === 'Add monitor',
+    );
+    expect(emptyAddButtons).toHaveLength(1);
+    expect(emptyAddButtons[0]!.classList.contains('button--primary')).toBe(true);
+
+    await act(async () => root.unmount());
+  });
 });

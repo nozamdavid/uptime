@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
+import { Select } from './select.js';
 import type {
   CustomStatusDomainDTO,
   CustomStatusDomainListResponse,
@@ -420,21 +421,21 @@ export function WorkspaceCustomDomainsPanel({
                   </small>
                 </label>
 
-                <label className="field">
-                  <span>Target Public Status Page</span>
-                  <select
+                <div className="field">
+                  <label htmlFor="custom-domain-status-page">Target Public Status Page</label>
+                  <Select
+                    id="custom-domain-status-page"
                     value={selectedStatusPageId}
-                    onChange={(e) => setSelectedStatusPageId(e.target.value)}
+                    onChange={setSelectedStatusPageId}
                     disabled={creating}
                     required
-                  >
-                    {statusPages.map((page) => (
-                      <option key={page.id} value={page.id}>
-                        {page.title} (/status/{page.publicSlug})
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                    placeholder="Choose a status page"
+                    options={statusPages.map((page) => ({
+                      value: page.id,
+                      label: `${page.title} (/status/${page.publicSlug})`,
+                    }))}
+                  />
+                </div>
               </div>
 
               <button

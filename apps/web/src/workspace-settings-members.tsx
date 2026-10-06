@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { AppLink } from './app-link.js';
 import { api, type WorkspaceInvitation, type WorkspaceMember } from './api.js';
+import { Select } from './select.js';
 
 export interface WorkspaceSettingsMembersProps {
   canManage: boolean;
@@ -306,17 +307,19 @@ export function WorkspaceSettingsMembers({
               disabled={inviting}
             />
           </label>
-          <label className="field">
-            <span>Role</span>
-            <select
+          <div className="field">
+            <label htmlFor="member-invite-role">Role</label>
+            <Select<'maintainer' | 'viewer'>
+              id="member-invite-role"
               value={inviteRole}
-              onChange={(event) => setInviteRole(event.target.value as 'maintainer' | 'viewer')}
+              onChange={setInviteRole}
               disabled={inviting}
-            >
-              <option value="viewer">Viewer</option>
-              <option value="maintainer">Maintainer</option>
-            </select>
-          </label>
+              options={[
+                { value: 'viewer', label: 'Viewer' },
+                { value: 'maintainer', label: 'Maintainer' },
+              ]}
+            />
+          </div>
           {inviteError && (
             <p className="field-error" role="alert">
               {inviteError}

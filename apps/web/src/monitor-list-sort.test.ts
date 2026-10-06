@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import type { MonitorSummary } from '@uptime/contracts';
 
-import { sortMonitorSummaries, type MonitorSortKey } from './monitor-list-sort.js';
+import {
+  defaultMonitorSort,
+  sortMonitorSummaries,
+  type MonitorSortKey,
+} from './monitor-list-sort.js';
 
 function summary(
   name: string,
   intervalSeconds: number,
   regions: number,
   requests: number,
+  status: MonitorSummary['status'] = 'up',
 ): MonitorSummary {
   return {
     monitor: {
@@ -27,7 +32,7 @@ function summary(
       createdAt: '2026-08-30T10:00:00.000Z',
       updatedAt: '2026-08-30T10:00:00.000Z',
     },
-    status: 'up',
+    status,
     latestByRegion: {} as MonitorSummary['latestByRegion'],
     targetChecksPerDay: requests,
   };
@@ -47,5 +52,16 @@ describe('admin monitor sorting', () => {
 
   it('reverses the selected ordering', () => {
     expect(sortMonitorSummaries(items, 'name', 'descending')[0]?.monitor.name).toBe('Zulu');
+  });
+
+  it('sorts down first, then degraded, then by name by default', () => {
+    const mixed = [
+      summary('Bravo', 60, 1, 100, 'up'),
+      summary('Charlie', 60, 1, 100, 'down'),
+      summary('Delta', 60, 1, 100, 'degraded'),
+      summary('Alpha', 60, 1, 100, 'down'),
+    ];
+    const sorted = defaultMonitorSort(mixed);
+    expect(sorted.map((item) => item.monitor.name)).toEqual(['Alpha', 'Charlie', 'Delta', 'Bravo']);
   });
 });

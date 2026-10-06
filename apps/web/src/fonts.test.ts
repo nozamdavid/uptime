@@ -14,24 +14,25 @@ describe('self-hosted fonts', () => {
   });
 
   it('defines @font-face rules with font-display: swap for required font families and weights', () => {
-    expect(stylesContent).toContain("font-family: 'Inter'");
-    expect(stylesContent).toContain("font-family: 'JetBrains Mono'");
-    expect(stylesContent).toContain("font-family: 'Space Grotesk'");
+    expect(stylesContent).toContain("font-family: 'Public Sans'");
+    expect(stylesContent).toContain("font-family: 'Martian Mono'");
+    expect(stylesContent).toContain("font-family: 'Schibsted Grotesk'");
     expect(stylesContent).toContain('font-display: swap');
 
-    // Inter 400, 500, 600
-    expect(stylesContent).toMatch(/font-family:\s*'Inter'[\s\S]*?font-weight:\s*400/);
-    expect(stylesContent).toMatch(/font-family:\s*'Inter'[\s\S]*?font-weight:\s*500/);
-    expect(stylesContent).toMatch(/font-family:\s*'Inter'[\s\S]*?font-weight:\s*600/);
+    // Public Sans 400, 500, 600
+    expect(stylesContent).toMatch(/font-family:\s*'Public Sans'[\s\S]*?font-weight:\s*400/);
+    expect(stylesContent).toMatch(/font-family:\s*'Public Sans'[\s\S]*?font-weight:\s*500/);
+    expect(stylesContent).toMatch(/font-family:\s*'Public Sans'[\s\S]*?font-weight:\s*600/);
 
-    // JetBrains Mono 400, 500, 600
-    expect(stylesContent).toMatch(/font-family:\s*'JetBrains Mono'[\s\S]*?font-weight:\s*400/);
-    expect(stylesContent).toMatch(/font-family:\s*'JetBrains Mono'[\s\S]*?font-weight:\s*500/);
-    expect(stylesContent).toMatch(/font-family:\s*'JetBrains Mono'[\s\S]*?font-weight:\s*600/);
+    // Martian Mono 400, 500, 600
+    expect(stylesContent).toMatch(/font-family:\s*'Martian Mono'[\s\S]*?font-weight:\s*400/);
+    expect(stylesContent).toMatch(/font-family:\s*'Martian Mono'[\s\S]*?font-weight:\s*500/);
+    expect(stylesContent).toMatch(/font-family:\s*'Martian Mono'[\s\S]*?font-weight:\s*600/);
 
-    // Space Grotesk 500, 600
-    expect(stylesContent).toMatch(/font-family:\s*'Space Grotesk'[\s\S]*?font-weight:\s*500/);
-    expect(stylesContent).toMatch(/font-family:\s*'Space Grotesk'[\s\S]*?font-weight:\s*600/);
+    // Schibsted Grotesk 500, 600, 700
+    expect(stylesContent).toMatch(/font-family:\s*'Schibsted Grotesk'[\s\S]*?font-weight:\s*500/);
+    expect(stylesContent).toMatch(/font-family:\s*'Schibsted Grotesk'[\s\S]*?font-weight:\s*600/);
+    expect(stylesContent).toMatch(/font-family:\s*'Schibsted Grotesk'[\s\S]*?font-weight:\s*700/);
   });
 
   it('all referenced local font files exist in public/fonts', () => {
@@ -51,9 +52,9 @@ describe('self-hosted fonts', () => {
   });
 
   it('includes OFL license files for all self-hosted fonts', () => {
-    expect(existsSync(resolve(publicFontsDir, 'inter-LICENSE.txt'))).toBe(true);
-    expect(existsSync(resolve(publicFontsDir, 'jetbrains-mono-OFL.txt'))).toBe(true);
-    expect(existsSync(resolve(publicFontsDir, 'space-grotesk-OFL.txt'))).toBe(true);
+    expect(existsSync(resolve(publicFontsDir, 'public-sans-OFL.txt'))).toBe(true);
+    expect(existsSync(resolve(publicFontsDir, 'martian-mono-OFL.txt'))).toBe(true);
+    expect(existsSync(resolve(publicFontsDir, 'schibsted-grotesk-OFL.txt'))).toBe(true);
   });
 
   it('has CSP restricting font-src to self in _headers', () => {

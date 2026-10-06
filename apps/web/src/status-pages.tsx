@@ -67,6 +67,19 @@ export function sortMonitorIdsAlphabetically(
   });
 }
 
+
+function formatUtcDateTime(value: string | number | Date): string {
+  const date = typeof value === "object" && value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.valueOf())) return String(value);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const year = date.getUTCFullYear();
+  const month = pad(date.getUTCMonth() + 1);
+  const day = pad(date.getUTCDate());
+  const hours = pad(date.getUTCHours());
+  const minutes = pad(date.getUTCMinutes());
+  return `${year}-${month}-${day} ${hours}:${minutes} UTC`;
+}
+
 export function StatusPagesIndex() {
   const session = useProductSession();
   const canWrite = !session?.user || session.role === 'owner' || session.role === 'maintainer';
@@ -88,7 +101,7 @@ export function StatusPagesIndex() {
           <h1>Status pages</h1>
           <p>Group monitors into a public, ninety-day service history.</p>
         </div>
-        {canWrite && (
+        {canWrite && (pages?.length ?? 0) > 0 && (
           <AppLink className="button button--primary" href="/status-pages/new">
             Add status page
           </AppLink>
@@ -99,7 +112,14 @@ export function StatusPagesIndex() {
       ) : !pages ? (
         <p className="state state--loading">Loading status pages…</p>
       ) : pages.length === 0 ? (
-        <p className="empty-inline">No status pages yet.</p>
+        <div className="state state--empty">
+          <p>No status pages yet. Group monitors into a public page your users can bookmark.</p>
+          {canWrite && (
+            <AppLink className="button button--primary" href="/status-pages/new">
+              Add status page
+            </AppLink>
+          )}
+        </div>
       ) : (
         <div className="status-page-list">
           {pages.map((page) => (
@@ -107,7 +127,7 @@ export function StatusPagesIndex() {
               <AppLink className="status-page-list__details" href={`/status-pages/${page.id}`}>
                 <strong>{page.title}</strong>
                 <span>{page.monitorCount} monitors</span>
-                <small>Updated {new Date(page.updatedAt).toLocaleString()}</small>
+                <small>Updated {formatUtcDateTime(page.updatedAt)}</small>
               </AppLink>
               <a
                 className="status-page-list__external"

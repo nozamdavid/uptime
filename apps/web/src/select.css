@@ -1,0 +1,370 @@
+@import "./tokens.css";
+
+.ut-popover-anchor {
+  position: relative;
+  display: inline-grid;
+  width: 100%;
+}
+
+.ut-select {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--control-md);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  box-shadow: var(--shadow-control);
+  color: var(--ink);
+  font: var(--text-body-sm-weight) var(--text-body-sm-size) / var(--text-body-sm-line-height) var(--font-body);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-micro),
+    box-shadow var(--dur-micro),
+    background-color var(--dur-micro);
+}
+
+.ut-select:hover:not(:disabled),
+.ut-select.is-hover:not(:disabled) {
+  border-color: var(--ink-soft);
+}
+
+.ut-select:focus-visible {
+  outline: none;
+}
+
+/* The ring is a keyboard cue. After a pointer press or pick, focus returns to
+   the trigger by script and some browsers would show it; data-pointer-focus
+   (cleared on the next key or blur) holds it back. */
+.ut-select:focus-visible:not([data-pointer-focus]),
+.ut-select[aria-expanded="true"],
+.ut-select.is-open {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 0 0 var(--space-1) var(--focus-halo);
+}
+
+.ut-select:focus:not(:focus-visible):not([aria-expanded="true"]) {
+  outline: none;
+}
+
+.ut-select:disabled {
+  border-color: var(--rule);
+  background: var(--sunken);
+  box-shadow: none;
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.ut-select__value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ut-select__placeholder {
+  color: var(--muted);
+}
+
+.ut-select__prefix {
+  margin-right: var(--space-3xs);
+  color: var(--muted);
+  font-weight: var(--text-body-sm-weight);
+}
+
+.ut-select__lead {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+}
+
+.ut-select__count {
+  flex: none;
+  padding: 0 calc(var(--space-1) * 1.5);
+  border-radius: var(--radius-full);
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--text-label-size);
+  line-height: var(--text-body-sm-line-height);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--text-label-weight);
+}
+
+.ut-select__chevron {
+  flex: none;
+  color: var(--muted);
+  transition: transform var(--dur-micro);
+}
+
+.ut-select[aria-expanded="true"] .ut-select__chevron,
+.ut-select.is-open .ut-select__chevron {
+  color: var(--accent);
+}
+
+.ut-select--sm {
+  width: auto;
+  height: var(--control-sm);
+  padding: 0 calc(var(--space-1) * 1.5) 0 calc(var(--space-2) + var(--space-1) / 2);
+  font-size: var(--text-data-size);
+}
+
+/* Open menu */
+.ut-menu {
+  --ut-menu-pad: var(--space-1);
+
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  z-index: var(--z-modal);
+  display: grid;
+  gap: 1px;
+  box-sizing: border-box;
+  min-width: 100%;
+  max-width: 360px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: var(--ut-menu-pad);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-overlay);
+  transform-origin: top left;
+  animation: ut-pop var(--dur-micro) var(--ease-out);
+}
+
+.ut-menu--flip {
+  top: auto;
+  bottom: calc(100% + var(--space-1));
+  transform-origin: bottom left;
+  animation: ut-pop-flip var(--dur-micro) var(--ease-out);
+}
+
+@keyframes ut-pop {
+  from {
+    opacity: 0;
+    transform: translateY(calc(var(--space-1) * -1)) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes ut-pop-flip {
+  from {
+    opacity: 0;
+    transform: translateY(var(--space-1)) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ut-menu,
+  .ut-menu--flip {
+    animation: none;
+  }
+}
+
+.ut-menu__search {
+  position: sticky;
+  top: calc(var(--ut-menu-pad) * -1);
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-md);
+  margin: calc(var(--ut-menu-pad) * -1) calc(var(--ut-menu-pad) * -1) var(--ut-menu-pad);
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.ut-menu__search input {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink);
+  font: var(--text-body-sm-weight) var(--text-body-sm-size) / var(--text-body-sm-line-height) var(--font-body);
+  outline: none;
+}
+
+.ut-menu__search input:focus {
+  border: 0;
+  box-shadow: none;
+}
+
+.ut-menu__group {
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  color: var(--muted);
+  font-size: var(--text-label-size);
+  line-height: var(--text-label-line-height);
+  font-weight: var(--text-heading-weight);
+}
+
+.ut-menu__sep {
+  height: 1px;
+  margin: var(--ut-menu-pad) calc(var(--ut-menu-pad) * -1);
+  background: var(--rule);
+}
+
+.ut-option {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--space-2) + var(--space-1) / 2);
+  min-height: var(--option);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--ink-soft);
+  font-size: var(--text-body-sm-size);
+  line-height: var(--text-body-sm-line-height);
+  cursor: pointer;
+  user-select: none;
+}
+
+.ut-option:hover,
+.ut-option[data-active="true"],
+.ut-option.is-hover {
+  background: var(--sunken);
+  color: var(--ink);
+}
+
+.ut-option[aria-selected="true"] {
+  color: var(--ink);
+  font-weight: var(--text-label-weight);
+}
+
+.ut-menu--single .ut-option[aria-selected="true"] {
+  background: var(--accent-tint);
+}
+
+.ut-option__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ut-option__meta {
+  margin-left: auto;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-label-size);
+  font-weight: var(--text-body-sm-weight);
+  font-variant-numeric: tabular-nums;
+}
+
+.ut-option__check {
+  visibility: hidden;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  color: var(--accent);
+}
+
+.ut-option[aria-selected="true"] .ut-option__check {
+  visibility: visible;
+}
+
+.ut-option[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ut-option__code {
+  width: calc(var(--space-12) - var(--space-1));
+  flex: none;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-label-size);
+}
+
+/* Checkbox for multi-select */
+.ut-checkbox {
+  display: grid;
+  place-items: center;
+  flex: none;
+  box-sizing: border-box;
+  width: var(--space-4);
+  height: var(--space-4);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow-inset);
+  color: var(--on-accent);
+}
+
+.ut-checkbox svg {
+  visibility: hidden;
+  width: var(--space-3);
+  height: var(--space-3);
+  stroke-width: 2;
+}
+
+.ut-option[aria-selected="true"] .ut-checkbox,
+.ut-checkbox.is-checked {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: inset 0 1px 0 var(--control-highlight);
+}
+
+.ut-option[aria-selected="true"] .ut-checkbox svg,
+.ut-checkbox.is-checked svg {
+  visibility: visible;
+}
+
+.ut-menu__footer {
+  position: sticky;
+  bottom: calc(var(--ut-menu-pad) * -1);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: var(--ut-menu-pad) calc(var(--ut-menu-pad) * -1) calc(var(--ut-menu-pad) * -1);
+  padding: calc(var(--space-1) * 1.5) calc(var(--space-1) * 1.5) calc(var(--space-1) * 1.5) var(--space-3);
+  border-top: 1px solid var(--rule);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--text-data-size);
+}
+
+.ut-menu__empty {
+  padding: var(--space-3) var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-body-sm-size);
+}
+
+@media (pointer: coarse) {
+  .ut-select {
+    height: var(--control-touch);
+    font-size: var(--text-body-size);
+  }
+
+  .ut-menu__search input {
+    font-size: var(--text-body-size);
+  }
+
+  .ut-option {
+    min-height: var(--control-touch);
+  }
+}

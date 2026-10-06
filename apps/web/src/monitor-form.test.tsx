@@ -183,6 +183,7 @@ describe('nine-region monitor form', () => {
     await act(async () => {
       root.render(
         createElement(DeleteHistoryDialog, {
+          name: 'All regions',
           onCancel: () => undefined,
           onConfirm,
         }),
@@ -191,14 +192,14 @@ describe('nine-region monitor form', () => {
 
     const input = container.querySelector<HTMLInputElement>('input')!;
     const deleteButton = [...container.querySelectorAll<HTMLButtonElement>('button')].find(
-      (button) => button.textContent === 'Delete all history',
+      (button) => button.textContent === 'Delete history',
     )!;
     expect(deleteButton.disabled).toBe(true);
 
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(
         input,
-        'DELETE',
+        'All regions',
       );
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
@@ -816,7 +817,7 @@ describe('nine-region monitor form', () => {
     expect(markup).toContain('Europe');
     expect(markup).toContain('Asia');
     expect(markup.match(/type="checkbox"/g) ?? []).toHaveLength(12);
-    expect(markup).toContain('Outage notifications');
+    expect(markup).toContain('Notifications');
     expect(markup).toContain('Failed checks before outage');
     expect(markup).toContain('Healthy checks before recovery');
     expect(markup).toContain('Repeat notifications while down');

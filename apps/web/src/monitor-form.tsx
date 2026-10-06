@@ -27,6 +27,7 @@ import {
   expectedDnsSnapshotsPerDay,
   intervalSecondsForSliderIndex,
 } from './monitor-form.logic.js';
+import './monitor-design.css';
 
 interface Props {
   monitor?: MonitorCreate & { id?: string; badge?: Badge | null | undefined };
@@ -407,6 +408,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
         </div>
       </div>
       <form className="monitor-form" onSubmit={submit} noValidate>
+        <h2 className="ut-heading">Target</h2>
         <label className="field">
           <span>
             Monitoring URL <b aria-hidden="true">*</b>
@@ -493,49 +495,42 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
           <legend>
             Regions <b aria-hidden="true">*</b>
           </legend>
-          <div className="region-groups">
-            {continentIds.map((continentId) => {
-              const continentRegions = regionsForForm.filter(
-                (region) => region.continentId === continentId,
-              );
-              return continentRegions.length > 0 ? (
-                <section
-                  key={continentId}
-                  className="region-group"
-                  aria-label={continentLabels[continentId]}
-                >
-                  <h2>{continentLabels[continentId]}</h2>
-                  <div className="region-options">
-                    {continentRegions.map((region) => (
-                      <label key={region.id} className="region-option">
-                        <input
-                          type="checkbox"
-                          value={region.id}
-                          checked={value.regionIds.includes(region.id)}
-                          onChange={() => toggle(region.id)}
-                          disabled={
-                            busy ||
-                            (hostedFree &&
-                              !value.regionIds.includes(region.id) &&
-                              value.regionIds.length >= maxRegionsPerMonitor)
-                          }
-                        />
-                        <span>
-                          <strong>{region.label}</strong>
-                          <small>
-                            {region.approximateAnchor} · {region.placementRegion}
-                            {unavailableSelectedRegionIds.includes(region.id)
-                              ? ' · unavailable for this workspace'
-                              : ''}
-                          </small>
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                </section>
-              ) : null;
-            })}
+          <div className="region-groups ut-region-tiles">
+            {regionsForForm.map((region) => (
+              <label
+                key={region.id}
+                className={`region-option ut-region-tile ${value.regionIds.includes(region.id) ? "ut-region-tile--selected" : ""}`}
+              >
+                <input
+                  type="checkbox"
+                  value={region.id}
+                  checked={value.regionIds.includes(region.id)}
+                  onChange={() => toggle(region.id)}
+                  disabled={
+                    busy ||
+                    (hostedFree &&
+                      !value.regionIds.includes(region.id) &&
+                      value.regionIds.length >= maxRegionsPerMonitor)
+                  }
+                />
+                <span>
+                  <strong>{region.label}</strong>
+                  <small>
+                    {continentLabels[region.continentId]} · {region.approximateAnchor} · {region.placementRegion}
+                    {unavailableSelectedRegionIds.includes(region.id)
+                      ? " · unavailable for this workspace"
+                      : ""}
+                  </small>
+                </span>
+              </label>
+            ))}
           </div>
+          {hostedFree && value.regionIds.length >= maxRegionsPerMonitor && (
+            <p className="ut-field__hint">
+              This workspace allows up to {maxRegionsPerMonitor} regions per monitor. Remove a
+              selected region to choose another.
+            </p>
+          )}
           {touched.regionIds && value.regionIds.length === 0 && (
             <p className="field-error">Select at least one region before saving.</p>
           )}
@@ -554,6 +549,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
             </p>
           )}
         </fieldset>
+        <h2 className="ut-heading">Schedule</h2>
         <div className="form-grid">
           <label className="field frequency-field">
             <span className="frequency-field__heading">
@@ -615,7 +611,9 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
             <small className={touched.timeoutMs && timeoutError ? 'field-error' : ''}>
               {touched.timeoutMs && timeoutError
                 ? timeoutError
-                : 'Between 1 and 30 seconds, and shorter than the interval.'}
+                : hostedFree
+                  ? 'The Free plan fixes the request timeout at 10 seconds or the saved lower value.'
+                  : 'Between 1 and 30 seconds, and shorter than the interval.'}
             </small>
           </label>
         </div>
@@ -629,7 +627,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
           </p>
         </aside>
         <fieldset className="diagnostic-option uptime-thresholds">
-          <legend>Uptime color thresholds</legend>
+          <legend>Uptime thresholds</legend>
           <p className="notification-rules__intro">
             Set the percentage bands used in uptime history. Values above green and light green use
             those colors; orange includes its boundary; lower values are red.
@@ -677,6 +675,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
             <span>
               <strong>Collect DNS diagnostics</strong>
               <small id="dns-diagnostics-help">
+                {hostedFree && 'DNS diagnostics are unavailable on the Free plan. '}
                 Captures DNS candidates for the final hostname at most once per day in each selected
                 region. Candidates may differ from the IP used by HTTP; this is not traceroute.
               </small>
@@ -695,7 +694,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
           )}
         </fieldset>
         <fieldset className="diagnostic-option notification-rules">
-          <legend>Outage notifications</legend>
+          <legend>Notifications</legend>
           <p className="notification-rules__intro">
             A check counts as failed when any region returns a failure. Recovery requires every
             configured region to return success. A round with missing results and no reported
@@ -751,6 +750,11 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
             </div>
           )}
           <div className="form-grid notification-thresholds">
+            {hostedFree && (
+              <p className="ut-field__hint">
+                The Free plan fixes outage and recovery thresholds and disables repeat notifications.
+              </p>
+            )}
             {(
               [
                 ['outageThreshold', 'Failed checks before outage', 2],
@@ -874,12 +878,15 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
             </div>
             <button
               type="button"
-              className="button button--danger"
+              className="button button--secondary ut-btn ut-btn--secondary"
               disabled={hostedFree || busy}
               onClick={() => setHistoryDeleteOpen(true)}
             >
               Delete all history
             </button>
+            {hostedFree && (
+              <p className="ut-field__hint">History deletion is unavailable on the Free plan.</p>
+            )}
           </section>
         )}
         {error && (
@@ -923,6 +930,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
       </form>
       {historyDeleteOpen && monitor?.id && (
         <DeleteHistoryDialog
+          name={monitor.name ?? monitor.url}
           onCancel={() => setHistoryDeleteOpen(false)}
           onConfirm={async () => {
             await api.deleteMonitorHistory(monitor.id!);
@@ -937,9 +945,11 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
 }
 
 export function DeleteHistoryDialog({
+  name,
   onCancel,
   onConfirm,
 }: {
+  name: string;
   onCancel: () => void;
   onConfirm: () => Promise<void>;
 }) {
@@ -965,7 +975,7 @@ export function DeleteHistoryDialog({
         method="dialog"
         onSubmit={(event) => {
           event.preventDefault();
-          if (typed !== 'DELETE' || busy) return;
+          if (typed !== name || busy) return;
           setBusy(true);
           setError('');
           void onConfirm()
@@ -975,10 +985,11 @@ export function DeleteHistoryDialog({
             .finally(() => setBusy(false));
         }}
       >
-        <h2 id="delete-history-title">Delete all monitor history?</h2>
+        <h2 id="delete-history-title">Delete history for {name}?</h2>
         <p>
-          This cannot be undone. The monitor and its settings will remain, and a fresh check will be
-          scheduled. Type DELETE to continue.
+          This permanently removes stored uptime, latency, request, DNS diagnostic, and notification
+          delivery history. The monitor and its settings remain, and a fresh check will be scheduled.
+          Type {name} to continue.
         </p>
         <label className="field">
           <span>Confirmation</span>
@@ -996,11 +1007,11 @@ export function DeleteHistoryDialog({
           </p>
         )}
         <div className="form-actions">
-          <button type="button" className="button button--quiet" disabled={busy} onClick={onCancel}>
+          <button type="button" className="button button--secondary ut-btn ut-btn--secondary" disabled={busy} onClick={onCancel}>
             Cancel
           </button>
-          <button className="button button--danger" disabled={typed !== 'DELETE' || busy}>
-            {busy ? 'Deleting history…' : 'Delete all history'}
+          <button className="button button--danger ut-btn ut-btn--danger" disabled={typed !== name || busy}>
+            {busy ? 'Deleting history…' : 'Delete history'}
           </button>
         </div>
       </form>

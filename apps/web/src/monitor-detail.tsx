@@ -23,12 +23,14 @@ import {
 import * as apiModule from './api.js';
 import { useProductSession } from './product-shell.js';
 import { EndpointEvidence, summarizeEndpointEvidence } from './endpoint-evidence.js';
-import { MonitorForm } from './monitor-form.js';
+import { DeleteHistoryDialog, MonitorForm } from './monitor-form.js';
 import { MonitorBadge } from './monitor-badge.js';
 import { monitorDisplayName } from './monitor-format.js';
+import { Select } from './select.js';
 import { assessLatencySampling, formatAge } from './reports.js';
 import { formatLatency, formatPercentage } from './status-page-format.js';
 import { UptimeStrip, uptimeSeverity } from './uptime-strip.js';
+import './monitor-design.css';
 
 const ranges = ['1h', '24h', '7d', '30d'] as const;
 export type LatencyRange = (typeof ranges)[number];
@@ -74,6 +76,92 @@ export function monitorHostname(value: string) {
 export function showsPrivateMonitorData(publicMode: boolean) {
   return !publicMode;
 }
+
+const registryRegions: Array<{
+  id: RegionId;
+  code: string;
+  name: string;
+}> = [
+  { id: 'us-east', code: 'US-E', name: 'US East' },
+  { id: 'us-west', code: 'US-W', name: 'US West' },
+  { id: 'canada-central', code: 'CA-C', name: 'Canada Central' },
+  { id: 'eu-west', code: 'EU-W', name: 'EU West' },
+  { id: 'eu-north', code: 'EU-N', name: 'EU North' },
+  { id: 'eu-south', code: 'EU-S', name: 'EU South' },
+  { id: 'asia', code: 'AS-SE', name: 'Asia SE' },
+  { id: 'asia-east', code: 'AS-NE', name: 'Asia East' },
+  { id: 'asia-south', code: 'AS-S', name: 'Asia South' },
+];
+
+export function RegionGrid({
+  monitorRegions,
+  latestByRegion,
+}: {
+  monitorRegions: readonly RegionId[];
+  latestByRegion: Partial<
+    Record<
+      RegionId,
+      {
+        success: boolean;
+        responseMs?: number | null;
+        errorCode?: string | null;
+        errorDetail?: string | null;
+      } | null
+    >
+  >;
+}) {
+  return (
+    <section className="ut-panel" aria-label="Region health grid">
+      <div className="ut-panel__head">
+        <h2 className="ut-heading" style={{ margin: 0 }}>Regions now</h2>
+      </div>
+      <div className="ut-regions">
+        {registryRegions.map((reg) => {
+          const isSelected = monitorRegions.includes(reg.id);
+          const obs = isSelected ? latestByRegion[reg.id] : null;
+          const status = !isSelected
+            ? 'unknown'
+            : !obs
+              ? 'unknown'
+              : obs.success
+                ? 'up'
+                : 'down';
+          const latencyText = !isSelected
+            ? 'Not selected'
+            : !obs
+              ? 'No data'
+              : obs.success
+                ? typeof obs.responseMs === 'number'
+                  ? `${Math.round(obs.responseMs)} ms`
+                  : 'Up'
+                : obs.errorCode || obs.errorDetail || 'Down';
+
+          return (
+            <div key={reg.id} className="ut-region ut-region-cell">
+              <div className="ut-region__top ut-region-cell__head">
+                <span className="ut-label">{reg.code}</span>
+                <i
+                  className={`ut-glyph ut-glyph--${status}`}
+                  title={`${reg.name}: ${status === 'unknown' ? (isSelected ? 'No data' : 'Not selected') : status}`}
+                  aria-hidden="true"
+                />
+              </div>
+              <span
+                className={`ut-region__value ut-figure ${status === 'down' ? 'ut-status--down' : ''}`}
+              >
+                {latencyText}
+              </span>
+              <span className="ut-region__name ut-region-cell__sub">
+                {reg.name}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 export function MonitorDetail({
   monitorId,
   publicMode = false,
@@ -113,12 +201,15 @@ export function MonitorDetail({
   const dnsGeneration = useRef(0);
   const [edit, setEdit] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteHistoryOpen, setDeleteHistoryOpen] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
   const monitorDnsDiagnosticsEnabled = Boolean(
     data &&
     'dnsDiagnosticsEnabled' in data.summary.monitor &&
     data.summary.monitor.dnsDiagnosticsEnabled,
   );
   const load = () => setReload((value) => value + 1);
+
   useEffect(() => {
     let active = true;
     observationGeneration.current += 1;
@@ -158,6 +249,7 @@ export function MonitorDetail({
       active = false;
     };
   }, [monitorId, publicMode, reload, range]);
+
   useEffect(() => {
     if (!autoRefresh || (error && !data)) return;
     let active = true;
@@ -170,6 +262,7 @@ export function MonitorDetail({
       window.clearTimeout(timer);
     };
   }, [autoRefresh, monitorId, publicMode, range, reload, Boolean(error && !data)]);
+
   useEffect(() => {
     dnsGeneration.current += 1;
     if (!showsPrivateMonitorData(publicMode)) return;
@@ -204,6 +297,7 @@ export function MonitorDetail({
       active = false;
     };
   }, [monitorDnsDiagnosticsEnabled, dnsRange, dnsRegion, dnsReload, monitorId, publicMode]);
+
   if (edit && data && 'dnsDiagnosticsEnabled' in data.summary.monitor)
     return (
       <MonitorForm
@@ -216,12 +310,13 @@ export function MonitorDetail({
         onHistoryDeleted={load}
       />
     );
+
   if (error && !data)
     return (
       <div className="state state--error" role="alert">
         <p>{error}</p>
         <button
-          className="button button--quiet"
+          className="button button--quiet ut-btn ut-btn--secondary"
           onClick={() => {
             setError('');
             load();
@@ -231,6 +326,7 @@ export function MonitorDetail({
         </button>
       </div>
     );
+
   if (!data || !observations)
     return publicMode ? (
       <MonitorDetailLoadingSkeleton />
@@ -239,6 +335,7 @@ export function MonitorDetail({
         <p>Loading monitor history…</p>
       </div>
     );
+
   const { monitor, status } = data.summary;
   const dnsDiagnosticsEnabled =
     'dnsDiagnosticsEnabled' in monitor ? monitor.dnsDiagnosticsEnabled : false;
@@ -256,10 +353,26 @@ export function MonitorDetail({
     Object.values(data.summary.latestByRegion),
     data.latency.points,
   );
+
+  const effectiveStatus = !monitor.enabled ? 'paused' : status;
+  const effectiveWord =
+    effectiveStatus === 'paused'
+      ? 'Paused'
+      : status === 'up'
+        ? 'Up'
+        : status === 'degraded'
+          ? 'Degraded'
+          : status === 'down'
+            ? 'Down'
+            : 'No data';
+
+  const publicUrl = `${window.location.origin}/monitors/public/${monitor.publicSlug ?? monitor.id}${workspaceSearch(session)}`;
+
   return (
     <section className="detail">
-      <div className="page-head">
-        <div>
+      {/* 1. Header */}
+      <div className="page-head ut-detail-header">
+        <div className="ut-stack">
           {publicMode && statusPageId ? (
             <AppLink href={`/status/${encodeURIComponent(statusPageId)}`} className="back-link">
               ← Back to status page
@@ -269,21 +382,42 @@ export function MonitorDetail({
               ← Monitors
             </AppLink>
           ) : null}
-          <p className="mono-label">
-            {status === 'unknown' ? 'AWAITING CURRENT RESULT' : status.toUpperCase()}
-          </p>
-          <h1>{monitorDisplayName(monitor)}</h1>
-          <MonitorBadge badge={monitor.badge} />
-          <p>
+
+          <div className="ut-row">
+            <span
+              className={`ut-status ut-status--chip ut-status--${effectiveStatus}`}
+              role="img"
+              aria-label={effectiveStatus}
+            >
+              <i className={`ut-glyph ut-glyph--${effectiveStatus}`} aria-hidden="true" />
+              <span>{effectiveWord}</span>
+            </span>
+            <MonitorBadge badge={monitor.badge} />
+          </div>
+
+          <h1 className="ut-display-lg" style={{ margin: 0 }}>
+            {monitorDisplayName(monitor)}
+          </h1>
+
+          <p className="ut-data ut-muted" style={{ margin: 0 }}>
             <a href={monitor.url} target="_blank" rel="noreferrer">
-              {monitorHostname(monitor.url)}
+              {monitor.url}
             </a>
           </p>
+
+          {!publicMode && monitor.isPublic && (
+            <p className="ut-data ut-muted" style={{ margin: 0 }}>
+              <a href={publicUrl} target="_blank" rel="noreferrer">
+                Public view
+              </a>
+            </p>
+          )}
         </div>
-        <div className="page-head__actions">
+
+        <div className="page-head__actions ut-detail-header__actions">
           <button
             type="button"
-            className="button button--quiet monitor-detail__refresh-toggle"
+            className="button button--quiet ut-btn ut-btn--secondary monitor-detail__refresh-toggle"
             aria-pressed={autoRefresh}
             onClick={() => setAutoRefresh((enabled) => !enabled)}
           >
@@ -291,21 +425,56 @@ export function MonitorDetail({
           </button>
           {!publicMode && canWrite && (
             <>
-              <button className="button button--quiet" onClick={() => setEdit(true)}>
+              <button
+                type="button"
+                className="button button--quiet ut-btn ut-btn--secondary"
+                onClick={() => setEdit(true)}
+              >
                 Edit
               </button>
-              <button className="button button--danger" onClick={() => setDeleteOpen(true)}>
-                Delete
+              <button
+                type="button"
+                className="button button--quiet ut-btn ut-btn--secondary"
+                onClick={() => {
+                  void api.updateMonitor(monitorId, { enabled: !monitor.enabled }).then(load);
+                }}
+              >
+                {monitor.enabled ? 'Pause' : 'Resume'}
+              </button>
+              <button
+                type="button"
+                className="button button--quiet ut-btn ut-btn--secondary"
+                onClick={() => {
+                  if (monitor.isPublic) {
+                    void navigator.clipboard?.writeText(publicUrl).then(() => {
+                      setShareCopied(true);
+                      setTimeout(() => setShareCopied(false), 2000);
+                    });
+                  } else {
+                    setEdit(true);
+                  }
+                }}
+              >
+                {shareCopied ? 'Link copied' : 'Share'}
               </button>
             </>
           )}
         </div>
       </div>
+
       {error && (
-        <p className="field-error" role="status">
+        <p className="field-error ut-field__error" role="status">
           Latest refresh failed: {error}
         </p>
       )}
+
+      {/* 2. Now: 3x3 RegionGrid */}
+      <RegionGrid
+        monitorRegions={monitor.regionIds}
+        latestByRegion={data.summary.latestByRegion}
+      />
+
+      {/* 3. History: 90-day UptimeStrip & LatencyTrace */}
       <MonitorUptimeOverview
         uptime={data.uptime}
         monitorName={monitorDisplayName(monitor)}
@@ -314,22 +483,25 @@ export function MonitorDetail({
         enabled={monitor.enabled}
         thresholds={monitor.uptimeThresholds}
       />
-      {!publicMode && monitor.isPublic && (
-        <PublicShareLink monitorId={monitorId} publicSlug={monitor.publicSlug} />
-      )}
-      <div className="range-tabs" role="tablist" aria-label="Latency time range">
+
+      <div
+        className="range-tabs ut-row"
+        role="tablist"
+        aria-label="Latency time range"
+      >
         {ranges.map((item) => (
           <button
             key={item}
             role="tab"
             aria-selected={range === item}
-            className={range === item ? 'is-active' : ''}
+            className={`ut-btn ut-btn--secondary ut-btn--sm ${range === item ? 'is-active' : ''}`}
             onClick={() => setRange(item)}
           >
             {item}
           </button>
         ))}
       </div>
+
       {!data.latency.pending && <LatencySampleNote data={data.latency} />}
       {latestResultState.kind === 'partial' && (
         <p className="gap-note" role="status">
@@ -342,16 +514,17 @@ export function MonitorDetail({
           Awaiting first current result.
         </p>
       )}
+
       {data.latency.pending ? (
         <LatencyLoadingSkeleton />
       ) : (
         <>
           <ResponseLatencyChart data={data} chartRegions={chartRegions} range={range} />
-          <section className="stat-strip">
+          <section className="stat-strip ut-row">
             {data.latency.stats.map((stat) => (
-              <div key={stat.regionId}>
-                <span>{regionName(stat.regionId)}</span>
-                <dl className="region-stats tnum">
+              <div key={stat.regionId} style={{ flex: '1 1 120px' }}>
+                <span className="ut-label">{regionName(stat.regionId)}</span>
+                <dl className="region-stats tnum ut-data">
                   <div>
                     <dt>p50</dt>
                     <dd>{formatLatency(stat.p50Ms)}</dd>
@@ -365,7 +538,7 @@ export function MonitorDetail({
                     <dd>{formatLatency(stat.p99Ms)}</dd>
                   </div>
                 </dl>
-                <small>
+                <small className="ut-muted">
                   {stat.successCount}/{stat.sampleCount} successful requests
                 </small>
               </div>
@@ -373,6 +546,8 @@ export function MonitorDetail({
           </section>
         </>
       )}
+
+      {/* 4. Evidence: Request table & DNS diagnostics */}
       {showsPrivateMonitorData(publicMode) && (
         <RequestTable
           items={observations}
@@ -396,6 +571,7 @@ export function MonitorDetail({
           }}
         />
       )}
+
       {showsPrivateMonitorData(publicMode) && !hostedFree && (
         <DnsDiagnostics
           enabled={dnsDiagnosticsEnabled}
@@ -437,6 +613,48 @@ export function MonitorDetail({
           }}
         />
       )}
+
+      {/* 5. Danger zone */}
+      {showsPrivateMonitorData(publicMode) && canWrite && (
+        <section className="ut-danger-zone" aria-labelledby="danger-zone-title">
+          <h2 id="danger-zone-title" className="ut-danger-zone__title">
+            Danger zone
+          </h2>
+          <p className="ut-muted">
+            Irreversible actions for this monitor. Deleting history wipes telemetry; deleting the
+            monitor removes it entirely.
+          </p>
+          <div className="ut-danger-zone__actions">
+            <button
+              type="button"
+              className="button button--secondary ut-btn ut-btn--secondary"
+              onClick={() => setDeleteHistoryOpen(true)}
+            >
+              Delete history
+            </button>
+            <button
+              type="button"
+              className="button button--secondary ut-btn ut-btn--secondary"
+              onClick={() => setDeleteOpen(true)}
+            >
+              Delete monitor
+            </button>
+          </div>
+        </section>
+      )}
+
+      {showsPrivateMonitorData(publicMode) && canWrite && deleteHistoryOpen && (
+        <DeleteHistoryDialog
+          name={monitorDisplayName(monitor)}
+          onCancel={() => setDeleteHistoryOpen(false)}
+          onConfirm={async () => {
+            await api.deleteMonitorHistory(monitorId);
+            setDeleteHistoryOpen(false);
+            load();
+          }}
+        />
+      )}
+
       {showsPrivateMonitorData(publicMode) && canWrite && deleteOpen && (
         <DeleteDialog
           name={monitor.name ?? monitor.url}
@@ -472,6 +690,7 @@ export function MonitorUptimeOverview({
     const timer = window.setInterval(() => setCurrentTime(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [enabled]);
+
   const firstDay = uptime.days.at(0)?.date;
   const lastDay = uptime.days.at(-1)?.date;
   const nextUpdate = enabled
@@ -479,18 +698,20 @@ export function MonitorUptimeOverview({
     : 'Next update paused';
   const displayStatus = uptime.recoveryStatus ?? uptime.status;
   const percentageSeverity = uptimeSeverity(uptime.uptimePercentage, thresholds);
+
   return (
-    <section className="monitor-uptime" aria-labelledby="monitor-uptime-title">
-      <div className="monitor-uptime__summary">
+    <section className="monitor-uptime ut-stack" aria-labelledby="monitor-uptime-title">
+      <div className="monitor-uptime__summary ut-row" style={{ justifyContent: 'space-between' }}>
         <div>
-          <p className="mono-label" id="monitor-uptime-title">
+          <p className="ut-label" id="monitor-uptime-title">
             90-day uptime
           </p>
-          <strong className={`monitor-uptime__value monitor-uptime__value--${percentageSeverity}`}>
+          <strong className={`ut-figure monitor-uptime__value monitor-uptime__value--${percentageSeverity}`}>
             {formatPercentage(uptime.uptimePercentage)}
           </strong>
         </div>
-        <span className={`monitor-uptime__state monitor-uptime__state--${displayStatus}`}>
+        <span className={`ut-status ut-status--chip ut-status--${displayStatus} monitor-uptime__state monitor-uptime__state--${displayStatus}`}>
+          <i className={`ut-glyph ut-glyph--${displayStatus}`} aria-hidden="true" />
           <span className={`status-dot status-dot--${displayStatus}`} />
           {displayStatus === 'up'
             ? 'Operational'
@@ -501,7 +722,7 @@ export function MonitorUptimeOverview({
                 : 'No data'}
         </span>
       </div>
-      <div className="monitor-uptime__timing tnum" aria-live="off">
+      <div className="monitor-uptime__timing tnum ut-data ut-muted ut-row" style={{ justifyContent: 'space-between' }} aria-live="off">
         <span>
           Last updated{' '}
           {lastUpdatedAt ? (
@@ -517,7 +738,7 @@ export function MonitorUptimeOverview({
         label={`${monitorName} daily uptime history`}
         thresholds={thresholds}
       />
-      <div className="monitor-uptime__range" aria-hidden="true">
+      <div className="monitor-uptime__range ut-strip__axis" aria-hidden="true">
         <span>{firstDay ? formatUptimeDate(firstDay) : '90 days ago'}</span>
         <span>{lastDay ? formatUptimeDate(lastDay) : 'Today'}</span>
       </div>
@@ -687,40 +908,6 @@ export function LatencySampleNote({
   );
 }
 
-function PublicShareLink({
-  monitorId,
-  publicSlug,
-}: {
-  monitorId: string;
-  publicSlug: string | null;
-}) {
-  const session = useProductSession();
-  const url = `${window.location.origin}/monitors/public/${publicSlug ?? monitorId}${workspaceSearch(session)}`;
-  const [copied, setCopied] = useState(false);
-  return (
-    <aside className="estimate estimate--secondary public-share" aria-label="Public share link">
-      <span className="mono-label">PUBLIC VIEW</span>
-      <a href={url} target="_blank" rel="noreferrer">
-        {url}
-      </a>
-      <div className="form-actions">
-        <button
-          type="button"
-          className="button button--quiet"
-          onClick={() => {
-            void navigator.clipboard?.writeText(url).then(() => setCopied(true));
-          }}
-        >
-          {copied ? 'Copied' : 'Copy link'}
-        </button>
-        <a className="button button--quiet" href={url} target="_blank" rel="noreferrer">
-          Open public view
-        </a>
-      </div>
-    </aside>
-  );
-}
-
 export function ResponseLatencyChart({
   data,
   chartRegions,
@@ -758,16 +945,16 @@ export function ResponseLatencyChart({
     : 'in the selected range';
   return (
     <Fragment>
-      <section className="chart-section">
-        <div className="chart-section__intro">
-          <div className="chart-section__title-row">
-            <h2>Response latency</h2>
-            <div className="chart-view-toggle" role="tablist" aria-label="Latency chart view">
+      <section className="chart-section ut-panel">
+        <div className="chart-section__intro ut-panel__head">
+          <div className="chart-section__title-row ut-row" style={{ justifyContent: 'space-between', width: '100%' }}>
+            <h2 className="ut-heading" style={{ margin: 0 }}>Response latency</h2>
+            <div className="chart-view-toggle ut-row" role="tablist" aria-label="Latency chart view">
               <button
                 type="button"
                 role="tab"
                 aria-selected={showingAggregate}
-                className={showingAggregate ? 'is-active' : ''}
+                className={`ut-btn ut-btn--secondary ut-btn--sm ${showingAggregate ? 'is-active' : ''}`}
                 onClick={() => setChartView('all')}
               >
                 All regions
@@ -776,164 +963,166 @@ export function ResponseLatencyChart({
                 type="button"
                 role="tab"
                 aria-selected={!showingAggregate}
-                className={!showingAggregate ? 'is-active' : ''}
+                className={`ut-btn ut-btn--secondary ut-btn--sm ${!showingAggregate ? 'is-active' : ''}`}
                 onClick={() => setChartView('regions')}
               >
                 Per-region
               </button>
             </div>
           </div>
-          <p>
+        </div>
+        <div className="ut-panel__body">
+          <p className="ut-muted" style={{ marginTop: 0, fontSize: 'var(--text-body-sm-size)' }}>
             {showingAggregate
               ? `Each point averages response-to-headers latency equally across regions, grouped every ${aggregateBucketLabel} ${rangeScope}.`
               : `Each point is the average response-to-headers latency for a region, grouped every ${regionalBucketLabel} ${rangeScope}.`}{' '}
             Missing buckets are not interpolated.
           </p>
-        </div>
-        <div
-          className="chart"
-          role="img"
-          aria-label={
-            showingAggregate
-              ? 'All-region average response latency chart'
-              : 'Regional response latency chart'
-          }
-        >
-          <ResponsiveContainer width="100%" height={280}>
-            <LineChart
-              data={showingAggregate ? aggregateChart : regionalChart}
-              margin={{ top: 8, right: 16, left: 0, bottom: 16 }}
-            >
-              <XAxis
-                dataKey="time"
-                stroke="var(--color-rule-strong)"
-                tick={{ fill: 'var(--color-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
-                tickFormatter={formatChartDate}
-                angle={-40}
-                textAnchor="end"
-                height={62}
-                minTickGap={24}
-                interval="preserveStartEnd"
-              />
-              <YAxis
-                unit=" ms"
-                stroke="var(--color-rule-strong)"
-                tick={{ fill: 'var(--color-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
-              />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: 'var(--color-paper)',
-                  borderColor: 'var(--color-rule-strong)',
-                  color: 'var(--color-ink)',
-                }}
-                cursor={{ stroke: 'var(--color-rule-strong)' }}
-                labelFormatter={formatChartTooltipDate}
-                formatter={formatResponseLatencyTooltip}
-              />
-              {showingAggregate ? (
-                <Line
-                  type="monotone"
-                  dataKey="responseMs"
-                  name="All regions average"
-                  stroke="var(--color-success)"
-                  strokeWidth={1.75}
-                  dot={false}
-                  connectNulls={false}
+          <div
+            className="chart"
+            role="img"
+            aria-label={
+              showingAggregate
+                ? 'All-region average response latency chart'
+                : 'Regional response latency chart'
+            }
+          >
+            <ResponsiveContainer width="100%" height={280}>
+              <LineChart
+                data={showingAggregate ? aggregateChart : regionalChart}
+                margin={{ top: 8, right: 16, left: 0, bottom: 16 }}
+              >
+                <XAxis
+                  dataKey="time"
+                  stroke="var(--rule-strong)"
+                  tick={{ fill: 'var(--muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
+                  tickFormatter={formatChartDate}
+                  angle={-40}
+                  textAnchor="end"
+                  height={62}
+                  minTickGap={24}
+                  interval="preserveStartEnd"
                 />
-              ) : (
-                chartRegions.map((region) => (
+                <YAxis
+                  unit=" ms"
+                  stroke="var(--rule-strong)"
+                  tick={{ fill: 'var(--muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
+                />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: 'var(--paper)',
+                    borderColor: 'var(--rule-strong)',
+                    color: 'var(--ink)',
+                  }}
+                  cursor={{ stroke: 'var(--rule-strong)' }}
+                  labelFormatter={formatChartTooltipDate}
+                  formatter={formatResponseLatencyTooltip}
+                />
+                {showingAggregate ? (
                   <Line
-                    key={region}
                     type="monotone"
-                    dataKey={region}
-                    name={regionName(region)}
-                    stroke={regionColour(region)}
-                    strokeWidth={1.5}
+                    dataKey="responseMs"
+                    name="All regions average"
+                    stroke="var(--up)"
+                    strokeWidth={1.75}
                     dot={false}
                     connectNulls={false}
-                    hide={hiddenChartRegions.has(region)}
                   />
-                ))
-              )}
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-        {showingAggregate && (
-          <dl className="latency-summary tnum" aria-label="All-region response time summary">
-            <div>
-              <dd>{formatLatency(aggregateStats.averageResponseMs)}</dd>
-              <dt>Avg. response time</dt>
-            </div>
-            <div>
-              <dd>{formatLatency(aggregateStats.maximumResponseMs)}</dd>
-              <dt>
-                Max. response time
-                {aggregateStats.maximumResponseRegionId
-                  ? ` (${aggregateStats.maximumResponseRegionId})`
-                  : ''}
-              </dt>
-            </div>
-            <div>
-              <dd>{formatLatency(aggregateStats.minimumResponseMs)}</dd>
-              <dt>Min. response time</dt>
-            </div>
-          </dl>
-        )}
-        <div className="sr-only">
-          <table>
-            <caption>
-              {showingAggregate
-                ? `Text alternative for the all-region average response latency chart. Each row is an equal-weight regional average, grouped every ${aggregateBucketLabel} in the selected range.`
-                : `Text alternative for the regional response latency chart. Each row is a per-region average, grouped every ${regionalBucketLabel} in the selected range.`}
-            </caption>
-            <thead>
-              <tr>
-                <th>Bucket</th>
-                {!showingAggregate && <th>Region</th>}
-                <th>Average response latency</th>
-                <th>Result</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(showingAggregate ? (data.latency.aggregatePoints ?? []) : data.latency.points).map(
-                (point) => (
-                  <tr key={`${point.observedAt}-${'regionId' in point ? point.regionId : 'all'}`}>
-                    <td>{new Date(point.observedAt).toLocaleString()}</td>
-                    {!showingAggregate &&
-                      'regionId' in point &&
-                      typeof point.regionId === 'string' && <td>{regionName(point.regionId)}</td>}
-                    <td>{formatLatency(point.responseMs)}</td>
-                    <td>{point.success ? 'Successful' : 'Failed'}</td>
-                  </tr>
-                ),
-              )}
-            </tbody>
-          </table>
-        </div>
-        {!showingAggregate && (
-          <div className="chart-legend">
-            {chartRegions.map((region) => (
-              <button
-                key={region}
-                type="button"
-                className={hiddenChartRegions.has(region) ? 'is-hidden' : ''}
-                aria-pressed={!hiddenChartRegions.has(region)}
-                aria-label={`${regionName(region)} response latency line`}
-                onClick={() =>
-                  setHiddenChartRegions((current) => {
-                    const next = new Set(current);
-                    if (next.has(region)) next.delete(region);
-                    else next.add(region);
-                    return next;
-                  })
-                }
-              >
-                <i aria-hidden="true" style={{ background: regionColour(region) }} />
-                {regionName(region)}
-              </button>
-            ))}
+                ) : (
+                  chartRegions.map((region) => (
+                    <Line
+                      key={region}
+                      type="monotone"
+                      dataKey={region}
+                      name={regionName(region)}
+                      stroke={regionColour(region)}
+                      strokeWidth={1.5}
+                      dot={false}
+                      connectNulls={false}
+                      hide={hiddenChartRegions.has(region)}
+                    />
+                  ))
+                )}
+              </LineChart>
+            </ResponsiveContainer>
           </div>
-        )}
+          {showingAggregate && (
+            <dl className="latency-summary tnum ut-data ut-row" style={{ gap: 'var(--space-6)', marginTop: 'var(--space-3)' }} aria-label="All-region response time summary">
+              <div>
+                <dd className="ut-figure">{formatLatency(aggregateStats.averageResponseMs)}</dd>
+                <dt className="ut-label">Avg. response time</dt>
+              </div>
+              <div>
+                <dd className="ut-figure">{formatLatency(aggregateStats.maximumResponseMs)}</dd>
+                <dt className="ut-label">
+                  Max. response time
+                  {aggregateStats.maximumResponseRegionId
+                    ? ` (${aggregateStats.maximumResponseRegionId})`
+                    : ''}
+                </dt>
+              </div>
+              <div>
+                <dd className="ut-figure">{formatLatency(aggregateStats.minimumResponseMs)}</dd>
+                <dt className="ut-label">Min. response time</dt>
+              </div>
+            </dl>
+          )}
+          <div className="sr-only">
+            <table>
+              <caption>
+                {showingAggregate
+                  ? `Text alternative for the all-region average response latency chart. Each row is an equal-weight regional average, grouped every ${aggregateBucketLabel} in the selected range.`
+                  : `Text alternative for the regional response latency chart. Each row is a per-region average, grouped every ${regionalBucketLabel} in the selected range.`}
+              </caption>
+              <thead>
+                <tr>
+                  <th>Bucket</th>
+                  {!showingAggregate && <th>Region</th>}
+                  <th>Average response latency</th>
+                  <th>Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(showingAggregate ? (data.latency.aggregatePoints ?? []) : data.latency.points).map(
+                  (point) => (
+                    <tr key={`${point.observedAt}-${'regionId' in point ? point.regionId : 'all'}`}>
+                      <td>{new Date(point.observedAt).toLocaleString()}</td>
+                      {!showingAggregate &&
+                        'regionId' in point &&
+                        typeof point.regionId === 'string' && <td>{regionName(point.regionId)}</td>}
+                      <td>{formatLatency(point.responseMs)}</td>
+                      <td>{point.success ? 'Successful' : 'Failed'}</td>
+                    </tr>
+                  ),
+                )}
+              </tbody>
+            </table>
+          </div>
+          {!showingAggregate && (
+            <div className="chart-legend ut-row" style={{ marginTop: 'var(--space-3)' }}>
+              {chartRegions.map((region) => (
+                <button
+                  key={region}
+                  type="button"
+                  className={`ut-btn ut-btn--secondary ut-btn--sm ${hiddenChartRegions.has(region) ? 'is-hidden' : ''}`}
+                  aria-pressed={!hiddenChartRegions.has(region)}
+                  aria-label={`${regionName(region)} response latency line`}
+                  onClick={() =>
+                    setHiddenChartRegions((current) => {
+                      const next = new Set(current);
+                      if (next.has(region)) next.delete(region);
+                      else next.add(region);
+                      return next;
+                    })
+                  }
+                >
+                  <i aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 2, background: regionColour(region), display: 'inline-block' }} />
+                  {regionName(region)}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </section>
       {!showingAggregate && <LatencyPercentileChart data={data} chartRegions={chartRegions} />}
     </Fragment>
@@ -957,88 +1146,92 @@ export function LatencyPercentileChart({
     : 'in this range';
   return (
     <section
-      className="chart-section percentile-chart-section"
+      className="chart-section percentile-chart-section ut-panel"
       aria-labelledby="latency-percentiles-title"
     >
-      <div>
-        <h2 id="latency-percentiles-title">Latency percentiles</h2>
-        <p>
-          Typical response latency by region. P50 is the midpoint; P95 and P99 show the slower end
-          of successful requests {percentileScope}.
-        </p>
+      <div className="ut-panel__head">
+        <div>
+          <h2 id="latency-percentiles-title" className="ut-heading" style={{ margin: 0 }}>Latency percentiles</h2>
+          <p className="ut-muted" style={{ margin: 0, fontSize: 'var(--text-body-sm-size)' }}>
+            Typical response latency by region. P50 is the midpoint; P95 and P99 show the slower end
+            of successful requests {percentileScope}.
+          </p>
+        </div>
       </div>
-      <div className="chart" role="img" aria-label="Regional latency percentiles bar chart">
-        <ResponsiveContainer width="100%" height={percentileChartHeight}>
-          <BarChart
-            data={percentileChart}
-            layout="vertical"
-            margin={{ top: 8, right: 16, left: 8, bottom: 8 }}
-          >
-            <XAxis
-              type="number"
-              unit=" ms"
-              stroke="var(--color-rule-strong)"
-              tick={{ fill: 'var(--color-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
-            />
-            <YAxis
-              dataKey="chartLabel"
-              type="category"
-              width={112}
-              interval={0}
-              stroke="var(--color-rule-strong)"
-              tick={{ fill: 'var(--color-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
-            />
-            <Tooltip
-              contentStyle={{
-                backgroundColor: 'var(--color-paper)',
-                borderColor: 'var(--color-rule-strong)',
-                color: 'var(--color-ink)',
-              }}
-              cursor={{ fill: 'var(--color-paper-muted)' }}
-              formatter={(value) => (typeof value === 'number' ? formatLatency(value) : '—')}
-            />
-            <Bar dataKey="p50Ms" name="P50 (median)" fill="var(--region-series-1)" />
-            <Bar dataKey="p95Ms" name="P95" fill="var(--region-series-2)" />
-            <Bar dataKey="p99Ms" name="P99" fill="var(--region-series-3)" />
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-      <div className="sr-only">
-        <table>
-          <caption>Text alternative for the regional latency percentiles bar chart</caption>
-          <thead>
-            <tr>
-              <th>Region</th>
-              <th>P50 median response latency</th>
-              <th>P95 response latency</th>
-              <th>P99 response latency</th>
-            </tr>
-          </thead>
-          <tbody>
-            {percentileChart.map((region) => (
-              <tr key={region.regionId}>
-                <td>{region.region}</td>
-                <td>{formatLatency(region.p50Ms)}</td>
-                <td>{formatLatency(region.p95Ms)}</td>
-                <td>{formatLatency(region.p99Ms)}</td>
+      <div className="ut-panel__body">
+        <div className="chart" role="img" aria-label="Regional latency percentiles bar chart">
+          <ResponsiveContainer width="100%" height={percentileChartHeight}>
+            <BarChart
+              data={percentileChart}
+              layout="vertical"
+              margin={{ top: 8, right: 16, left: 8, bottom: 8 }}
+            >
+              <XAxis
+                type="number"
+                unit=" ms"
+                stroke="var(--rule-strong)"
+                tick={{ fill: 'var(--muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
+              />
+              <YAxis
+                dataKey="chartLabel"
+                type="category"
+                width={112}
+                interval={0}
+                stroke="var(--rule-strong)"
+                tick={{ fill: 'var(--muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
+              />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: 'var(--paper)',
+                  borderColor: 'var(--rule-strong)',
+                  color: 'var(--ink)',
+                }}
+                cursor={{ fill: 'var(--sunken)' }}
+                formatter={(value) => (typeof value === 'number' ? formatLatency(value) : '—')}
+              />
+              <Bar dataKey="p50Ms" name="P50 (median)" fill="var(--series-1)" />
+              <Bar dataKey="p95Ms" name="P95" fill="var(--series-2)" />
+              <Bar dataKey="p99Ms" name="P99" fill="var(--series-3)" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="sr-only">
+          <table>
+            <caption>Text alternative for the regional latency percentiles bar chart</caption>
+            <thead>
+              <tr>
+                <th>Region</th>
+                <th>P50 median response latency</th>
+                <th>P95 response latency</th>
+                <th>P99 response latency</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="chart-legend percentile-chart-legend" aria-label="Latency percentile legend">
-        <span>
-          <i aria-hidden="true" className="percentile-chart-legend__p50" />
-          P50 (median)
-        </span>
-        <span>
-          <i aria-hidden="true" className="percentile-chart-legend__p95" />
-          P95
-        </span>
-        <span>
-          <i aria-hidden="true" className="percentile-chart-legend__p99" />
-          P99
-        </span>
+            </thead>
+            <tbody>
+              {percentileChart.map((region) => (
+                <tr key={region.regionId}>
+                  <td>{region.region}</td>
+                  <td>{formatLatency(region.p50Ms)}</td>
+                  <td>{formatLatency(region.p95Ms)}</td>
+                  <td>{formatLatency(region.p99Ms)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="chart-legend percentile-chart-legend ut-row" style={{ marginTop: 'var(--space-3)' }} aria-label="Latency percentile legend">
+          <span className="ut-row">
+            <i aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--series-1)', display: 'inline-block' }} />
+            P50 (median)
+          </span>
+          <span className="ut-row">
+            <i aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--series-2)', display: 'inline-block' }} />
+            P95
+          </span>
+          <span className="ut-row">
+            <i aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--series-3)', display: 'inline-block' }} />
+            P99
+          </span>
+        </div>
       </div>
     </section>
   );
@@ -1074,80 +1267,81 @@ export function DnsDiagnostics({
   onLoadMore: () => Promise<void>;
 }) {
   return (
-    <section className="history dns-history" aria-labelledby="dns-diagnostics-title">
-      <div>
-        <h2 id="dns-diagnostics-title">DNS diagnostics</h2>
-        <p>Daily DNS candidate snapshots are stored separately from latency and request history.</p>
-        <p className="history__evidence-note">
-          DNS candidates — not the connected HTTP peer. They help inspect DNS responses; they make
-          no geography claim.
-        </p>
+    <section className="history dns-history ut-panel" aria-labelledby="dns-diagnostics-title">
+      <div className="ut-panel__head">
+        <div>
+          <h2 id="dns-diagnostics-title" className="ut-heading" style={{ margin: 0 }}>DNS diagnostics</h2>
+          <p className="ut-muted" style={{ margin: 0 }}>Daily DNS candidate snapshots are stored separately from latency and request history.</p>
+          <p className="history__evidence-note ut-muted" style={{ fontSize: 'var(--text-body-sm-size)' }}>
+            DNS candidates — not the connected HTTP peer. They help inspect DNS responses; they make
+            no geography claim.
+          </p>
+        </div>
       </div>
-      {!enabled ? (
-        <p className="empty-inline">
-          DNS diagnostics are disabled for this monitor. Enable <em>Collect DNS diagnostics</em> in
-          monitor settings to capture one snapshot per day in each selected region.
-        </p>
-      ) : (
-        <>
-          <div className="diagnostic-filters" aria-label="DNS diagnostics filters">
-            <label className="field">
-              <span>History range</span>
-              <select
-                value={range}
-                onChange={(event) =>
-                  onRangeChange(event.target.value as (typeof dnsRanges)[number])
-                }
-              >
-                {dnsRanges.map((item) => (
-                  <option key={item} value={item}>
-                    Last {item}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Region</span>
-              <select
-                value={region}
-                onChange={(event) => onRegionChange(event.target.value as RegionId | 'all')}
-              >
-                <option value="all">All selected regions</option>
-                {monitorRegions.map((item) => (
-                  <option key={item} value={item}>
-                    {regionName(item)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          {error ? (
-            <div className="state state--error" role="alert">
-              <p>{error}</p>
-              <button className="button button--quiet" onClick={onRetry}>
-                Try again
-              </button>
+      <div className="ut-panel__body">
+        {!enabled ? (
+          <p className="empty-inline">
+            DNS diagnostics are disabled for this monitor. Enable <em>Collect DNS diagnostics</em> in
+            monitor settings to capture one snapshot per day in each selected region.
+          </p>
+        ) : (
+          <>
+            <div className="diagnostic-filters ut-row" aria-label="DNS diagnostics filters" style={{ marginBottom: 'var(--space-3)' }}>
+              <div className="field ut-field">
+                <label className="ut-label" htmlFor="dns-history-range">
+                  History range
+                </label>
+                <Select<(typeof dnsRanges)[number]>
+                  id="dns-history-range"
+                  value={range}
+                  onChange={onRangeChange}
+                  options={dnsRanges.map((item) => ({ value: item, label: `Last ${item}` }))}
+                />
+              </div>
+              <div className="field ut-field">
+                <label className="ut-label" htmlFor="dns-region">
+                  Region
+                </label>
+                <Select<RegionId | 'all'>
+                  id="dns-region"
+                  value={region}
+                  onChange={onRegionChange}
+                  options={[
+                    { value: 'all', label: 'All selected regions' },
+                    ...monitorRegions.map((item) => ({ value: item, label: regionName(item) })),
+                  ]}
+                />
+              </div>
             </div>
-          ) : loading || diagnostics === null ? (
-            <p className="state state--loading" role="status">
-              Loading DNS diagnostics…
-            </p>
-          ) : diagnostics.length === 0 ? (
-            <p className="empty-inline">No DNS diagnostics in this range.</p>
-          ) : (
-            <DnsDiagnosticsTable items={diagnostics} />
-          )}
-          {nextCursor && !error && (
-            <button
-              className="button button--quiet history__more"
-              disabled={loadingMore}
-              onClick={() => void onLoadMore()}
-            >
-              {loadingMore ? 'Loading…' : 'Load older DNS snapshots'}
-            </button>
-          )}
-        </>
-      )}
+            {error ? (
+              <div className="state state--error" role="alert">
+                <p>{error}</p>
+                <button className="button button--quiet ut-btn ut-btn--secondary" onClick={onRetry}>
+                  Try again
+                </button>
+              </div>
+            ) : loading || diagnostics === null ? (
+              <p className="state state--loading" role="status">
+                Loading DNS diagnostics…
+              </p>
+            ) : diagnostics.length === 0 ? (
+              <p className="empty-inline">No DNS diagnostics in this range.</p>
+            ) : (
+              <DnsDiagnosticsTable items={diagnostics} />
+            )}
+            {nextCursor && !error && (
+              <button
+                className="button button--quiet history__more ut-btn ut-btn--secondary"
+                disabled={loadingMore}
+                onClick={() => void onLoadMore()}
+                style={{ marginTop: 'var(--space-3)' }}
+              >
+                {loadingMore ? 'Loading…' : 'Load older DNS snapshots'}
+              </button>
+            )}
+          </>
+        )}
+      </div>
     </section>
   );
 }
@@ -1249,6 +1443,7 @@ function formatUtc(value: string) {
     ? 'Unknown'
     : parsed.toISOString().replace('.000Z', 'Z').replace('T', ' ');
 }
+
 export function toChart(data: MonitorLatencyData) {
   const byTime = new Map<string, Record<string, string | number | null>>();
   for (const point of data.latency.points) {
@@ -1263,6 +1458,7 @@ export function toChart(data: MonitorLatencyData) {
     String(left.time).localeCompare(String(right.time)),
   );
 }
+
 export function formatChartDate(value: string | number) {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return 'Unknown';
@@ -1275,6 +1471,7 @@ export function formatChartDate(value: string | number) {
     hourCycle: 'h23',
   }).format(parsed);
 }
+
 export function formatChartTooltipDate(value: ReactNode) {
   if (typeof value === 'string') {
     const parsed = new Date(value);
@@ -1294,10 +1491,12 @@ export function formatChartTooltipDate(value: ReactNode) {
   if (typeof value === 'number') return String(value);
   return '';
 }
+
 export function formatResponseLatencyTooltip(value: unknown) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
   return formatLatency(value);
 }
+
 export type LatestResultState =
   { kind: 'complete' | 'disabled' | 'awaiting' } | { kind: 'partial'; missing: RegionId[] };
 
@@ -1314,6 +1513,7 @@ export function getLatestResultState<T>(
   if (missing.length === monitorRegions.length) return { kind: 'awaiting' };
   return { kind: 'partial', missing };
 }
+
 export function toPercentileChart(data: MonitorLatencyData, chartRegions: readonly RegionId[]) {
   const statsByRegion = new Map(data.latency.stats.map((stat) => [stat.regionId, stat]));
   return chartRegions.map((regionId) => {
@@ -1328,9 +1528,11 @@ export function toPercentileChart(data: MonitorLatencyData, chartRegions: readon
     };
   });
 }
+
 function conciseRegionName(name: string) {
   return name.replace(/\s*\([^)]*\)$/, '');
 }
+
 export function RequestTable({
   items,
   hasMore,
@@ -1343,95 +1545,101 @@ export function RequestTable({
   onLoadMore: () => Promise<void>;
 }) {
   return (
-    <section className="history">
-      <div>
-        <h2>Exact requests</h2>
-        <p>Each stored observation is retained for 90 days.</p>
-        <p className="history__evidence-note">
-          Provider headers are response-reported evidence. Workers do not expose the actual
-          connected peer IP.
-        </p>
-      </div>
-      {items.length === 0 ? (
-        <p className="empty-inline">No observations in this range.</p>
-      ) : (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Started</th>
-                <th>Region</th>
-                <th>Result</th>
-                <th>Response</th>
-                <th>Total</th>
-                <th>HTTP</th>
-                <th>Error</th>
-                <th>Probe execution</th>
-                <th>Redirects / bytes</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item) => {
-                const evidence = summarizeEndpointEvidence(item);
-                const evidenceSummary = evidence.provider
-                  ? `${evidence.provider} · ${evidence.reportedEdge ?? 'edge unknown'}`
-                  : (evidence.finalHostname ?? 'No endpoint details reported');
-                return (
-                  <Fragment key={item.id}>
-                    <tr>
-                      <td data-label="Started">{new Date(item.startedAt).toLocaleString()}</td>
-                      <td data-label="Region">{regionName(item.regionId)}</td>
-                      <td data-label="Result">
-                        <span className={`result result--${item.success ? 'success' : 'failure'}`}>
-                          {item.status}
-                        </span>
-                      </td>
-                      <td data-label="Response" className="tnum">
-                        {formatLatency(item.responseMs)}
-                      </td>
-                      <td data-label="Total" className="tnum">
-                        {formatLatency(item.totalMs)}
-                      </td>
-                      <td data-label="HTTP">{item.httpStatus ?? '—'}</td>
-                      <td data-label="Error">
-                        {[item.errorCode, item.errorDetail].filter(Boolean).join(' · ') || '—'}
-                      </td>
-                      <td data-label="Probe execution">
-                        {[item.placement, item.colo].filter(Boolean).join(' / ') || '—'}
-                      </td>
-                      <td data-label="Redirects / bytes" className="tnum">
-                        {item.redirectCount ?? '—'} / {item.bodyBytes ?? '—'}
-                      </td>
-                    </tr>
-                    <tr className="history__evidence-row">
-                      <td colSpan={9} data-label="Endpoint evidence">
-                        <details className="history__evidence-disclosure">
-                          <summary>
-                            Endpoint evidence <span>{evidenceSummary}</span>
-                          </summary>
-                          <EndpointEvidence item={item} />
-                        </details>
-                      </td>
-                    </tr>
-                  </Fragment>
-                );
-              })}
-            </tbody>
-          </table>
+    <section className="history ut-panel">
+      <div className="ut-panel__head">
+        <div>
+          <h2 className="ut-heading" style={{ margin: 0 }}>Exact requests</h2>
+          <p className="ut-muted" style={{ margin: 0 }}>Each stored observation is retained for 90 days.</p>
+          <p className="history__evidence-note ut-muted" style={{ fontSize: 'var(--text-body-sm-size)' }}>
+            Provider headers are response-reported evidence. Workers do not expose the actual
+            connected peer IP.
+          </p>
         </div>
-      )}
-      {hasMore && (
-        <button
-          className="button button--quiet history__more"
-          disabled={loadingMore}
-          onClick={() => void onLoadMore()}
-        >
-          {loadingMore ? 'Loading…' : 'Load older requests'}
-        </button>
-      )}
+      </div>
+      <div className="ut-panel__body">
+        {items.length === 0 ? (
+          <p className="empty-inline">No observations in this range.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Started</th>
+                  <th>Region</th>
+                  <th>Result</th>
+                  <th>Response</th>
+                  <th>Total</th>
+                  <th>HTTP</th>
+                  <th>Error</th>
+                  <th>Probe execution</th>
+                  <th>Redirects / bytes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => {
+                  const evidence = summarizeEndpointEvidence(item);
+                  const evidenceSummary = evidence.provider
+                    ? `${evidence.provider} · ${evidence.reportedEdge ?? 'edge unknown'}`
+                    : (evidence.finalHostname ?? 'No endpoint details reported');
+                  return (
+                    <Fragment key={item.id}>
+                      <tr>
+                        <td data-label="Started">{new Date(item.startedAt).toLocaleString()}</td>
+                        <td data-label="Region">{regionName(item.regionId)}</td>
+                        <td data-label="Result">
+                          <span className={`result result--${item.success ? 'success' : 'failure'}`}>
+                            {item.status}
+                          </span>
+                        </td>
+                        <td data-label="Response" className="tnum">
+                          {formatLatency(item.responseMs)}
+                        </td>
+                        <td data-label="Total" className="tnum">
+                          {formatLatency(item.totalMs)}
+                        </td>
+                        <td data-label="HTTP">{item.httpStatus ?? '—'}</td>
+                        <td data-label="Error">
+                          {[item.errorCode, item.errorDetail].filter(Boolean).join(' · ') || '—'}
+                        </td>
+                        <td data-label="Probe execution">
+                          {[item.placement, item.colo].filter(Boolean).join(' / ') || '—'}
+                        </td>
+                        <td data-label="Redirects / bytes" className="tnum">
+                          {item.redirectCount ?? '—'} / {item.bodyBytes ?? '—'}
+                        </td>
+                      </tr>
+                      <tr className="history__evidence-row">
+                        <td colSpan={9} data-label="Endpoint evidence">
+                          <details className="history__evidence-disclosure">
+                            <summary>
+                              Endpoint evidence <span>{evidenceSummary}</span>
+                            </summary>
+                            <EndpointEvidence item={item} />
+                          </details>
+                        </td>
+                      </tr>
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {hasMore && (
+          <button
+            className="button button--quiet history__more ut-btn ut-btn--secondary"
+            disabled={loadingMore}
+            onClick={() => void onLoadMore()}
+            style={{ marginTop: 'var(--space-3)' }}
+          >
+            {loadingMore ? 'Loading…' : 'Load older requests'}
+          </button>
+        )}
+      </div>
     </section>
   );
 }
+
 function DeleteDialog({
   name,
   onCancel,
@@ -1449,7 +1657,7 @@ function DeleteDialog({
     return () => dialog.current?.close();
   }, []);
   return (
-    <dialog ref={dialog} className="confirm" onCancel={onCancel} aria-labelledby="delete-title">
+    <dialog ref={dialog} className="confirm ut-dialog" onCancel={onCancel} aria-labelledby="delete-title">
       <form
         method="dialog"
         onSubmit={(event) => {
@@ -1458,20 +1666,20 @@ function DeleteDialog({
           void onConfirm().finally(() => setBusy(false));
         }}
       >
-        <h2 id="delete-title">Delete monitor?</h2>
-        <p>
-          This permanently removes the monitor and its retained observations. Type the monitor name
-          to continue.
+        <h2 id="delete-title" className="ut-heading">Delete {name}?</h2>
+        <p className="ut-muted">
+          This permanently removes the monitor and its retained observations. Type {name} to
+          continue.
         </p>
-        <label className="field">
-          <span>Monitor name</span>
-          <input value={typed} onChange={(event) => setTyped(event.target.value)} />
+        <label className="field ut-field">
+          <span className="ut-label">Monitor name</span>
+          <input className="ut-input" value={typed} onChange={(event) => setTyped(event.target.value)} />
         </label>
-        <div className="form-actions">
-          <button type="button" className="button button--quiet" onClick={onCancel}>
+        <div className="form-actions ut-row" style={{ marginTop: 'var(--space-4)', justifyContent: 'flex-end' }}>
+          <button type="button" className="button button--secondary ut-btn ut-btn--secondary" onClick={onCancel}>
             Cancel
           </button>
-          <button className="button button--danger" disabled={typed !== name || busy}>
+          <button className="button button--danger ut-btn ut-btn--danger" disabled={typed !== name || busy}>
             {busy ? 'Deleting…' : 'Delete monitor'}
           </button>
         </div>
@@ -1479,6 +1687,7 @@ function DeleteDialog({
     </dialog>
   );
 }
+
 function orderedRegions(ids: readonly RegionId[]) {
   const selected = new Set(ids);
   return regionIds.filter((region) => selected.has(region));
@@ -1490,5 +1699,5 @@ function regionName(id: RegionId | string) {
 
 function regionColour(id: RegionId) {
   const token = findRegion(id)?.chartSeriesToken;
-  return token ? `var(${token})` : 'var(--color-muted)';
+  return token ? `var(${token})` : 'var(--muted)';
 }

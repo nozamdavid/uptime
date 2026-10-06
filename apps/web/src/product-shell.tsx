@@ -10,6 +10,7 @@ import { WorkspaceLimitsEditor, workspaceRegionNames } from './operator-quota-ed
 import { WorkspaceBillingPanel } from './workspace-billing-panel.js';
 import { WorkspaceCustomDomainsPanel } from './workspace-custom-domains-panel.js';
 import { formatBudgetForecast, formatWorkspaceDatabaseMetrics } from './format-usage.js';
+import './admin-views.css';
 
 export const ProductSessionContext = createContext<ProductSession | null>(null);
 export function useProductSession() {
@@ -521,7 +522,7 @@ export function OperatorPage() {
                   .finally(() => setSavingControls(false));
               }}
             >
-              <label className="operator-controls__admission">
+              <label className="operator-controls__admission ut-field">
                 <input
                   type="checkbox"
                   name="admissionOpen"
@@ -529,9 +530,10 @@ export function OperatorPage() {
                 />
                 <span>Admission {data.budget.admissionOpen ? 'open' : 'closed'}</span>
               </label>
-              <label>
-                External monthly cost (USD)
+              <label className="operator-controls__cost ut-field">
+                <span className="ut-field__label">External monthly cost (USD)</span>
                 <input
+                  className="ut-input ut-input--mono"
                   name="externalMonthlyCostUsd"
                   type="number"
                   min="0"
@@ -572,7 +574,9 @@ export function OperatorPage() {
           <article className="settings-card operator-budget">
             <details className="operator-collapsible">
               <summary>
-                <strong>Available database slots</strong>
+                <span className="operator-collapsible__title">
+                  <strong>Available database slots</strong>
+                </span>
                 <span className="operator-slots-badge">
                   {slots.availableSlots} of {slots.configuredSlots} available
                 </span>
@@ -604,9 +608,10 @@ export function OperatorPage() {
                     .finally(() => setSavingControls(false));
                 }}
               >
-                <label>
-                  Maximum active workspaces
+                <label className="operator-controls__capacity ut-field">
+                  <span className="ut-field__label">Maximum active workspaces</span>
                   <input
+                    className="ut-input ut-input--mono"
                     name="maxWorkspaces"
                     type="number"
                     min="0"
@@ -630,25 +635,29 @@ export function OperatorPage() {
                     key={slot.bindingName}
                     className={`operator-slot-card ${slot.status === 'assigned' ? 'is-assigned' : ''}`}
                   >
-                    <div>
-                      <strong>
-                        {slot.kind === 'legacy_import'
-                          ? 'Imported production monitors'
-                          : slot.kind === 'staging_import'
-                            ? 'Imported staging monitors'
-                            : slot.bindingName}
-                      </strong>
-                      <small>
-                        {slot.status === 'assigned'
-                          ? `Assigned to ${slot.ownerHandle ?? slot.workspaceId ?? 'workspace'}`
-                          : slot.status === 'deleting'
-                            ? 'Deleting'
-                            : slot.status === 'quarantined'
-                              ? 'Quarantined'
-                              : slot.admissionEnabled
-                                ? 'Available'
-                                : 'Held'}
-                      </small>
+                    <div className="operator-slot-card__identity">
+                      <div className="operator-slot-card__name">
+                        <strong>
+                          {slot.kind === 'legacy_import'
+                            ? 'Imported production monitors'
+                            : slot.kind === 'staging_import'
+                              ? 'Imported staging monitors'
+                              : slot.bindingName}
+                        </strong>
+                      </div>
+                      <div className="operator-slot-card__status">
+                        <small>
+                          {slot.status === 'assigned'
+                            ? `Assigned to ${slot.ownerHandle ?? slot.workspaceId ?? 'workspace'}`
+                            : slot.status === 'deleting'
+                              ? 'Deleting'
+                              : slot.status === 'quarantined'
+                                ? 'Quarantined'
+                                : slot.admissionEnabled
+                                  ? 'Available'
+                                  : 'Held'}
+                        </small>
+                      </div>
                     </div>
                     {!isImportedWorkspaceKind(slot.kind) &&
                       slot.status === 'available' &&

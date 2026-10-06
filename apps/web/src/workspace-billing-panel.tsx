@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { findRegion } from '@uptime/regions';
 import { api, formatPlanCents, isValidBillingRedirect } from './api.js';
+import { Select } from './select.js';
 import type {
   ImportedWorkspaceKind,
   PublicProductCatalog,
@@ -454,21 +455,19 @@ export function WorkspaceBillingPanel({
                 }}
               >
                 {catalog?.plans && (
-                  <select
+                  <Select
+                    aria-label="Plan"
                     value={selectedPlanId}
-                    onChange={(e) => setSelectedPlanId(e.target.value)}
+                    onChange={setSelectedPlanId}
                     disabled={actionBusy || isPendingReconciliation}
-                    className="select"
-                    style={{ minWidth: '180px' }}
-                  >
-                    {catalog.plans
+                    style={{ minWidth: '180px', width: 'auto' }}
+                    options={catalog.plans
                       .filter((p) => p.active)
-                      .map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name} ({formatPlanCents(p.price.amount)}/mo)
-                        </option>
-                      ))}
-                  </select>
+                      .map((p) => ({
+                        value: p.id,
+                        label: `${p.name} (${formatPlanCents(p.price.amount)}/mo)`,
+                      }))}
+                  />
                 )}
                 <button
                   type="button"

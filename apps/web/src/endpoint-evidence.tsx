@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { EndpointSignal, Observation } from '@uptime/contracts';
+import './monitor-design.css';
 
 const providerNames = {
   cloudflare: 'Cloudflare',

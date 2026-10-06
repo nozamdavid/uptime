@@ -3,6 +3,7 @@ import type { FormEvent } from 'react';
 import type { RegionDefinition, RegionId } from '@uptime/regions';
 import { api, deriveTierFeatures, formatPlanCents } from './api.js';
 import type { PlanDefinition, ProductCatalog } from './api.js';
+import { Select } from './select.js';
 import './operator-tier-catalog.css';
 
 interface OperatorTierCatalogProps {
@@ -481,22 +482,23 @@ export function OperatorTierCatalog({ availableRegions = [] }: OperatorTierCatal
               <span>Preview Catalog (Display preview disclaimer to customers)</span>
             </label>
 
-            <label className="field" htmlFor="catalog-billing-mode">
-              <span>Billing Mode</span>
-              <select
+            <div className="field ut-field operator-catalog__billing-mode">
+              <label className="ut-field__label" htmlFor="catalog-billing-mode">Billing mode</label>
+              <Select<'disabled' | 'mock' | 'stripe'>
                 id="catalog-billing-mode"
                 value={draftBillingMode}
                 disabled={saving}
-                onChange={(e) => {
-                  setDraftBillingMode(e.target.value as 'disabled' | 'mock' | 'stripe');
+                onChange={(next) => {
+                  setDraftBillingMode(next);
                   setSuccess(null);
                 }}
-              >
-                <option value="disabled">Disabled (No checkout)</option>
-                <option value="mock">Mock (Simulated billing)</option>
-                <option value="stripe">Stripe (Live payment gateway)</option>
-              </select>
-            </label>
+                options={[
+                  { value: 'disabled', label: 'Disabled (No checkout)' },
+                  { value: 'mock', label: 'Mock (Simulated billing)' },
+                  { value: 'stripe', label: 'Stripe (Live payment gateway)' },
+                ]}
+              />
+            </div>
           </div>
         </fieldset>
 
@@ -579,23 +581,24 @@ export function OperatorTierCatalog({ availableRegions = [] }: OperatorTierCatal
                           />
                         </label>
 
-                        <label className="field" htmlFor={`plan-currency-${plan.id}`}>
-                          <span>Currency</span>
-                          <select
+                        <div className="field">
+                          <label htmlFor={`plan-currency-${plan.id}`}>Currency</label>
+                          <Select<'usd' | 'eur'>
                             id={`plan-currency-${plan.id}`}
                             value={plan.price.currency}
                             disabled={saving}
-                            onChange={(e) =>
+                            onChange={(currency) =>
                               updatePlan(plan.id, (p) => ({
                                 ...p,
-                                price: { ...p.price, currency: e.target.value as 'usd' | 'eur' },
+                                price: { ...p.price, currency },
                               }))
                             }
-                          >
-                            <option value="usd">USD ($)</option>
-                            <option value="eur">EUR (€)</option>
-                          </select>
-                        </label>
+                            options={[
+                              { value: 'usd', label: 'USD ($)' },
+                              { value: 'eur', label: 'EUR (€)' },
+                            ]}
+                          />
+                        </div>
 
                         <label className="field" htmlFor={`plan-price-${plan.id}`}>
                           <span>Price (integer cents / month, e.g. 2900 = $29.00)</span>
@@ -851,11 +854,12 @@ export function OperatorTierCatalog({ availableRegions = [] }: OperatorTierCatal
         </section>
 
         <section className="operator-catalog__save-bar">
-          <label className="field field--full" htmlFor="catalog-reason">
-            <span>Change Reason (Audited &amp; Required)</span>
+          <label className="field field--full ut-field operator-catalog__reason" htmlFor="catalog-reason">
+            <span className="ut-field__label">Change reason</span>
             <input
               id="catalog-reason"
-              placeholder="e.g., Update pro tier quotas for Q3 release"
+              className="ut-input"
+              placeholder="Describe the catalog change"
               value={reason}
               maxLength={500}
               required
@@ -865,6 +869,7 @@ export function OperatorTierCatalog({ availableRegions = [] }: OperatorTierCatal
                 setSuccess(null);
               }}
             />
+            <small className="ut-field__hint">Required for the audit history.</small>
           </label>
 
           <div className="operator-catalog__actions">
@@ -873,7 +878,7 @@ export function OperatorTierCatalog({ availableRegions = [] }: OperatorTierCatal
               className="button button--primary"
               disabled={saving || !reason.trim()}
             >
-              {saving ? 'Saving catalog revision…' : 'Save Catalog Revision'}
+              {saving ? 'Saving catalog revision…' : 'Save catalog revision'}
             </button>
           </div>
         </section>

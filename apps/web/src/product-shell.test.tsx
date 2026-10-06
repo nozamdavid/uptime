@@ -1126,9 +1126,10 @@ describe('free product shell', () => {
       );
       await Promise.resolve();
     });
-    const option = view.container.querySelector<HTMLOptionElement>(
-      '.slot-assignment option[value="did:plc:operator"]',
+    await act(async () =>
+      view.container.querySelector<HTMLButtonElement>('.slot-assignment button.ut-select')!.click(),
     );
+    const option = view.container.querySelector('.slot-assignment [role="option"]');
     expect(option?.textContent).toBe('@noz.am');
     await view.cleanup();
   });

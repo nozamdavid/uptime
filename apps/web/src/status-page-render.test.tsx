@@ -8,13 +8,17 @@ const apiMock = vi.hoisted(() => ({
   statusPage: vi.fn(),
   updateStatusPage: vi.fn(),
   publicStatusPage: vi.fn(),
+  statusPages: vi.fn(),
 }));
 const navigateMock = vi.hoisted(() => vi.fn());
 
 vi.mock('./api.js', () => ({ api: apiMock }));
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => navigateMock }));
+vi.mock('@tanstack/react-router', () => ({
+  useNavigate: () => navigateMock,
+  useRouter: () => ({ navigate: navigateMock }),
+}));
 
-const { PublicStatusPage, StatusPageEditor } = await import('./status-pages.js');
+const { PublicStatusPage, StatusPageEditor, StatusPagesIndex } = await import('./status-pages.js');
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -508,6 +512,9 @@ describe('status page editor ordering', () => {
     );
     expect(sortButton).not.toBeNull();
     expect(container.querySelector('.status-page-editor__slug input')).not.toBeNull();
+    expect(container.querySelector('.status-page-editor__layout')).not.toBeNull();
+    expect(container.querySelector('.status-page-editor__groups')).not.toBeNull();
+    expect(container.querySelector('.status-page-editor__available')).not.toBeNull();
     expect(container.querySelectorAll('.status-monitor-editor[draggable="true"]')).toHaveLength(4);
     expect(container.querySelector('.status-monitor-editor .drag-handle[draggable]')).toBeNull();
     expect(container.querySelector('.status-group-editor .monitor-badge')?.textContent).toBe('API');
@@ -552,6 +559,58 @@ describe('status page editor ordering', () => {
         (item) => item.textContent,
       ),
     ).toEqual(['alpha', 'beta.example.test', 'Zulu']);
+
+    await cleanup();
+  });
+});
+
+describe('status pages index', () => {
+  it('renders single primary action on empty state', async () => {
+    apiMock.statusPages.mockResolvedValueOnce({
+      statusPages: [],
+    });
+    const { container, root, cleanup } = createTestRoot();
+
+    await act(async () => {
+      root.render(createElement(StatusPagesIndex));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const primaryButtons = container.querySelectorAll('.button--primary');
+    expect(primaryButtons).toHaveLength(1);
+    expect(primaryButtons[0]?.textContent).toBe('Add status page');
+
+    await cleanup();
+  });
+
+  it('formats updatedAt in UTC with explicit UTC label and maintains single primary button', async () => {
+    apiMock.statusPages.mockResolvedValueOnce({
+      statusPages: [
+        {
+          id: 'sp-1',
+          title: 'Main Status',
+          publicSlug: 'main',
+          monitorCount: 3,
+          updatedAt: '2026-09-16T10:00:00.000Z',
+        },
+      ],
+    });
+    const { container, root, cleanup } = createTestRoot();
+
+    await act(async () => {
+      root.render(createElement(StatusPagesIndex));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const rows = container.querySelectorAll('.status-page-list__row');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain('Updated 2026-09-16 10:00 UTC');
+
+    const primaryButtons = container.querySelectorAll('.button--primary');
+    expect(primaryButtons).toHaveLength(1);
+    expect(primaryButtons[0]?.textContent).toBe('Add status page');
 
     await cleanup();
   });
