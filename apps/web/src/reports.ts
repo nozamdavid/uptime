@@ -97,14 +97,46 @@ export class SnapshotError extends Error {
   }
 }
 
-async function fetchSnapshot<T>(url: string): Promise<T> {
+export class SnapshotPendingError extends SnapshotError {
+  constructor(readonly retryAfterMs: number) {
+    super('Report refresh in progress', 503);
+    this.name = 'SnapshotPendingError';
+  }
+}
+
+function pendingRetryAfterMs(value: string | null): number {
+  const seconds = value?.trim() ? Number(value) : Number.NaN;
+  const delay = Number.isFinite(seconds)
+    ? seconds * 1_000
+    : value
+      ? Date.parse(value) - Date.now()
+      : Number.NaN;
+  return Number.isFinite(delay) ? Math.min(5_000, Math.max(1_000, delay)) : 1_000;
+}
+
+async function fetchSnapshot<T>(url: string, signal?: AbortSignal): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(url, { credentials: 'omit', cache: 'no-cache' });
+    response = await fetch(url, {
+      credentials: 'omit',
+      cache: 'no-cache',
+      ...(signal ? { signal } : {}),
+    });
   } catch {
     throw new SnapshotError('Could not reach the public report host', 0);
   }
   if (!response.ok) {
+    if (response.status === 503) {
+      const body: unknown = await response.json().catch(() => null);
+      if (
+        body &&
+        typeof body === 'object' &&
+        'error' in body &&
+        body.error === 'Report refresh in progress'
+      ) {
+        throw new SnapshotPendingError(pendingRetryAfterMs(response.headers.get('Retry-After')));
+      }
+    }
     // 404 means the page/monitor was removed or unpublished; surface it as a
     // distinct state so the UI can say so instead of a generic failure.
     throw new SnapshotError(
@@ -115,10 +147,14 @@ async function fetchSnapshot<T>(url: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-export function loadMonitorReport(reference: string, baseUrl?: string | null) {
+export function loadMonitorReport(
+  reference: string,
+  baseUrl?: string | null,
+  signal?: AbortSignal,
+) {
   const url = monitorReportUrl(reference, baseUrl ?? frontendConfig().reportsBaseUrl);
   if (!url) throw new SnapshotError('Public reports are not configured', 0);
-  return fetchSnapshot<MonitorReportSnapshot>(url);
+  return fetchSnapshot<MonitorReportSnapshot>(url, signal);
 }
 
 export function loadStatusPageReport(reference: string, baseUrl?: string | null) {

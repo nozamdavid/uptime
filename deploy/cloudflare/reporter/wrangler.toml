@@ -1,0 +1,29 @@
+name = "uptime-reporter"
+main = "../../../apps/coordinator-worker/src/reporter.ts"
+compatibility_date = "2026-08-30"
+workers_dev = true
+
+[observability]
+enabled = true
+
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "uptime"
+database_id = "17c009df-5b56-44cc-9776-73e0f1775b0f"
+migrations_dir = "../../../packages/cloudflare/src/migrations"
+
+[[r2_buckets]]
+binding = "REPORTS"
+bucket_name = "uptime-reports"
+
+[[workflows]]
+name = "uptime-monitor-refresh"
+binding = "MONITOR_REFRESH"
+class_name = "MonitorRefreshWorkflow"
+
+[vars]
+REPORT_INTERVAL_SECONDS = "60"
+MONITOR_SNAPSHOT_FRESH_SECONDS = "120"
