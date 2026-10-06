@@ -15,6 +15,7 @@ export interface MonitorRefreshParams {
 export interface MonitorReportEnv extends ReportEnv {
   MONITOR_REFRESH: Workflow<MonitorRefreshParams>;
   MONITOR_SNAPSHOT_FRESH_SECONDS?: string;
+  MONITOR_INITIAL_REPORT_WAIT_MS?: string;
 }
 
 export type BackgroundTaskScheduler = (task: Promise<unknown>) => void;
@@ -30,6 +31,8 @@ interface RefreshState {
 }
 
 const leaseSeconds = 180;
+const initialReportWaitMs = 20_000;
+const initialReportPollMs = 500;
 const visibilitySql = `EXISTS (
   SELECT 1 FROM monitors m WHERE m.id = monitor_report_refresh.monitor_id
     AND (m.is_public = 1 OR EXISTS (
@@ -82,7 +85,7 @@ async function claimRefreshes(
        AND (? = 1 OR monitor_report_refresh.generated_at IS NULL OR monitor_report_refresh.generated_at < ? OR ? = 1)
      RETURNING *`,
     [
-      incident ? 'starting' : 'building',
+      'starting',
       leaseUntil(now),
       JSON.stringify(candidates),
       incident ? 1 : 0,
@@ -147,6 +150,36 @@ async function cachedSnapshot(
   const latest = await state(env.DB, current.monitor_id);
   if (!latest?.object_key || latest.object_key === current.object_key) return null;
   return (await env.REPORTS.get(latest.object_key))?.text() ?? null;
+}
+
+/** Wait briefly for the durable initial Workflow step so GET can return its first report. */
+async function waitForInitialSnapshot(
+  env: MonitorReportEnv,
+  monitorId: string,
+): Promise<{ body: string | null; visible: boolean }> {
+  const configuredWait = Number(env.MONITOR_INITIAL_REPORT_WAIT_MS ?? initialReportWaitMs);
+  const waitMs = Number.isFinite(configuredWait)
+    ? Math.max(0, Math.min(initialReportWaitMs, configuredWait))
+    : initialReportWaitMs;
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    if (!(await getPublicMonitor(env.DB, monitorId))) return { body: null, visible: false };
+    const current = await state(env.DB, monitorId);
+    if (current) {
+      const body = await cachedSnapshot(env, current);
+      if (body && (current.ordinal >= 0 || current.phase === 'idle'))
+        return { body, visible: true };
+    }
+    // A missing row or object must not shorten the cold GET's wait budget.
+    const remaining = deadline - Date.now();
+    if (remaining > 0)
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, Math.min(initialReportPollMs, remaining)),
+      );
+  }
+  if (!(await getPublicMonitor(env.DB, monitorId))) return { body: null, visible: false };
+  const latest = await state(env.DB, monitorId);
+  return { body: latest ? await cachedSnapshot(env, latest) : null, visible: true };
 }
 
 /** Creation and the first snapshot have separate durable checkpoints. */
@@ -331,16 +364,17 @@ export async function handleMonitorReport(
   const started = Date.now();
   let status = 500;
   try {
-    const result = await handleMonitorReportRequest(
-      request,
-      { ...env, DB: metered.db },
-      scheduleBackground,
+    // Register before the first DB operation, including the atomic claim. A
+    // disconnected GET must still finish creating its durable Workflow.
+    const work = Promise.resolve().then(() =>
+      handleMonitorReportRequest(request, { ...env, DB: metered.db }),
     );
+    if (request.method === 'GET' && scheduleBackground) scheduleBackground(work);
+    const result = await work;
     status = result.status;
     return result;
   } finally {
-    // Request totals include the initial build when this request won the lease.
-    // Cached GETs therefore expose their small visibility/pointer query cost too.
+    // History scans are metered separately inside the durable Workflow.
     console.log('monitor-refresh-request-work', {
       method: request.method,
       path: new URL(request.url).pathname,
@@ -354,7 +388,6 @@ export async function handleMonitorReport(
 async function handleMonitorReportRequest(
   request: Request,
   env: MonitorReportEnv,
-  scheduleBackground?: BackgroundTaskScheduler,
 ): Promise<Response> {
   const url = new URL(request.url);
   const match = /^\/reports\/public\/monitors\/([^/]+)\.json$/.exec(url.pathname);
@@ -372,66 +405,46 @@ async function handleMonitorReportRequest(
   if (!monitor) return response(JSON.stringify({ error: 'Not found' }), 404, head);
   const now = new Date();
   let current = await state(env.DB, monitor.id);
-  const cached = current ? await cachedSnapshot(env, current) : null;
+  let cached = current ? await cachedSnapshot(env, current) : null;
   if (head) {
     if (!(await getPublicMonitor(env.DB, monitor.id))) return response(null, 404, true);
     return response(cached, cached ? 200 : 503, true);
   }
-  if (current?.phase === 'starting' && current.ordinal === -1) {
-    const startup = ensureWorkflow(env, current);
-    if (scheduleBackground) scheduleBackground(startup);
-    else await startup;
+  if (
+    current?.phase === 'starting' &&
+    current.ordinal <= 0 &&
+    current.lease_until > now.toISOString()
+  ) {
+    await ensureWorkflow(env, current);
     current = (await state(env.DB, monitor.id)) ?? current;
+    cached = await cachedSnapshot(env, current);
   }
   if (current && cached) {
-    if (current.phase === 'starting') {
-      const startup = ensureWorkflow(env, current);
-      if (scheduleBackground) scheduleBackground(startup);
-      else await startup;
-      if (!scheduleBackground) current = (await state(env.DB, monitor.id)) ?? current;
-      // An unavailable Workflow service must not force another initial scan.
-      if (scheduleBackground || current.phase === 'starting') {
-        if (!(await getPublicMonitor(env.DB, monitor.id))) return response(null, 404);
-        return response(cached);
-      }
-    }
     const active = current.phase !== 'idle' && current.lease_until > now.toISOString();
     const fresh =
       current.generated_at !== null &&
       now.getTime() - Date.parse(current.generated_at) <= freshnessSeconds(env) * 1_000;
-    if (active || fresh) {
+    if ((active && current.ordinal >= 0) || (fresh && current.ordinal >= 0)) {
       if (!(await getPublicMonitor(env.DB, monitor.id))) return response(null, 404);
       return response(cached);
     }
   }
 
   const [claimed] = await claimRefreshes(env, [monitor.id], now, false, 1, !cached);
+  let initialToken: string | null = null;
   if (claimed) {
-    const token = claimed.token;
-    try {
-      await refreshMonitorSnapshot(env, { monitorId: monitor.id, token }, 0);
-      current = await state(env.DB, monitor.id);
-      if (current?.token === token && current.ordinal === 0 && current.object_key) {
-        const startup = ensureWorkflow(env, current);
-        if (scheduleBackground) scheduleBackground(startup);
-        else await startup;
-      }
-    } catch (error) {
-      await env.DB.prepare(
-        `UPDATE monitor_report_refresh SET phase = 'idle', lease_until = ?
-         WHERE monitor_id = ? AND token = ? AND ordinal = -1`,
-      )
-        .bind(new Date().toISOString(), monitor.id, token)
-        .run();
-      console.error('monitor-refresh-request', { monitorId: monitor.id, error: String(error) });
-    }
-  } else if (!cached) {
-    // Cold concurrent requests share the winner's initial build.
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      current = await state(env.DB, monitor.id);
-      if (current?.object_key || current?.phase === 'idle') break;
-    }
+    if (claimed.ordinal <= 0) initialToken = claimed.token;
+    await ensureWorkflow(env, claimed);
+  } else {
+    // A competing request may have claimed after our initial state read.
+    current = await state(env.DB, monitor.id);
+    if (current?.ordinal === -1 && current.phase !== 'idle') initialToken = current.token;
+  }
+  if (initialToken || !cached) {
+    const waited = await waitForInitialSnapshot(env, monitor.id);
+    if (!waited.visible) return response(null, 404);
+    if (waited.body) return response(waited.body);
+    return response(JSON.stringify({ error: 'Report refresh in progress' }), 503);
   }
   if (!(await getPublicMonitor(env.DB, monitor.id))) return response(null, 404);
   current = await state(env.DB, monitor.id);

@@ -9,6 +9,7 @@ import {
   loadStatusPageReport,
   monitorReportUrl,
   monitorSnapshotToDetail,
+  SnapshotPendingError,
   statusPageIndexUrl,
   statusPageReportUrl,
   statusPageSnapshotToPage,
@@ -183,6 +184,61 @@ describe('snapshot loading', () => {
     await expect(loadMonitorReport('gone', 'https://reports.example.test')).rejects.toMatchObject({
       status: 404,
     });
+  });
+
+  it.each([
+    [null, 1_000],
+    ['invalid', 1_000],
+    ['0', 1_000],
+    ['-1', 1_000],
+    ['2', 2_000],
+    ['999999', 5_000],
+  ])('bounds pending Retry-After %s to %s ms', async (value, expected) => {
+    fetchMock.mockResolvedValue(
+      Response.json(
+        { error: 'Report refresh in progress' },
+        {
+          status: 503,
+          headers: value === null ? {} : { 'Retry-After': value },
+        },
+      ),
+    );
+    const error = await loadMonitorReport('pending', 'https://reports.example.test').catch(
+      (reason) => reason,
+    );
+    expect(error).toBeInstanceOf(SnapshotPendingError);
+    expect(error.retryAfterMs).toBe(expected);
+  });
+
+  it('accepts an HTTP date Retry-After', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-05T12:00:00Z'));
+    try {
+      fetchMock.mockResolvedValue(
+        Response.json(
+          { error: 'Report refresh in progress' },
+          {
+            status: 503,
+            headers: { 'Retry-After': 'Mon, 05 Oct 2026 12:00:03 GMT' },
+          },
+        ),
+      );
+      await expect(
+        loadMonitorReport('pending', 'https://reports.example.test'),
+      ).rejects.toMatchObject({ retryAfterMs: 3_000 });
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('keeps a malformed 503 response as a genuine error', async () => {
+    fetchMock.mockResolvedValue(new Response('Service unavailable', { status: 503 }));
+    await expect(loadMonitorReport('broken', 'https://reports.example.test')).rejects.toMatchObject(
+      {
+        name: 'SnapshotError',
+        status: 503,
+        message: 'Report unavailable',
+      },
+    );
   });
 
   it('loads status page snapshots and the public index', async () => {

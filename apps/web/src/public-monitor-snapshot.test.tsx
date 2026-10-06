@@ -131,7 +131,7 @@ describe('public monitor snapshot rendering', () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       'https://reports.example.test/public/monitors/snapshot-monitor.json',
-      { credentials: 'omit', cache: 'no-cache' },
+      { credentials: 'omit', cache: 'no-cache', signal: expect.any(AbortSignal) },
     );
     expect(apiMock.publicMonitor).not.toHaveBeenCalled();
     expect(view.container.textContent).toContain('Snapshot monitor');
@@ -308,7 +308,7 @@ describe('public monitor snapshot rendering', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       'https://reports.example.test/public/monitors/snapshot-monitor.json',
-      { credentials: 'omit', cache: 'no-cache' },
+      { credentials: 'omit', cache: 'no-cache', signal: expect.any(AbortSignal) },
     );
     expect(window.location.search).toBe('');
     expect(
@@ -327,7 +327,7 @@ describe('public monitor snapshot rendering', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       'https://reports.example.test/public/monitors/snapshot-monitor.json',
-      { credentials: 'omit', cache: 'no-cache' },
+      { credentials: 'omit', cache: 'no-cache', signal: expect.any(AbortSignal) },
     );
 
     await view.cleanup();
@@ -346,7 +346,7 @@ describe('public monitor snapshot rendering', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       'https://reports.example.test/public/monitors/first.json',
-      { credentials: 'omit', cache: 'no-cache' },
+      { credentials: 'omit', cache: 'no-cache', signal: expect.any(AbortSignal) },
     );
 
     window.history.replaceState({}, '', '/monitor/second?generation=second-generation');
@@ -354,7 +354,7 @@ describe('public monitor snapshot rendering', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
       'https://reports.example.test/public/monitors/second.json',
-      { credentials: 'omit', cache: 'no-cache' },
+      { credentials: 'omit', cache: 'no-cache', signal: expect.any(AbortSignal) },
     );
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
@@ -362,7 +362,7 @@ describe('public monitor snapshot rendering', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       4,
       'https://reports.example.test/public/monitors/second.json',
-      { credentials: 'omit', cache: 'no-cache' },
+      { credentials: 'omit', cache: 'no-cache', signal: expect.any(AbortSignal) },
     );
 
     await view.cleanup();

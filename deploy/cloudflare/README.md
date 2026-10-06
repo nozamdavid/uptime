@@ -8,11 +8,15 @@ Run every command in this guide from the repository root.
 | ---------------------- | --------------------------------------------- | ------------------------------------------ |
 | Production API         | `deploy/cloudflare/api/wrangler.toml`         | Edit by hand                               |
 | Production coordinator | `deploy/cloudflare/coordinator/wrangler.toml` | Edit by hand                               |
+| Production reporter    | `deploy/cloudflare/reporter/wrangler.toml`    | Edit by hand                               |
+| Production Pages       | `deploy/cloudflare/pages/wrangler.toml`       | Edit by hand                               |
+| Production test target | `deploy/cloudflare/target/wrangler.toml`      | Edit by hand                               |
 | Production probes      | `deploy/cloudflare/wrangler.<region>.toml`    | Generated                                  |
 | Staging                | `deploy/cloudflare/staging/`                  | See the [staging guide](staging/README.md) |
 
 The probe generator only owns the root `wrangler.<region>.toml` files. It does
-not touch the API, coordinator, or staging configurations.
+not touch the API, coordinator, reporter, Pages, test target, or staging
+configurations.
 
 ## Deploy the API and coordinator
 
@@ -34,6 +38,31 @@ The script applies pending D1 migrations before it deploys either Worker. Use
 See the [deployment runbook](../../docs/operations/deployment-runbook.md) for
 required bindings, variables, secrets, local development, deployment, and
 rollback.
+
+## Deploy the reporter, gateway, and test target
+
+The app deployment script deploys only the API and coordinator. Deploy the
+separate reporter and test target explicitly:
+
+```bash
+apps/api-worker/node_modules/.bin/wrangler deploy --config deploy/cloudflare/reporter/wrangler.toml
+apps/api-worker/node_modules/.bin/wrangler deploy --config deploy/cloudflare/target/wrangler.toml
+```
+
+Build the frontend with the production gateway origin, then package the shared
+Pages Worker and deploy with the production service and R2 bindings:
+
+```bash
+VITE_API_BASE_URL=/api VITE_REPORTS_BASE_URL=https://uptime-2l5.pages.dev/reports pnpm --filter @uptime/web build --outDir ../../dist/production/web --emptyOutDir
+cp deploy/cloudflare/staging/pages/_worker.js dist/production/web/_worker.js
+apps/api-worker/node_modules/.bin/wrangler pages deploy ../../../dist/production/web --cwd deploy/cloudflare/pages --project-name uptime --branch main --commit-dirty=true
+```
+
+Production uses `https://uptime-2l5.pages.dev`, D1 `uptime`, private R2
+`uptime-reports`, and Workflow `uptime-monitor-refresh`. Do not substitute
+staging bindings. As verified on 2026-10-05, `uptime.noz.am` serves production;
+`uptime-staging.pages.dev` serves staging. Inspect live Pages bindings before
+deployment: the hosted gateway uses `IMPORTED_*` bindings for existing reports.
 
 ## Deploy regional probes
 
@@ -102,41 +131,20 @@ but private origins still need their own access controls.
 
 ## Report publication
 
-The coordinator starts probe work and report publication as separately leased
-jobs. A long probe run does not suppress that minute's report job.
+Production runs probe scheduling in `uptime-coordinator` and publication in
+`uptime-reporter`, each with a minute cron. The coordinator sets
+`REPORT_SCHEDULE_DISABLED=true` so the separate reporter owns publication.
 
-The current publisher:
+The reporter publishes the status-page index and status-page reports through an
+atomic R2 cohort. The gateway resolves those objects through `public/cohort.json`;
+the pointer is committed only after every public object is ready.
 
-- caches 89 closed UTC days in R2 and reads the current day from D1;
-- invalidates cached days after historical writes through migration `0007`;
-- consumes the observation changefeed added by migration `0008`;
-- publishes standalone monitors and status pages through the same atomic cohort;
-- keeps up to the configured sample limit (5,000 by default) per monitor in eight
-  private R2 shards, with a 50,000-row limit per shard; dense shards retain fewer
-  newest rows per monitor and expose the actual `sampleLimit` and `sampled` flags;
-- bounds compressed and decoded sample objects to 8 MiB each;
-- reads at most two sample shards concurrently, draining both reads before
-  propagating failure, while parsing and writing shards sequentially;
-- rebuilds cold or invalidated histories in bounded batches per shard, combining
-  up to five indexed monitor scans per D1 statement while retaining each monitor's
-  row limit; recovery uses stored observations and completes in the same run;
-- refreshes latency ranges and percentiles at each monitor's configured cadence;
-- processes at most 2,000 ordered change events per report job;
-- renews the owning report lease at publication boundaries, only while its token
-  still owns an unexpired lease, so slow storage reads do not abort progressing work; and
-- commits one cohort pointer only after every public object is ready.
+Standalone monitor reports have independent generations. The Pages gateway
+forwards them to its `REPORTER` service binding instead of resolving them through
+the status-page cohort. Monitor refresh uses the `MONITOR_REFRESH` Workflow binding.
 
 The `reports` row in the D1 `jobs` table records duration, statement count, and
 native query metrics. Report publication has a 100-statement ceiling.
-
-Disabled publication still maintains the changefeed in batches of at most 2,000
-rows. `REPORT_SCHEDULE_DISABLED=true` runs maintenance without claiming the
-separate reporter's lease or changing its metrics. A recent consumer retains its
-unapplied input: maintenance uses its durable R2 sample cursor, or preserves its
-input when R2 is unavailable. After 24 hours without a cohort commit (or the
-configured interval plus 120 seconds, if longer), maintenance can discard an
-inactive consumer's feed. Live leases and a consumer timestamp check fence the
-deletion; sequence gaps force bounded graph bootstrapping when reports resume.
 
 ## On-demand monitor reports
 
@@ -158,8 +166,9 @@ pnpm --filter @uptime/coordinator-worker exec tsx ../../scripts/backfill-hourly-
 ```
 
 The reporter repairs up to four fully closed dirty monitor-hours per minute.
-Observation inserts, corrections, and deletions mark hours for repair. Workflow
-creation starts in the background after the initial report is committed, so it
-does not hold the first response open. Latency history remains limited by raw
-observation retention: seven days by default in production and 30 days in
-staging; aggregates do not extend that history.
+Observation inserts, corrections, and deletions mark hours for repair. A GET
+starts a durable Workflow before building the initial report, then waits up to
+20 seconds for its snapshot. Startup survives a disconnected request. The Workflow
+also performs four subsequent refreshes at one-minute intervals. Latency history remains limited by raw
+observation retention: production and staging both retain 30 days; aggregates
+do not extend that history.

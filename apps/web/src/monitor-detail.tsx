@@ -25,10 +25,12 @@ import { MonitorBadge } from './monitor-badge.js';
 import { monitorDisplayName } from './monitor-format.js';
 import { publicReportsEnabled } from './config.js';
 import {
+  assessFreshness,
   assessLatencySampling,
   formatAge,
   loadMonitorReport,
   monitorSnapshotToDetail,
+  SnapshotPendingError,
   type MonitorReportSnapshot,
 } from './reports.js';
 import { formatLatency, formatPercentage } from './status-page-format.js';
@@ -59,6 +61,8 @@ export function aggregateLatencyBucketLabel(range: LatencyRange) {
   return aggregateLatencyBucketLabels[range];
 }
 export const monitorDetailRefreshIntervalMs = 60_000;
+const reportPreparationBudgetMs = 30_000;
+const reportPreparationMaxAttempts = 30;
 
 export function monitorHostname(value: string) {
   try {
@@ -80,6 +84,8 @@ export function MonitorDetail({
   statusPageId?: string;
 }) {
   const [range, setRange] = useState<LatencyRange>('24h');
+  const currentRange = useRef(range);
+  currentRange.current = range;
   const [data, setData] = useState<MonitorDetailResponse | PublicMonitorDetailResponse | null>(
     null,
   );
@@ -98,6 +104,8 @@ export function MonitorDetail({
   const [error, setError] = useState('');
   const [reload, setReload] = useState(0);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const autoRefreshEnabled = useRef(autoRefresh);
+  autoRefreshEnabled.current = autoRefresh;
   const inFlightRefresh = useRef<Promise<void> | null>(null);
   const displayedRequestKey = useRef<string | null>(null);
   const observationGeneration = useRef(0);
@@ -113,9 +121,17 @@ export function MonitorDetail({
   const useSnapshot = publicMode && publicReportsEnabled();
   useEffect(() => {
     let active = true;
+    let retryTimer: number | undefined;
+    let cancelWait: (() => void) | undefined;
+    const controller = new AbortController();
+    const deadline = Date.now() + reportPreparationBudgetMs;
+    const deadlineTimer = useSnapshot
+      ? window.setTimeout(() => controller.abort(), reportPreparationBudgetMs)
+      : undefined;
     observationGeneration.current += 1;
     const rangeOverride = range;
     const requestKey = `${monitorId}:${publicMode ? 'public' : 'private'}:${useSnapshot ? 'snapshot' : rangeOverride}`;
+    const initialCachedDetail = displayedRequestKey.current === requestKey ? data : null;
     if (displayedRequestKey.current !== requestKey) {
       displayedRequestKey.current = requestKey;
       setData(null);
@@ -126,22 +142,63 @@ export function MonitorDetail({
       setDnsError('');
     }
     setError('');
-    const detail: Promise<MonitorDetailResponse | PublicMonitorDetailResponse> = useSnapshot
-      ? loadMonitorReport(monitorId).then((loaded) => {
-          if (active) {
-            setSnapshot(loaded);
-            if (new URLSearchParams(window.location.search).has('generation')) {
-              const url = new URL(window.location.href);
-              url.searchParams.delete('generation');
-              window.history.replaceState(
-                window.history.state,
-                '',
-                `${url.pathname}${url.search}${url.hash}`,
-              );
-            }
+    // Keep this recovery inside the request lifecycle so navigation cancels both
+    // its timer and fetch, and the regular refresh cannot overlap it.
+    const loadSnapshot = async (): Promise<PublicMonitorDetailResponse> => {
+      let cachedDetail = initialCachedDetail;
+      let attempts = 0;
+      let preparing = false;
+      while (active) {
+        let retryAfterMs = 1_000;
+        try {
+          attempts += 1;
+          const loaded = await loadMonitorReport(monitorId, undefined, controller.signal);
+          const detail = monitorSnapshotToDetail(loaded, currentRange.current);
+          if (!active) return detail;
+          cachedDetail = detail;
+          setSnapshot(loaded);
+          setData(detail);
+          setObservations([]);
+          if (new URLSearchParams(window.location.search).has('generation')) {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('generation');
+            window.history.replaceState(
+              window.history.state,
+              '',
+              `${url.pathname}${url.search}${url.hash}`,
+            );
           }
-          return monitorSnapshotToDetail(loaded, rangeOverride);
-        })
+          if (assessFreshness(loaded).state !== 'stale') return detail;
+        } catch (reason) {
+          if (active && controller.signal.aborted && preparing) {
+            if (cachedDetail) return cachedDetail;
+            throw new Error('Report is still being prepared. Try again shortly.');
+          }
+          if (!(reason instanceof SnapshotPendingError)) throw reason;
+          preparing = true;
+          retryAfterMs = reason.retryAfterMs;
+        }
+        if (cachedDetail && !autoRefreshEnabled.current) return cachedDetail;
+        const remaining = deadline - Date.now();
+        if (attempts >= reportPreparationMaxAttempts || remaining <= 0) {
+          if (cachedDetail) return cachedDetail;
+          throw new Error('Report is still being prepared. Try again shortly.');
+        }
+        await new Promise<void>((resolve) => {
+          cancelWait = resolve;
+          retryTimer = window.setTimeout(resolve, Math.min(retryAfterMs, remaining));
+        });
+        if (cachedDetail && !autoRefreshEnabled.current) return cachedDetail;
+        if (Date.now() >= deadline) {
+          if (cachedDetail) return cachedDetail;
+          throw new Error('Report is still being prepared. Try again shortly.');
+        }
+      }
+      // Cleanup deactivates the request before settling its cancelled wait.
+      throw new Error('Report request cancelled');
+    };
+    const detail: Promise<MonitorDetailResponse | PublicMonitorDetailResponse> = useSnapshot
+      ? loadSnapshot()
       : publicMode
         ? api.publicMonitor(monitorId, rangeOverride)
         : api.monitor(monitorId, rangeOverride);
@@ -151,7 +208,7 @@ export function MonitorDetail({
     const request = Promise.all([detail, history])
       .then(([detail, history]) => {
         if (!active) return;
-        setData(detail);
+        if (!useSnapshot) setData(detail);
         setObservations(history.items);
         setNextCursor(history.nextCursor);
       })
@@ -160,18 +217,23 @@ export function MonitorDetail({
           setError(reason instanceof Error ? reason.message : 'Could not load monitor details.');
       })
       .finally(() => {
+        window.clearTimeout(deadlineTimer);
         if (inFlightRefresh.current === request) inFlightRefresh.current = null;
       });
     inFlightRefresh.current = request;
     return () => {
       active = false;
+      controller.abort();
+      window.clearTimeout(deadlineTimer);
+      window.clearTimeout(retryTimer);
+      cancelWait?.();
     };
     // Snapshots carry all published ranges, so only reload them when the monitor
     // or mode changes; switching range re-projects the already-loaded snapshot.
     // The API path still refetches per range.
   }, [monitorId, publicMode, reload, useSnapshot ? '' : range]);
   useEffect(() => {
-    if (!autoRefresh) return;
+    if (!autoRefresh || (error && !data)) return;
     let active = true;
     const timer = window.setTimeout(async () => {
       await inFlightRefresh.current;
@@ -181,7 +243,7 @@ export function MonitorDetail({
       active = false;
       window.clearTimeout(timer);
     };
-  }, [autoRefresh, monitorId, publicMode, range, reload]);
+  }, [autoRefresh, monitorId, publicMode, range, reload, Boolean(error && !data)]);
   useEffect(() => {
     if (!snapshot) return;
     try {
