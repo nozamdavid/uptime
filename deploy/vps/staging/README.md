@@ -128,6 +128,52 @@ pnpm --filter @uptime/api exec tsx ../../scripts/postgres-staging-bootstrap.ts -
 ```
 This invocation uses `@uptime/api`'s declared runner and connects through `ssh vps`. Remember that this script is strictly an initial/operator-only bootstrap tool and not a general migration command for a populated staging database.
 
+### Status page font upgrade on populated staging
+
+Run these commands from the repository root after reviewing the font migration and the current VPS Compose image tags. The dedicated upgrade tool checks all 14 catalog entries. The 13 populated schemas, `tenant_000` through `tenant_009`, `operator`, `test_001`, and `test_002`, use `full-hosted`. The catalog also lists `legacy_staging` with `legacy-staging`, but that schema is not provisioned on the current VPS. The tool reports and skips it only while the schema is absent; if it appears, a valid ledger is required. It rejects missing ledgers in populated schemas, profile or checksum changes, catalog drift, and pending migrations other than `0017_status_page_font_family.sql`. It does not seed control data or require empty application tables.
+
+```bash
+ssh vps "su - postgres -c 'pg_dump -Fc -d uptime_staging -f /var/backups/postgresql/uptime_staging-font-20261007.dump'"
+ssh vps "su - postgres -c 'pg_restore --list /var/backups/postgresql/uptime_staging-font-20261007.dump'"
+ssh vps "stat -c '%n %s bytes %y' /var/backups/postgresql/uptime_staging-font-20261007.dump"
+pnpm --filter @uptime/api exec tsx ../../scripts/postgres-staging-upgrade.ts
+```
+
+Check that the plan lists exactly `0017_status_page_font_family.sql` once for each of the 13 populated schemas and reports `legacy_staging` absent. Apply the reviewed plan and verify the second plan reports zero pending migrations for all 13 populated schemas:
+
+```bash
+pnpm --filter @uptime/api exec tsx ../../scripts/postgres-staging-upgrade.ts --apply
+pnpm --filter @uptime/api exec tsx ../../scripts/postgres-staging-upgrade.ts
+```
+
+Each schema runs in its own transaction under an advisory lock. The generator verifies applied checksums again inside that transaction, adds the column with `josefin-sans` as the default, and records `0017` in the same transaction. If a later schema fails, rerun after resolving the error; completed schemas are skipped. The old API and scheduler bundles do not select the new column, so deploy the new bundles after all 14 schemas pass.
+
+Build both bundles and transfer only their build contexts. Record the two current image tags and IDs, then use fresh tags for the new images:
+
+```bash
+pnpm --filter @uptime/api-worker build:node
+pnpm --filter @uptime/coordinator-worker build:node
+scp apps/api-worker/dist/node/server.mjs deploy/vps/staging/Dockerfile.runtime root@217.217.227.164:/opt/uptime-staging-artifact/
+scp apps/coordinator-worker/dist/node/scheduler.mjs deploy/vps/staging/Dockerfile.scheduler root@217.217.227.164:/opt/uptime-staging-scheduler-artifact/
+ssh vps "docker inspect --format '{{.Config.Image}} {{.Image}}' uptime-staging-node-api uptime-staging-node-scheduler"
+ssh vps "cd /opt/uptime-staging-artifact && docker build -t uptime-staging-api:font-20261007 -f Dockerfile.runtime ."
+ssh vps "cd /opt/uptime-staging-scheduler-artifact && docker build -t uptime-staging-scheduler:font-20261007 -f Dockerfile.scheduler ."
+ssh -t vps "vi /opt/uptime-staging/docker-compose.yml"
+```
+
+In that editor, change only the API and scheduler `image:` values to `uptime-staging-api:font-20261007` and `uptime-staging-scheduler:font-20261007`. Confirm the scheduler remains the sole active scheduler as required in section 5. Then recreate the two services and inspect health and publication logs:
+
+```bash
+ssh vps "cd /opt/uptime-staging && docker compose up -d --no-build --no-deps uptime-staging-node-api uptime-staging-node-scheduler && docker compose ps"
+ssh vps "cd /opt/uptime-staging && docker compose logs --since=5m uptime-staging-node-scheduler"
+ssh vps "su - postgres -c 'psql -d uptime_staging -c \"SELECT report_key, generated_at, status FROM operator.report_publications ORDER BY generated_at DESC LIMIT 5;\"'"
+ssh vps "curl -fsS 'http://127.0.0.1:3001/reports/public/status-pages.json?workspace=<OPERATOR_WORKSPACE_UUID>'"
+```
+
+Replace `<OPERATOR_WORKSPACE_UUID>` with the operator workspace ID. The scheduler publishes fresh status page cohorts on its next due minute; look for `report_metrics` with `failed: 0` and `published` above zero for a tenant with pages. Check that `operator.report_publications` has an advanced `cohort` timestamp and that the public index includes `fontFamily`. For a page in that workspace, request `/reports/public/status-pages/<SLUG>.json?workspace=<OPERATOR_WORKSPACE_UUID>` and check `statusPage.fontFamily`. The API health check alone does not prove report publication.
+
+For rollback, restore the recorded API and scheduler image tags in Compose and recreate those services with the same command above. Keep the added column and ledger entry in place: older bundles ignore them. A database restore would discard writes since the backup and needs a separate rehearsed recovery decision; do not drop or restore the live database as a routine code rollback.
+
 ### Backup & Restore
 - Tracked configuration: `deploy/postgresql/vps/uptime-staging-backup.timer` (daily 03:00 UTC) triggers `uptime-staging-backup.service`, a oneshot `pg_dump -Fc` that replaces `/var/backups/postgresql/uptime_staging-latest.dump`.
 - The repository does not prove the units are installed or that a dump exists. Check on the VPS before relying on it:
