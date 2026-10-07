@@ -202,13 +202,13 @@ describe('WorkspaceBillingPanel', () => {
 
     const text = view.container.textContent ?? '';
     expect(text).toContain('Pro');
-    expect(text).toContain('REVISION 2');
-    expect(text).toContain('SIMULATION MODE');
-    expect(text).toContain('5 / 25 monitors');
+    expect(text).toContain('Plan revision2');
+    expect(text).toContain('Simulation mode');
+    expect(text).toContain('Monitors5 / 25');
     expect(text).toContain(
-      'This quota is shared by everyone in the workspace. Up to 6 regions per monitor.',
+      'These limits are shared by everyone in the workspace. Each monitor can use up to 6 regions.',
     );
-    expect(text).toContain('Allowed regions:');
+    expect(text).toContain('Allowed regions');
     expect(text).toContain('Manage Payment Method & Invoices');
     expect(text).toContain('Cancel Subscription');
 
@@ -277,7 +277,7 @@ describe('WorkspaceBillingPanel', () => {
     });
 
     const checkoutBtn = Array.from(view.container.querySelectorAll('button')).find((b) =>
-      b.textContent?.includes('Proceed to Checkout'),
+      b.textContent?.includes('Proceed to checkout'),
     );
     expect(checkoutBtn).toBeDefined();
 
@@ -420,7 +420,7 @@ describe('WorkspaceBillingPanel', () => {
     });
 
     const checkoutBtn = Array.from(view.container.querySelectorAll('button')).find((b) =>
-      b.textContent?.includes('Proceed to Checkout'),
+      b.textContent?.includes('Proceed to checkout'),
     );
     expect(checkoutBtn).toBeDefined();
 
@@ -459,7 +459,7 @@ describe('WorkspaceBillingPanel', () => {
     });
 
     const checkoutBtn = Array.from(view.container.querySelectorAll('button')).find((b) =>
-      b.textContent?.includes('Proceed to Checkout'),
+      b.textContent?.includes('Proceed to checkout'),
     );
     expect(checkoutBtn).toBeDefined();
 
@@ -502,7 +502,7 @@ describe('WorkspaceBillingPanel', () => {
     });
 
     const checkoutBtn = Array.from(view.container.querySelectorAll('button')).find((b) =>
-      b.textContent?.includes('Proceed to Checkout'),
+      b.textContent?.includes('Proceed to checkout'),
     );
     expect(checkoutBtn).toBeDefined();
     expect(checkoutBtn!.disabled).toBe(true);

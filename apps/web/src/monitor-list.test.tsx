@@ -190,6 +190,60 @@ describe("monitor filtering", () => {
   });
 });
 
+describe("board header sorting", () => {
+  it("sorts from the visible headers and reverses a selected column", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ badges: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    const slow = summary("00000000-0000-4000-8000-000000000021", "Zulu");
+    const fast = summary("00000000-0000-4000-8000-000000000022", "Alpha");
+    fast.monitor.intervalSeconds = 60;
+    fast.monitor.regionIds = ["us-east", "eu-west"];
+    fast.targetChecksPerDay = 2_880;
+    const view = createTestRoot();
+
+    await act(async () => {
+      view.root.render(createElement(MonitorList, { items: [slow, fast], onChanged: () => undefined }));
+    });
+
+    const header = view.container.querySelector(".ut-board__head")!;
+    const firstName = () => view.container.querySelector(".monitor-row strong")?.textContent;
+    const sortButton = (label: string) => [...header.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim().startsWith(label),
+    );
+
+    expect(view.container.querySelector(".monitor-sort")).toBeNull();
+    expect(sortButton("Status")?.textContent).toContain("sorted ascending");
+    expect([...header.querySelectorAll("button")]).toHaveLength(5);
+    expect(view.container.querySelector(".ut-monitor__frequency")?.textContent).toBeTruthy();
+    expect(view.container.querySelector(".ut-monitor__requests")?.textContent).toBeTruthy();
+
+    await act(async () => sortButton("Frequency")?.click());
+    expect(firstName()).toBe("Alpha");
+    expect(sortButton("Frequency")?.textContent).toContain("sorted ascending");
+
+    await act(async () => sortButton("Frequency")?.click());
+    expect(firstName()).toBe("Zulu");
+    expect(sortButton("Frequency")?.textContent).toContain("sorted descending");
+
+    await act(async () => sortButton("Requests/day")?.click());
+    expect(firstName()).toBe("Zulu");
+    await act(async () => sortButton("Regions")?.click());
+    expect(firstName()).toBe("Zulu");
+    await act(async () => sortButton("Monitor")?.click());
+    expect(firstName()).toBe("Alpha");
+
+    await view.cleanup();
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("real fetched metrics", () => {
   it("extracts 24h uptime accurately from stats sample counts without guessing", () => {
     const detail: MonitorDetailResponse = {

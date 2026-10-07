@@ -44,6 +44,7 @@ const {
   InterestSignupPage,
   LandingPage,
   OperatorPage,
+  OperatorWorkspaceEditPage,
   ProductSessionContext,
   SettingsPage,
 } = await import('./product-shell.js');
@@ -249,6 +250,40 @@ describe('free product shell', () => {
     await view.cleanup();
   });
 
+  it('gates the direct workspace editor and handles a missing workspace', async () => {
+    const view = createTestRoot();
+    await act(async () => {
+      view.root.render(
+        createElement(
+          ProductSessionContext.Provider,
+          { value: { isOperator: false } },
+          createElement(OperatorWorkspaceEditPage, { workspaceId: 'missing' }),
+        ),
+      );
+    });
+    expect(view.container.textContent).toContain('Operator access required.');
+    expect(apiMock.operatorWorkspaces).not.toHaveBeenCalled();
+
+    apiMock.operatorWorkspaces.mockResolvedValue({
+      workspaces: [],
+      availableRegions: [],
+      budget: { ceilingUsd: 20 },
+    });
+    await act(async () => {
+      view.root.render(
+        createElement(
+          ProductSessionContext.Provider,
+          { value: { isOperator: true } },
+          createElement(OperatorWorkspaceEditPage, { workspaceId: 'missing' }),
+        ),
+      );
+      await Promise.resolve();
+    });
+    expect(view.container.textContent).toContain('Workspace not found.');
+    expect(view.container.querySelector('a[href="/operator"]')).not.toBeNull();
+    await view.cleanup();
+  });
+
   it('keeps member and export controls owner-only', async () => {
     apiMock.usage.mockResolvedValue({
       usage: { monitors: 0, statusPages: 0, notificationServices: 0 },
@@ -288,8 +323,10 @@ describe('free product shell', () => {
     expect(view.container.textContent).not.toContain('Invite member');
     expect(view.container.textContent).not.toContain('Download export');
     expect(view.container.textContent).not.toContain('Delete workspace');
+    expect(view.container.querySelector('.settings-facts dt')?.textContent).toBe('Signed in as');
+    expect(view.container.querySelector('.settings-usage-grid')?.textContent).toContain('Monitors1 / 3');
     expect(view.container.textContent).toContain(
-      'This quota is shared by everyone in the workspace. Up to 3 regions per monitor.',
+      'These limits are shared by everyone in the workspace. Each monitor can use up to 3 regions.',
     );
     expect(view.container.textContent).toContain(
       'US East (N. Virginia), Europe West (Ireland), Asia Southeast (Singapore)',
@@ -560,14 +597,16 @@ describe('free product shell', () => {
     expect(view.container.textContent).toContain(
       "Hosted limit editing is unavailable for this workspace's import or provisioning state.",
     );
+    expect(view.container.querySelector('.operator-limits')).toBeNull();
+    expect(view.container.querySelectorAll('.operator-workspaces .operator-limits__form')).toHaveLength(
+      0,
+    );
     expect(
-      [...view.container.querySelectorAll('.operator-limits summary')].some((summary) =>
-        summary.textContent?.includes('Imported staging'),
-      ),
-    ).toBe(false);
+      view.container.querySelector('.operator-row a[href="/operator/workspaces/workspace-1"]'),
+    ).not.toBeNull();
     expect(view.container.textContent).toContain('Limit: 3 saved monitors');
     expect(view.container.textContent).toContain('up to 3 regions per monitor');
-    expect(view.container.textContent).toContain('Edit limits');
+    expect(view.container.textContent).toContain('Edit workspace');
     expect(view.container.textContent).toContain('Admission open');
     expect(view.container.textContent).toContain('Interest list · 1');
     expect(view.container.textContent).toContain('@interested.test');
@@ -610,13 +649,11 @@ describe('free product shell', () => {
         createElement(
           ProductSessionContext.Provider,
           { value: { isOperator: true } },
-          createElement(OperatorPage),
+          createElement(OperatorWorkspaceEditPage, { workspaceId: 'workspace-1' }),
         ),
       );
       await Promise.resolve();
     });
-    const editor = view.container.querySelector<HTMLDetailsElement>('.operator-limits')!;
-    editor.open = true;
     const monitorInput = view.container.querySelector<HTMLInputElement>(
       '[aria-label="Saved monitor limit for Workspace"]',
     )!;
@@ -717,14 +754,11 @@ describe('free product shell', () => {
         createElement(
           ProductSessionContext.Provider,
           { value: { isOperator: true } },
-          createElement(OperatorPage),
+          createElement(OperatorWorkspaceEditPage, { workspaceId: 'workspace-1' }),
         ),
       );
       await Promise.resolve();
     });
-    const editor = view.container.querySelector<HTMLDetailsElement>('.operator-limits')!;
-    editor.open = true;
-    editor.dispatchEvent(new Event('toggle'));
     const monitorInput = view.container.querySelector<HTMLInputElement>(
       '[aria-label="Saved monitor limit for Workspace"]',
     )!;
@@ -770,7 +804,7 @@ describe('free product shell', () => {
     expect(view.container.querySelector('.operator-limits [role="status"]')?.textContent).toBe(
       'Workspace limits saved.',
     );
-    expect(view.container.textContent).toContain('Limit: 5 saved monitors');
+    expect(view.container.querySelector('h1')?.textContent).toBe('Workspace');
     await view.cleanup();
   });
 
@@ -812,14 +846,11 @@ describe('free product shell', () => {
         createElement(
           ProductSessionContext.Provider,
           { value: { isOperator: true } },
-          createElement(OperatorPage),
+          createElement(OperatorWorkspaceEditPage, { workspaceId: 'workspace-1' }),
         ),
       );
       await Promise.resolve();
     });
-    const editor = view.container.querySelector<HTMLDetailsElement>('.operator-limits')!;
-    editor.open = true;
-    editor.dispatchEvent(new Event('toggle'));
     await act(async () => {
       await new Promise((r) => setTimeout(r, 250));
     });

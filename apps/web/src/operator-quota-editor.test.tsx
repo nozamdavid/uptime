@@ -80,7 +80,7 @@ describe('WorkspaceLimitsEditor', () => {
     warnings: ['Monitor claims exceed regional dispatch capacity by 40%.'],
   };
 
-  it('offers the existing editor for a waiting workspace with effective limits', async () => {
+  it('shows the editor for a waiting workspace with effective limits', async () => {
     const view = createTestRoot();
     await act(async () => {
       view.root.render(
@@ -91,14 +91,12 @@ describe('WorkspaceLimitsEditor', () => {
         }),
       );
     });
-    expect(view.container.querySelector('summary')?.textContent).toBe(
-      'Edit limits for Production Workspace',
-    );
+    expect(view.container.querySelector('.operator-limits__form')).not.toBeNull();
     expect(view.container.querySelector<HTMLInputElement>('input[type="number"]')?.value).toBe('3');
     await view.cleanup();
   });
 
-  it('renders quota editor and triggers live capacity preview when opened', async () => {
+  it('renders quota editor and triggers live capacity preview', async () => {
     vi.useFakeTimers();
     apiMock.operatorWorkspaceLimitsPreview.mockResolvedValue({ capacity: safeCapacity });
 
@@ -111,12 +109,6 @@ describe('WorkspaceLimitsEditor', () => {
           onSaved: vi.fn(),
         }),
       );
-    });
-
-    const details = view.container.querySelector('details')!;
-    await act(async () => {
-      details.open = true;
-      details.dispatchEvent(new Event('toggle'));
     });
 
     await act(async () => {
@@ -150,12 +142,6 @@ describe('WorkspaceLimitsEditor', () => {
       );
     });
 
-    const details = view.container.querySelector('details')!;
-    await act(async () => {
-      details.open = true;
-      details.dispatchEvent(new Event('toggle'));
-    });
-
     const saveButton = view.container.querySelector<HTMLButtonElement>('button')!;
     expect(saveButton.disabled).toBe(true);
 
@@ -183,12 +169,6 @@ describe('WorkspaceLimitsEditor', () => {
           onSaved: vi.fn(),
         }),
       );
-    });
-
-    const details = view.container.querySelector('details')!;
-    await act(async () => {
-      details.open = true;
-      details.dispatchEvent(new Event('toggle'));
     });
 
     await act(async () => {
@@ -225,12 +205,6 @@ describe('WorkspaceLimitsEditor', () => {
           onSaved: vi.fn(),
         }),
       );
-    });
-
-    const details = view.container.querySelector('details')!;
-    await act(async () => {
-      details.open = true;
-      details.dispatchEvent(new Event('toggle'));
     });
 
     // First preview debounce trigger
@@ -309,12 +283,6 @@ describe('WorkspaceLimitsEditor', () => {
       );
     });
 
-    const details = view.container.querySelector('details')!;
-    await act(async () => {
-      details.open = true;
-      details.dispatchEvent(new Event('toggle'));
-    });
-
     // Trigger first preview debounce
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
@@ -372,12 +340,6 @@ describe('WorkspaceLimitsEditor', () => {
       );
     });
 
-    const details = view.container.querySelector('details')!;
-    await act(async () => {
-      details.open = true;
-      details.dispatchEvent(new Event('toggle'));
-    });
-
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
@@ -431,12 +393,6 @@ describe('WorkspaceLimitsEditor', () => {
           onSaved: vi.fn(),
         }),
       );
-    });
-
-    const details = view.container.querySelector('details')!;
-    await act(async () => {
-      details.open = true;
-      details.dispatchEvent(new Event('toggle'));
     });
 
     await act(async () => {

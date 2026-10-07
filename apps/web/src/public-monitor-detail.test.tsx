@@ -6,6 +6,7 @@ import type { PublicMonitorDetailResponse } from './api.js';
 
 const apiMock = vi.hoisted(() => ({
   publicMonitor: vi.fn(),
+  publicStatusPage: vi.fn(),
   monitor: vi.fn(),
   observations: vi.fn(),
   dnsDiagnostics: vi.fn(),
@@ -67,6 +68,22 @@ afterEach(() => {
 });
 
 describe('public monitor direct retrieval', () => {
+  it('inherits the font fetched from its status page', async () => {
+    apiMock.publicMonitor.mockResolvedValue(detail);
+    apiMock.publicStatusPage.mockResolvedValue({
+      id: 'page', title: 'Service status', publicSlug: null, fontFamily: 'dm-sans', groups: [],
+    });
+    const view = createTestRoot();
+    await act(async () => {
+      view.root.render(createElement(MonitorDetail, {
+        monitorId: 'example', publicMode: true, statusPageId: 'page',
+      }));
+      await Promise.resolve();
+    });
+    expect(apiMock.publicStatusPage).toHaveBeenCalledWith('page');
+    expect(view.container.querySelector('.detail')?.getAttribute('data-font')).toBe('dm-sans');
+    await view.cleanup();
+  });
   it('uses the public API even with reports enabled and fetches each selected range', async () => {
     vi.stubEnv('VITE_REPORTS_BASE_URL', '/reports');
     apiMock.publicMonitor.mockResolvedValue(detail);

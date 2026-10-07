@@ -157,9 +157,9 @@ describe('WorkspaceCustomDomainsPanel', () => {
       });
 
       const text = view.container.textContent ?? '';
-      expect(text).toContain('Custom Status Domains');
-      expect(text).toContain('STAGING SIMULATION');
-      expect(text).toContain('1 / 3 custom domains used (2 remaining)');
+      expect(text).toContain('Custom status domains');
+      expect(text).toContain('Staging simulation');
+      expect(text).toContain('1 / 3 custom domains used · 2 remaining');
       expect(text).toContain('status.example.com');
       expect(text).toContain('ACTIVE');
       expect(text).toContain('Attached to status page ID: sp_1');
@@ -215,7 +215,7 @@ describe('WorkspaceCustomDomainsPanel', () => {
       });
 
       expect(view.container.textContent).toContain(
-        'Your current plan does not include custom domains.',
+        'Custom domains are unavailable on the current plan.',
       );
       expect(view.container.textContent).toContain('Upgrade your subscription');
       expect(view.container.querySelector('form')).toBeNull();

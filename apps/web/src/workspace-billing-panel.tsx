@@ -280,22 +280,33 @@ export function WorkspaceBillingPanel({
 
   return (
     <div className="settings-card" id="subscription">
-      <header
-        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}
-      >
-        <div>
-          <h2>Subscription &amp; Billing</h2>
-          <p className="settings-card__tier-title">
-            <strong>Current Plan:</strong> {planName}
-            {planRevision !== undefined && planRevision !== null && (
-              <span className="mono-label" style={{ marginLeft: '0.5rem' }}>
-                REVISION {planRevision}
-              </span>
-            )}
-          </p>
-        </div>
-        {isSimulation && <span className="badge badge--preview">SIMULATION MODE</span>}
+      <header className="settings-section-head">
+        <h2>Subscription and billing</h2>
+        {isSimulation && <span className="badge badge--preview">Simulation mode</span>}
       </header>
+
+      <dl className="settings-facts settings-facts--summary">
+        <div>
+          <dt>Current plan</dt>
+          <dd>{planName}</dd>
+        </div>
+        <div>
+          <dt>Status</dt>
+          <dd>{sub?.status ? sub.status.charAt(0).toUpperCase() + sub.status.slice(1) : 'Active'}</dd>
+        </div>
+        {planRevision !== undefined && planRevision !== null && (
+          <div>
+            <dt>Plan revision</dt>
+            <dd className="tnum">{planRevision}</dd>
+          </div>
+        )}
+        {sub?.currentPeriodEnd && !sub.cancelAtPeriodEnd && (
+          <div>
+            <dt>Next renewal</dt>
+            <dd>{formatUnixSeconds(sub.currentPeriodEnd)}</dd>
+          </div>
+        )}
+      </dl>
 
       {error && (
         <div className="state state--error" role="alert" style={{ margin: '1rem 0' }}>
@@ -329,66 +340,68 @@ export function WorkspaceBillingPanel({
         </div>
       )}
 
-      {/* Status Details */}
-      <div className="subscription-details" style={{ margin: '1rem 0' }}>
-        <p>
-          <strong>Status:</strong>{' '}
-          {sub?.status ? sub.status.charAt(0).toUpperCase() + sub.status.slice(1) : 'Active'}
-        </p>
-
+      <div className="subscription-details">
         {sub?.cancelAtPeriodEnd && sub.currentPeriodEnd && (
-          <p className="settings-note" style={{ color: 'var(--color-warning-text, #b45309)' }}>
-            ⚠️ Canceling at end of billing cycle. Access retained until{' '}
+          <p className="settings-note settings-billing-alert settings-billing-alert--warning">
+            Canceling at end of billing cycle. Access retained until{' '}
             <strong>{formatUnixSeconds(sub.currentPeriodEnd)}</strong>.
           </p>
         )}
 
         {sub?.graceUntil && (
-          <p className="settings-note" style={{ color: 'var(--color-danger-text, #b91c1c)' }}>
-            ⚠️ Payment past due. Grace period active until{' '}
+          <p className="settings-note settings-billing-alert settings-billing-alert--danger">
+            Payment past due. Grace period active until{' '}
             <strong>{formatUnixSeconds(sub.graceUntil)}</strong>.
-          </p>
-        )}
-
-        {sub?.currentPeriodEnd && !sub.cancelAtPeriodEnd && (
-          <p className="settings-note">
-            Next renewal date: <strong>{formatUnixSeconds(sub.currentPeriodEnd)}</strong>
           </p>
         )}
       </div>
 
-      {/* Entitlements and Usage */}
       {entitlements?.entitlements && (
-        <div className="subscription-usage" style={{ margin: '1rem 0' }}>
-          <p>
-            {entitlements.usage.monitors} / {entitlements.entitlements.monitors} monitors ·{' '}
-            {entitlements.usage.statusPages} / {entitlements.entitlements.statusPages} status pages
-            ·{' '}
-            {entitlements.usage.notificationDestinations ?? entitlements.usage.notificationServices}{' '}
-            / {entitlements.entitlements.notificationDestinations} notification destinations
-          </p>
-          <p className="settings-note">
-            {entitlements.usage.seats ?? 1} / {entitlements.entitlements.seats} seats ·{' '}
-            {entitlements.entitlements.customDomains} custom status domains (preview) · Up to{' '}
-            {entitlements.entitlements.regions} regions per check
-          </p>
-          <p className="settings-note">
-            This quota is shared by everyone in the workspace. Up to{' '}
+        <section className="subscription-usage" aria-labelledby="subscription-usage-heading">
+          <h3 id="subscription-usage-heading">Usage and limits</h3>
+          <dl className="settings-usage-grid">
+            <div>
+              <dt>Monitors</dt>
+              <dd>{entitlements.usage.monitors} / {entitlements.entitlements.monitors}</dd>
+            </div>
+            <div>
+              <dt>Status pages</dt>
+              <dd>{entitlements.usage.statusPages} / {entitlements.entitlements.statusPages}</dd>
+            </div>
+            <div>
+              <dt>Notification destinations</dt>
+              <dd>{entitlements.usage.notificationDestinations ?? entitlements.usage.notificationServices} / {entitlements.entitlements.notificationDestinations}</dd>
+            </div>
+            <div>
+              <dt>Seats</dt>
+              <dd>{entitlements.usage.seats ?? 1} / {entitlements.entitlements.seats}</dd>
+            </div>
+            <div>
+              <dt>Custom status domains <span className="settings-muted">(preview)</span></dt>
+              <dd>{entitlements.entitlements.customDomains} available</dd>
+            </div>
+            <div>
+              <dt>Regions per check</dt>
+              <dd>Up to {entitlements.entitlements.regions}</dd>
+            </div>
+          </dl>
+          <p className="settings-note settings-usage-hint">
+            These limits are shared by everyone in the workspace. Each monitor can use up to{' '}
             {entitlements.entitlements.regions} region
-            {entitlements.entitlements.regions === 1 ? '' : 's'} per monitor.
-            {entitlements.entitlements.allowedRegionIds &&
-              entitlements.entitlements.allowedRegionIds.length > 0 && (
-                <>
-                  {' '}
-                  Allowed regions:{' '}
+            {entitlements.entitlements.regions === 1 ? '' : 's'}.
+          </p>
+          {entitlements.entitlements.allowedRegionIds &&
+            entitlements.entitlements.allowedRegionIds.length > 0 && (
+              <div className="settings-allowed-regions">
+                <h4>Allowed regions</h4>
+                <p>
                   {entitlements.entitlements.allowedRegionIds
                     .map((regionId) => findRegion(regionId)?.label ?? regionId)
                     .join(', ')}
-                  .
-                </>
-              )}
-          </p>
-        </div>
+                </p>
+              </div>
+            )}
+        </section>
       )}
 
       {entitlements?.overrides && (
@@ -434,7 +447,7 @@ export function WorkspaceBillingPanel({
 
       {/* Owner Actions */}
       {canManage && (
-        <div className="subscription-actions" style={{ marginTop: '1.5rem' }}>
+        <div className="subscription-actions">
           {/* Setup pending notice */}
           {billing && !billing.ready && billing.setupReasons.length > 0 && (
             <div className="field-error" role="status" style={{ marginBottom: '1rem' }}>
@@ -444,28 +457,20 @@ export function WorkspaceBillingPanel({
 
           {/* Checkout / Upgrade Options */}
           {billing?.actions?.checkout && (
-            <div className="subscription-upgrade-box" style={{ marginBottom: '1.25rem' }}>
-              <h3>Upgrade Workspace Plan</h3>
-              <div
-                style={{
-                  display: 'flex',
-                  gap: '0.75rem',
-                  alignItems: 'center',
-                  marginTop: '0.5rem',
-                }}
-              >
+            <div className="subscription-upgrade-box">
+              <h3>Upgrade workspace plan</h3>
+              <div className="subscription-upgrade-controls">
                 {catalog?.plans && (
                   <Select
                     aria-label="Plan"
                     value={selectedPlanId}
                     onChange={setSelectedPlanId}
                     disabled={actionBusy || isPendingReconciliation}
-                    style={{ minWidth: '180px', width: 'auto' }}
                     options={catalog.plans
                       .filter((p) => p.active)
                       .map((p) => ({
                         value: p.id,
-                        label: `${p.name} (${formatPlanCents(p.price.amount)}/mo)`,
+                        label: `${p.name} (${formatPlanCents(p.price.amount)})`,
                       }))}
                   />
                 )}
@@ -475,7 +480,7 @@ export function WorkspaceBillingPanel({
                   onClick={() => handleCheckout(selectedPlanId)}
                   disabled={actionBusy || isPendingReconciliation}
                 >
-                  {actionBusy ? 'Processing…' : 'Proceed to Checkout'}
+                  {actionBusy ? 'Processing…' : 'Proceed to checkout'}
                 </button>
               </div>
             </div>

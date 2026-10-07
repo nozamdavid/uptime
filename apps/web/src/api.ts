@@ -83,6 +83,7 @@ export interface StatusPageSummary {
   monitorCount: number;
   createdAt: string;
   updatedAt: string;
+  fontFamily: import('@uptime/contracts').StatusPageFontFamily;
 }
 export interface StatusPageDetail extends StatusPageSummary {
   groups: Array<{
@@ -859,8 +860,8 @@ export const api = {
     request<{ statusPage: StatusPageDetail }>(`/status-pages/${id}`).then(
       (result) => result.statusPage,
     ),
-  updateStatusPage: (id: string, input: Partial<StatusPageSave>) =>
-    sendJson<{ statusPage: StatusPageDetail }>(`/status-pages/${id}`, 'PATCH', input).then(
+  updateStatusPage: (id: string, input: StatusPageSave) =>
+    sendJson<{ statusPage: StatusPageDetail }>(`/status-pages/${id}`, 'PUT', input).then(
       (result) => result.statusPage,
     ),
   deleteStatusPage: (id: string) => request<void>(`/status-pages/${id}`, { method: 'DELETE' }),

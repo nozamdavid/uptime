@@ -27,7 +27,15 @@ import { DeleteHistoryDialog, MonitorForm } from './monitor-form.js';
 import { MonitorBadge } from './monitor-badge.js';
 import { monitorDisplayName } from './monitor-format.js';
 import { Select } from './select.js';
-import { assessLatencySampling, formatAge } from './reports.js';
+import { ThemeControl } from './theme.js';
+import {
+  assessLatencySampling,
+  formatAge,
+  loadStatusPageReport,
+  statusPageSnapshotToPage,
+} from './reports.js';
+import { publicReportsEnabled } from './config.js';
+import { defaultFontFamily, resolveFontFamily, type FontFamily } from './font-choice.js';
 import { formatLatency, formatPercentage } from './status-page-format.js';
 import { UptimeStrip, uptimeSeverity } from './uptime-strip.js';
 import './monitor-design.css';
@@ -195,6 +203,7 @@ export function MonitorDetail({
   const [error, setError] = useState('');
   const [reload, setReload] = useState(0);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [pageFont, setPageFont] = useState<{ reference: string; family: FontFamily } | null>(null);
   const inFlightRefresh = useRef<Promise<void> | null>(null);
   const displayedRequestKey = useRef<string | null>(null);
   const observationGeneration = useRef(0);
@@ -209,6 +218,25 @@ export function MonitorDetail({
     data.summary.monitor.dnsDiagnosticsEnabled,
   );
   const load = () => setReload((value) => value + 1);
+
+  useEffect(() => {
+    if (!publicMode || !statusPageId) return;
+    let active = true;
+    const pageRequest = publicReportsEnabled()
+      ? loadStatusPageReport(statusPageId).then(statusPageSnapshotToPage)
+      : api.publicStatusPage(statusPageId);
+    void pageRequest
+      .then((page) => {
+        if (active)
+          setPageFont({ reference: statusPageId, family: resolveFontFamily(page.fontFamily) });
+      })
+      .catch(() => {
+        if (active) setPageFont(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [publicMode, statusPageId]);
 
   useEffect(() => {
     let active = true;
@@ -313,23 +341,35 @@ export function MonitorDetail({
 
   if (error && !data)
     return (
-      <div className="state state--error" role="alert">
-        <p>{error}</p>
-        <button
-          className="button button--quiet ut-btn ut-btn--secondary"
-          onClick={() => {
-            setError('');
-            load();
-          }}
-        >
-          Try again
-        </button>
-      </div>
+      <>
+        {publicMode && (
+          <div className="theme-toolbar">
+            <ThemeControl />
+          </div>
+        )}
+        <div className="state state--error" role="alert">
+          <p>{error}</p>
+          <button
+            className="button button--quiet ut-btn ut-btn--secondary"
+            onClick={() => {
+              setError('');
+              load();
+            }}
+          >
+            Try again
+          </button>
+        </div>
+      </>
     );
 
   if (!data || !observations)
     return publicMode ? (
-      <MonitorDetailLoadingSkeleton />
+      <>
+        <div className="theme-toolbar">
+          <ThemeControl />
+        </div>
+        <MonitorDetailLoadingSkeleton />
+      </>
     ) : (
       <div className="state state--loading" role="status">
         <p>Loading monitor history…</p>
@@ -369,12 +409,25 @@ export function MonitorDetail({
   const publicUrl = `${window.location.origin}/monitors/public/${monitor.publicSlug ?? monitor.id}${workspaceSearch(session)}`;
 
   return (
-    <section className="detail">
+    <section
+      className={publicMode ? 'detail font-choice' : 'detail'}
+      {...(publicMode
+        ? {
+            'data-font':
+              pageFont && pageFont.reference === statusPageId
+                ? pageFont.family
+                : defaultFontFamily,
+          }
+        : {})}
+    >
       {/* 1. Header */}
       <div className="page-head ut-detail-header">
         <div className="ut-stack">
           {publicMode && statusPageId ? (
-            <AppLink href={`/status/${encodeURIComponent(statusPageId)}`} className="back-link">
+            <AppLink
+              href={`/status/${encodeURIComponent(statusPageId)}${workspaceSearch(null)}`}
+              className="back-link"
+            >
               ← Back to status page
             </AppLink>
           ) : !publicMode ? (
@@ -423,6 +476,7 @@ export function MonitorDetail({
           >
             Auto-refresh {autoRefresh ? 'on' : 'off'}
           </button>
+          {publicMode && <ThemeControl />}
           {!publicMode && canWrite && (
             <>
               <button

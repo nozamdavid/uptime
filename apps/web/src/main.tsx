@@ -28,11 +28,13 @@ import {
   InterestSignupPage,
   LandingPage,
   OperatorPage,
+  OperatorWorkspaceEditPage,
   ProductSessionContext,
   SettingsPage,
 } from './product-shell.js';
 import { MockBillingCheckoutPage } from './mock-billing-checkout.js';
 import { Select } from './select.js';
+import { ThemeControl } from './theme.js';
 
 const rootRoute = createRootRoute({ component: AppShell });
 const indexRoute = createRoute({
@@ -69,6 +71,11 @@ const operatorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/operator',
   component: OperatorPage,
+});
+const operatorWorkspaceEditRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/operator/workspaces/$workspaceId',
+  component: OperatorWorkspaceEditRoute,
 });
 const detailRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -113,6 +120,7 @@ const routeTree = rootRoute.addChildren([
   signupRoute,
   settingsRoute,
   operatorRoute,
+  operatorWorkspaceEditRoute,
   detailRoute,
   publicDetailRoute,
   statusPagesRoute,
@@ -130,6 +138,12 @@ declare module '@tanstack/react-router' {
 
 export function isPublicMonitorPath(pathname: string) {
   return pathname.startsWith('/monitors/public/') || pathname.startsWith('/status/');
+}
+
+function workspacePlanLabel(tierId: string | null, legacyExempt: boolean) {
+  if (legacyExempt && !tierId) return 'Imported';
+  if (!tierId) return null;
+  return tierId === 'free' ? 'Free' : tierId === 'pro' ? 'Pro' : tierId;
 }
 
 export function AppShell() {
@@ -178,19 +192,26 @@ export function AppShell() {
   if (isLanding || isPricing)
     return (
       <main className="public-workspace">
+        <div className="theme-toolbar">
+          <ThemeControl />
+        </div>
         <Outlet />
       </main>
     );
   if (isAuthRoute)
     return (
       <main className="public-workspace">
+        <div className="theme-toolbar">
+          <ThemeControl />
+        </div>
         <Outlet />
       </main>
     );
   if (isPublicRoute)
     return (
       <main
-        className={`workspace public-workspace${isPublicStatusPage ? ' public-status-workspace' : ''}`}
+        className={`workspace public-workspace font-choice${isPublicStatusPage ? ' public-status-workspace' : ' public-monitor-workspace'}`}
+        data-font="josefin-sans"
       >
         <Outlet />
       </main>
@@ -223,7 +244,10 @@ export function AppShell() {
       />
     );
   const allowRestrictedRoute =
-    pathname === '/settings' || pathname === '/operator' || pathname === '/mock-billing/checkout';
+    pathname === '/settings' ||
+    pathname === '/operator' ||
+    pathname.startsWith('/operator/') ||
+    pathname === '/mock-billing/checkout';
   return (
     <ProductSessionContext.Provider value={session}>
       <Workspace
@@ -252,6 +276,11 @@ export function Workspace({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [monitors, setMonitors] = useState<MonitorSummary[] | null>(null);
+  const [workspaceTier, setWorkspaceTier] = useState<{
+    workspaceId: string;
+    label: string | null;
+  } | null>(null);
+  const requestedWorkspaceId = useRef(session?.workspace?.id);
   const [selected, setSelected] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -261,6 +290,27 @@ export function Workspace({
   const wasMobileOpen = useRef(false);
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+
+  useEffect(() => {
+    const workspaceId = session?.workspace?.id;
+    requestedWorkspaceId.current = workspaceId;
+    if (!workspaceId) return;
+    let active = true;
+    api.workspaceEntitlements()
+      .then(({ tierId, legacyExempt }) => {
+        if (active && requestedWorkspaceId.current === workspaceId) {
+          setWorkspaceTier({ workspaceId, label: workspacePlanLabel(tierId, legacyExempt) });
+        }
+      })
+      .catch(() => {
+        if (active && requestedWorkspaceId.current === workspaceId) {
+          setWorkspaceTier({ workspaceId, label: null });
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [session?.workspace?.id]);
 
   const refreshMonitors = useCallback(() => {
     api
@@ -386,6 +436,12 @@ export function Workspace({
   const totalMonitors = hasMonitorsData ? monitors.length : session?.usage?.monitors;
   const statusPagesCount = session?.usage?.statusPages ?? 0;
   const notificationsCount = session?.usage?.notificationServices ?? 0;
+  const planLabel =
+    requestedWorkspaceId.current === session?.workspace?.id &&
+    workspaceTier !== null &&
+    workspaceTier.workspaceId === session?.workspace?.id
+      ? workspaceTier.label
+      : null;
 
   return (
     <div className="admin-shell">
@@ -468,7 +524,7 @@ export function Workspace({
         </ul>
 
         {session?.isOperator && (
-          <div className="ut-nav__group">
+          <div className="ut-nav__group ut-nav__operator">
             <ul className="ut-nav__items">
               <li>
                 <SectionLink to="/operator" onClick={() => setMobileMenuOpen(false)}>
@@ -483,7 +539,7 @@ export function Workspace({
           {session?.workspaces && session.workspaces.length > 0 && (
             <div className="ut-nav__workspace">
               <label className="ut-nav__workspace-label" htmlFor="workspace-select">
-                Workspace
+                Workspace{planLabel ? ` (${planLabel})` : ''}
               </label>
               <Select
                 id="workspace-select"
@@ -494,6 +550,8 @@ export function Workspace({
                   label: workspace.name,
                 }))}
                 onChange={(val) => {
+                  requestedWorkspaceId.current = val;
+                  setWorkspaceTier(null);
                   window.sessionStorage.setItem('uptime.workspaceId', val);
                   window.location.reload();
                 }}
@@ -510,6 +568,9 @@ export function Workspace({
       </nav>
 
       <div className="admin-main" inert={mobileMenuOpen ? true : undefined}>
+        <div className="admin-theme-toolbar">
+          <ThemeControl />
+        </div>
         <main
           className={`admin-content workspace${session?.workspace?.state !== 'active' ? ' workspace--restricted' : ''}`}
         >
@@ -519,17 +580,6 @@ export function Workspace({
             children
           )}
         </main>
-        <footer
-          className="footer-line"
-          style={{
-            maxWidth: '1200px',
-            marginInline: 'auto',
-            width: '100%',
-            paddingInline: 'var(--space-8)',
-          }}
-        >
-          <span>Free monitoring</span>
-        </footer>
       </div>
 
       {open && (
@@ -783,6 +833,10 @@ function SignupRoute() {
 function DetailRoute() {
   const { monitorId } = detailRoute.useParams();
   return <MonitorDetail monitorId={monitorId} />;
+}
+function OperatorWorkspaceEditRoute() {
+  const { workspaceId } = operatorWorkspaceEditRoute.useParams();
+  return <OperatorWorkspaceEditPage workspaceId={workspaceId} />;
 }
 function PublicDetailRoute() {
   const { monitorId } = publicDetailRoute.useParams();

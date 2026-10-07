@@ -172,6 +172,33 @@ importers:
 
   apps/web:
     dependencies:
+      '@fontsource-variable/dm-sans':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource-variable/inter':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource-variable/josefin-sans':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource-variable/nunito':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource-variable/open-sans':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource-variable/roboto':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource-variable/rubik':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource/poppins':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource/ubuntu':
+        specifier: ^5.3.0
+        version: 5.3.0
       '@tanstack/react-router':
         specifier: ^1.131.21
         version: 1.170.32(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -1150,6 +1177,33 @@ packages:
 
   '@fastify/rate-limit@10.3.0':
     resolution: {integrity: sha512-eIGkG9XKQs0nyynatApA3EVrojHOuq4l6fhB4eeCk4PIOeadvOJz9/4w3vGI44Go17uaXOWEcPkaD8kuKm7g6Q==}
+
+  '@fontsource-variable/dm-sans@5.3.0':
+    resolution: {integrity: sha512-BpUG5bqePiDFMBM4ZtLSlPdAIOM990uB1dlXzIf4aw21yQR7BmykedLXXXMqGWsR18aMLOsbWccwJNh3ztTQaA==}
+
+  '@fontsource-variable/inter@5.3.0':
+    resolution: {integrity: sha512-OupL48va4JNofb97w6NYeF9S7W/kHNKM0Er8Dem5nqi4jeOLrVJDoE8tZEpnMJmtkvNbB1EIPPwHcdkF6b1oUA==}
+
+  '@fontsource-variable/josefin-sans@5.3.0':
+    resolution: {integrity: sha512-duVgkuzE/co4iuIfJ7jM2qX0ED3b6qdY+SlSjNMs6zfhz7EE7kJxV0qF65hQCv1kN0A20j4FwsGAYJvfpU+iSg==}
+
+  '@fontsource-variable/nunito@5.3.0':
+    resolution: {integrity: sha512-tw0ch7evIDSwoeUy+0XzocYHfbRWLeCRPJy22KgbrLjDLAbNw/fErBiil10Ssrs3Sjr55zaZrr36a975j8cBkQ==}
+
+  '@fontsource-variable/open-sans@5.3.0':
+    resolution: {integrity: sha512-VOfhZfLIOBVa6K/dTEu7scqQXYdGa4jBX8quFpQ0S6574B+W2EOBJf9PkqyVtMEI7WWIWNEbpvPc3vY1mN2mmQ==}
+
+  '@fontsource-variable/roboto@5.3.0':
+    resolution: {integrity: sha512-BoaaZiQf8fgtxv07KXkTwx1bKz/EoqIlTXq2OOKKXINxp6qXWdnlChqV+hSaDANS49yyUASFl3OVBMMDTCIHFA==}
+
+  '@fontsource-variable/rubik@5.3.0':
+    resolution: {integrity: sha512-yQUf8qle24MJYA+EuauyF+cqjjN6I715nGjitt3sGmwZA0XfA4fWJcLq1C/diREZl4Qzn1E80nLMc0ipC/a4Lg==}
+
+  '@fontsource/poppins@5.3.0':
+    resolution: {integrity: sha512-cms1nM7U6SN8epIV1WMVOV8VsA645aSm3wHfzIQnkk188U341ThbJGSl2Sv54V29gnDbT2arMPfLzvVIIVCceQ==}
+
+  '@fontsource/ubuntu@5.3.0':
+    resolution: {integrity: sha512-LsjJXgE430QLs8LKfn1RIFbbdGAiZBU1gao8ASa4Z2kGNGh7lMb7Rzx09v3bLLuuK+3XA/JSLgPWTAbLD6r1fg==}
 
   '@img/colour@1.1.0':
     resolution: {integrity: sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ==}
@@ -3309,6 +3363,24 @@ snapshots:
       '@lukeed/ms': 2.0.2
       fastify-plugin: 5.1.0
       toad-cache: 3.7.4
+
+  '@fontsource-variable/dm-sans@5.3.0': {}
+
+  '@fontsource-variable/inter@5.3.0': {}
+
+  '@fontsource-variable/josefin-sans@5.3.0': {}
+
+  '@fontsource-variable/nunito@5.3.0': {}
+
+  '@fontsource-variable/open-sans@5.3.0': {}
+
+  '@fontsource-variable/roboto@5.3.0': {}
+
+  '@fontsource-variable/rubik@5.3.0': {}
+
+  '@fontsource/poppins@5.3.0': {}
+
+  '@fontsource/ubuntu@5.3.0': {}
 
   '@img/colour@1.1.0': {}
 

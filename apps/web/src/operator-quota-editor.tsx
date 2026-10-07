@@ -43,7 +43,6 @@ export function WorkspaceLimitsEditor({
   const [previewError, setPreviewError] = useState('');
   const [saveError, setSaveError] = useState('');
   const [saved, setSaved] = useState(false);
-  const [isOpen, setIsOpen] = useState(false);
 
   const previewSeq = useRef(0);
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -79,15 +78,6 @@ export function WorkspaceLimitsEditor({
     if (debounceTimer.current) {
       clearTimeout(debounceTimer.current);
       debounceTimer.current = null;
-    }
-
-    if (!isOpen) {
-      setPreview(null);
-      setPreviewKey(null);
-      setPreviewing(false);
-      setPreviewError('');
-      setInvalidField(null);
-      return;
     }
 
     const currentKey = computeQuotaKey(workspace.id, monitors, regions, allowedRegionIds);
@@ -183,7 +173,7 @@ export function WorkspaceLimitsEditor({
     return () => {
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
     };
-  }, [monitors, regions, allowedRegionIds, isOpen, availableRegions, workspace.id]);
+  }, [monitors, regions, allowedRegionIds, availableRegions, workspace.id]);
 
   const selectedNames = workspaceRegionNames(allowedRegionIds);
 
@@ -287,12 +277,7 @@ export function WorkspaceLimitsEditor({
   if (!limits) return null;
 
   return (
-    <details
-      className="operator-limits"
-      open={isOpen}
-      onToggle={(event) => setIsOpen((event.currentTarget as HTMLDetailsElement).open)}
-    >
-      <summary>Edit limits for {workspace.name}</summary>
+    <div className="operator-limits">
       <form className="operator-limits__form" noValidate onSubmit={(event) => void submit(event)}>
         <label>
           Saved monitors
@@ -465,6 +450,6 @@ export function WorkspaceLimitsEditor({
           {pending ? 'Saving…' : 'Save limits'}
         </button>
       </form>
-    </details>
+    </div>
   );
 }

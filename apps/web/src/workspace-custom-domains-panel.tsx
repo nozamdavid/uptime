@@ -308,16 +308,14 @@ export function WorkspaceCustomDomainsPanel({
 
   return (
     <div className="settings-card" id="custom-domains">
-      <header
-        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}
-      >
+      <header className="settings-section-head">
         <div>
-          <h2>Custom Status Domains</h2>
+          <h2>Custom status domains</h2>
           <p className="settings-card__tier-title">
-            Route your status pages through your own branding and branded URLs.
+            Use your own domain for a public status page.
           </p>
         </div>
-        {isSimulation && <span className="badge badge--preview">STAGING SIMULATION</span>}
+        {isSimulation && <span className="badge badge--preview">Staging simulation</span>}
       </header>
 
       {/* Member read-only notice */}
@@ -329,18 +327,12 @@ export function WorkspaceCustomDomainsPanel({
 
       {/* Staging notification */}
       {isSimulation && (
-        <div
-          className="settings-note"
-          style={{
-            background: 'var(--color-surface-subtle)',
-            padding: '0.75rem',
-            borderRadius: '4px',
-            margin: '0.75rem 0',
-          }}
-        >
-          <strong>Staging environment notice:</strong> Custom domain DNS validation is simulated. Do
-          not configure real DNS records at your domain registrar. Use the simulation controls below
-          to verify status page routing.
+        <div className="settings-domain-notice settings-note">
+          <h3>Staging environment</h3>
+          <p>
+            Custom domain DNS validation is simulated. Do not configure real DNS records at your
+            domain registrar. Use the simulation controls below to verify status page routing.
+          </p>
         </div>
       )}
 
@@ -357,14 +349,15 @@ export function WorkspaceCustomDomainsPanel({
       )}
 
       {/* Quota / Allowance status */}
-      <div className="custom-domain-quota" style={{ margin: '1rem 0' }}>
-        <p>
-          <strong>Allowance:</strong> {totalActive} / {quota} custom domains used{' '}
-          {quota > 0 && <span>({remaining} remaining)</span>}
+      <div className="custom-domain-quota">
+        <h3>Domain allowance</h3>
+        <p className="custom-domain-quota__count">
+          <span className="tnum">{totalActive} / {quota}</span> custom domains used
+          {quota > 0 && <span> · {remaining} remaining</span>}
         </p>
         {quota === 0 && (
           <p className="settings-note">
-            Your current plan does not include custom domains.{' '}
+            Custom domains are unavailable on the current plan.{' '}
             <a href="#subscription" style={{ fontWeight: 600, textDecoration: 'underline' }}>
               Upgrade your subscription
             </a>{' '}
@@ -453,7 +446,14 @@ export function WorkspaceCustomDomainsPanel({
       {/* Domain List */}
       <div className="custom-domain-list" style={{ marginTop: '1.5rem' }}>
         {domains.length === 0 ? (
-          <p className="settings-note">No custom status domains configured for this workspace.</p>
+          <div className="settings-domain-empty">
+            <h3>No custom status domains yet</h3>
+            <p className="settings-note">
+              {quota === 0
+                ? 'Upgrade the plan to connect a domain to a public status page.'
+                : 'Add a domain to connect it to a public status page.'}
+            </p>
+          </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
             {domains.map((domain) => {

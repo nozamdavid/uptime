@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState } from 'rea
 import type { FormEvent } from 'react';
 import { api, isImportedWorkspaceKind } from './api.js';
 import type { ProductSession } from './api.js';
+import { AppLink } from './app-link.js';
 import { SlotAssignment } from './slot-assignment.js';
 import { WorkspaceSettingsMembers } from './workspace-settings-members.js';
 import { OperatorHealthPanel } from './operator-health-panel.js';
@@ -10,6 +11,8 @@ import { WorkspaceLimitsEditor, workspaceRegionNames } from './operator-quota-ed
 import { WorkspaceBillingPanel } from './workspace-billing-panel.js';
 import { WorkspaceCustomDomainsPanel } from './workspace-custom-domains-panel.js';
 import { formatBudgetForecast, formatWorkspaceDatabaseMetrics } from './format-usage.js';
+import { fontOptions, readFontPreference, saveFontPreference } from './font-choice.js';
+import { Select } from './select.js';
 import './admin-views.css';
 
 export const ProductSessionContext = createContext<ProductSession | null>(null);
@@ -259,6 +262,7 @@ export function AuthPage({
 
 export function SettingsPage() {
   const session = useProductSession();
+  const [fontFamily, setFontFamily] = useState(readFontPreference);
   const importedKind = session?.workspace?.kind;
   const importedWorkspace = isImportedWorkspaceKind(importedKind);
   const [members, setMembers] = useState<Awaited<ReturnType<typeof api.workspaceMembers>> | null>(
@@ -338,13 +342,39 @@ export function SettingsPage() {
           {error}
         </p>
       )}
-      <div className="settings-card">
+      <div className="settings-card settings-card--account">
         <h2>{session?.workspace?.name ?? 'Workspace'}</h2>
-        <p>
-          Signed in as <strong>{session?.user?.handle ?? 'AT Protocol account'}</strong>
-        </p>
-        {session?.user?.did && <p className="tnum">{session.user.did}</p>}
-        <p>Role: {session?.role ?? 'owner'}</p>
+        <dl className="settings-facts">
+          <div>
+            <dt>Signed in as</dt>
+            <dd>{session?.user?.handle ?? 'AT Protocol account'}</dd>
+          </div>
+          {session?.user?.did && (
+            <div>
+              <dt>Account ID</dt>
+              <dd className="tnum">{session.user.did}</dd>
+            </div>
+          )}
+          <div>
+            <dt>Role</dt>
+            <dd>{session?.role ?? 'owner'}</dd>
+          </div>
+        </dl>
+      </div>
+
+      <div className="settings-card">
+        <h2>Appearance</h2>
+        <label htmlFor="settings-font-family">Font</label>
+        <Select
+          id="settings-font-family"
+          options={fontOptions}
+          value={fontFamily}
+          onChange={(value) => {
+            setFontFamily(value);
+            saveFontPreference(value);
+          }}
+        />
+        <p className="ut-muted">Your font choice is saved in this browser.</p>
       </div>
 
       <WorkspaceBillingPanel
@@ -745,103 +775,199 @@ export function OperatorPage() {
                         provisioning state.
                       </p>
                     )}
-                    <WorkspaceLimitsEditor
-                      workspace={workspace}
-                      availableRegions={data.availableRegions}
-                      onSaved={(limits) =>
-                        setData((current) =>
-                          current
-                            ? {
-                                ...current,
-                                workspaces: current.workspaces?.map((item) =>
-                                  item.id === workspace.id ? { ...item, limits } : item,
-                                ),
-                              }
-                            : current,
-                        )
-                      }
-                    />
                   </div>
-                  {canSuspend && (
-                    <div>
-                      <button
-                        className="button button--quiet"
-                        disabled={workspaceActions[workspace.id]?.pending}
-                        onClick={() => {
-                          if (workspaceActions[workspace.id]?.pending) return;
-                          setWorkspaceActions((current) => ({
-                            ...current,
-                            [workspace.id]: { pending: true },
-                          }));
-                          void api
-                            .setWorkspaceState(
-                              workspace.id,
-                              nextState,
-                              nextState === 'suspended' ? 'Operator action' : 'Operator restored',
-                            )
-                            .then(() => api.operatorSlots())
-                            .then((inventory) => {
-                              setSlots(inventory);
-                              setData((current) =>
-                                current
-                                  ? {
-                                      ...current,
-                                      workspaces: current.workspaces?.map((item) =>
-                                        item.id === workspace.id
-                                          ? { ...item, state: nextState }
-                                          : item,
-                                      ),
-                                    }
-                                  : current,
+                  <div className="operator-row__actions">
+                    <AppLink
+                      className="button button--secondary"
+                      href={`/operator/workspaces/${encodeURIComponent(workspace.id)}`}
+                    >
+                      Edit workspace
+                    </AppLink>
+                    {canSuspend && (
+                      <>
+                        <button
+                          className="button button--quiet"
+                          disabled={workspaceActions[workspace.id]?.pending}
+                          onClick={() => {
+                            if (workspaceActions[workspace.id]?.pending) return;
+                            setWorkspaceActions((current) => ({
+                              ...current,
+                              [workspace.id]: { pending: true },
+                            }));
+                            void api
+                              .setWorkspaceState(
+                                workspace.id,
+                                nextState,
+                                nextState === 'suspended' ? 'Operator action' : 'Operator restored',
+                              )
+                              .then(() => api.operatorSlots())
+                              .then((inventory) => {
+                                setSlots(inventory);
+                                setData((current) =>
+                                  current
+                                    ? {
+                                        ...current,
+                                        workspaces: current.workspaces?.map((item) =>
+                                          item.id === workspace.id
+                                            ? { ...item, state: nextState }
+                                            : item,
+                                        ),
+                                      }
+                                    : current,
+                                );
+                              })
+                              .catch((reason) =>
+                                setWorkspaceActions((current) => ({
+                                  ...current,
+                                  [workspace.id]: {
+                                    pending: false,
+                                    error:
+                                      reason instanceof Error
+                                        ? reason.message
+                                        : 'Could not update workspace',
+                                  },
+                                })),
+                              )
+                              .finally(() =>
+                                setWorkspaceActions((current) => ({
+                                  ...current,
+                                  [workspace.id]: { ...current[workspace.id], pending: false },
+                                })),
                               );
-                            })
-                            .catch((reason) =>
-                              setWorkspaceActions((current) => ({
-                                ...current,
-                                [workspace.id]: {
-                                  pending: false,
-                                  error:
-                                    reason instanceof Error
-                                      ? reason.message
-                                      : 'Could not update workspace',
-                                },
-                              })),
-                            )
-                            .finally(() =>
-                              setWorkspaceActions((current) => ({
-                                ...current,
-                                [workspace.id]: { ...current[workspace.id], pending: false },
-                              })),
-                            );
-                        }}
-                      >
-                        {workspace.state === 'active'
-                          ? 'Suspend'
-                          : workspace.state === 'suspended'
-                            ? 'Resume'
-                            : 'Activate'}
-                      </button>
-                      {workspaceActions[workspace.id]?.pending && (
-                        <p role="status">
-                          {nextState === 'suspended'
-                            ? 'Suspending'
+                          }}
+                        >
+                          {workspace.state === 'active'
+                            ? 'Suspend'
                             : workspace.state === 'suspended'
-                              ? 'Resuming'
-                              : 'Activating'}{' '}
-                          workspace…
-                        </p>
-                      )}
-                      {workspaceActions[workspace.id]?.error && (
-                        <p role="alert" className="field-error">
-                          {workspaceActions[workspace.id]?.error}
-                        </p>
-                      )}
-                    </div>
-                  )}
+                              ? 'Resume'
+                              : 'Activate'}
+                        </button>
+                        {workspaceActions[workspace.id]?.pending && (
+                          <p role="status">
+                            {nextState === 'suspended'
+                              ? 'Suspending'
+                              : workspace.state === 'suspended'
+                                ? 'Resuming'
+                                : 'Activating'}{' '}
+                            workspace…
+                          </p>
+                        )}
+                        {workspaceActions[workspace.id]?.error && (
+                          <p role="alert" className="field-error">
+                            {workspaceActions[workspace.id]?.error}
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
                 </article>
               );
             })}
           </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+export function OperatorWorkspaceEditPage({ workspaceId }: { workspaceId: string }) {
+  const session = useProductSession();
+  const [data, setData] = useState<Awaited<ReturnType<typeof api.operatorWorkspaces>> | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [reload, setReload] = useState(0);
+
+  useEffect(() => {
+    if (!session?.isOperator) return;
+    let active = true;
+    setLoading(true);
+    setError('');
+    void api
+      .operatorWorkspaces()
+      .then((result) => {
+        if (active) setData(result);
+      })
+      .catch((reason) => {
+        if (active)
+          setError(reason instanceof Error ? reason.message : 'Could not load workspace.');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [session?.isOperator, workspaceId, reload]);
+
+  if (!session?.isOperator) {
+    return (
+      <section className="state state--error" role="alert">
+        <p>Operator access required.</p>
+      </section>
+    );
+  }
+
+  const workspace = data?.workspaces?.find((item) => item.id === workspaceId);
+
+  return (
+    <section className="settings-page operator-workspace-edit">
+      <AppLink className="button button--quiet" href="/operator">
+        Back to workspaces
+      </AppLink>
+      <div className="page-head">
+        <div>
+          <p className="mono-label">Operator</p>
+          <h1>{workspace?.name ?? 'Edit workspace'}</h1>
+        </div>
+      </div>
+      {loading ? (
+        <p role="status">Loading workspace…</p>
+      ) : error ? (
+        <div className="state state--error" role="alert">
+          <p>Could not load workspace: {error}</p>
+          <button className="button button--quiet" onClick={() => setReload((value) => value + 1)}>
+            Retry
+          </button>
+        </div>
+      ) : !workspace ? (
+        <p role="alert">
+          Workspace not found. Return to the workspace list and choose another workspace.
+        </p>
+      ) : (
+        <>
+          <article className="settings-card operator-workspace-edit__summary">
+            <h2>Workspace</h2>
+            <p>{workspace.ownerHandle} · {workspace.ownerDid}</p>
+            <p>Status: {workspace.state} · {workspace.monitorCount.toLocaleString()} monitors</p>
+          </article>
+          {workspace.limits ? (
+            <article className="settings-card operator-workspace-edit__limits">
+              <h2>Limits</h2>
+              <WorkspaceLimitsEditor
+                workspace={workspace}
+                availableRegions={data?.availableRegions ?? []}
+                onSaved={(limits) =>
+                  setData((current) =>
+                    current
+                      ? {
+                          ...current,
+                          workspaces: current.workspaces.map((item) =>
+                            item.id === workspaceId ? { ...item, limits } : item,
+                          ),
+                        }
+                      : current,
+                  )
+                }
+              />
+              <AppLink className="button button--quiet" href="/operator">
+                Cancel and return to workspaces
+              </AppLink>
+            </article>
+          ) : (
+            <p>
+              Hosted limit editing is unavailable for this workspace's import or provisioning state.
+            </p>
+          )}
         </>
       )}
     </section>

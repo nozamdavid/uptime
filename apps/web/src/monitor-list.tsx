@@ -26,12 +26,15 @@ import {
 import { UptimeStrip } from "./uptime-strip.js";
 import "./monitor-design.css";
 
-const sortOptions: Array<{ key: MonitorSortKey; label: string }> = [
-  { key: "status", label: "Status" },
-  { key: "name", label: "Name" },
-  { key: "frequency", label: "Check frequency" },
-  { key: "regions", label: "Regions" },
-  { key: "requests", label: "Requests/day" },
+const boardColumns: Array<{ label: string; sortKey?: MonitorSortKey; numeric?: boolean }> = [
+  { label: "Status", sortKey: "status" },
+  { label: "Monitor", sortKey: "name" },
+  { label: "Frequency", sortKey: "frequency" },
+  { label: "Regions", sortKey: "regions" },
+  { label: "Requests/day", sortKey: "requests", numeric: true },
+  { label: "30 days" },
+  { label: "24h", numeric: true },
+  { label: "p50", numeric: true },
 ];
 
 export interface RowMetrics {
@@ -301,7 +304,7 @@ export function MonitorList({
 
   return (
     <div>
-      {/* Filter row: search, region, badge and sort selects */}
+      {/* Filter row: search, region and badge */}
       <div className="monitor-list-toolbar ut-row">
         <section
           className="monitor-filters ut-row"
@@ -354,31 +357,6 @@ export function MonitorList({
             </button>
           )}
         </section>
-
-        <nav className="monitor-sort ut-row" aria-label="Sort monitors">
-          <span className="ut-label">Sort</span>
-          <div className="monitor-sort__group" role="group" aria-label="Sort options">
-            {sortOptions.map((option) => {
-              const selected = sort?.key === option.key;
-              return (
-                <button
-                  type="button"
-                  key={option.key}
-                  className={`ut-btn ut-btn--secondary ut-btn--sm ${selected ? "is-active" : ""}`}
-                  aria-pressed={selected}
-                  onClick={() => selectSort(option.key)}
-                >
-                  {option.label}
-                  {selected && (
-                    <span className="monitor-sort__direction" aria-hidden="true">
-                      {sort.direction === "ascending" ? " ↑" : " ↓"}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </nav>
 
         {!bulkEditing && (
           <button
@@ -492,13 +470,50 @@ export function MonitorList({
 
       {/* The Board */}
       <div className="ut-board monitor-list" aria-live="polite">
-        <div className="ut-board__head" aria-hidden="true">
-          <span className="ut-label">Status</span>
-          <span className="ut-label">Monitor</span>
-          <span className="ut-label">Regions</span>
-          <span className="ut-label">30 days</span>
-          <span className="ut-label ut-num">24h</span>
-          <span className="ut-label ut-num">p50</span>
+        <div className="ut-board__head" aria-label="Monitor columns">
+          {boardColumns.map((column) => {
+            const numeric = column.numeric ? " ut-num" : "";
+            if (!column.sortKey) {
+              return (
+                <span
+                  key={column.label}
+                  className={`ut-label ut-board__column${numeric}`}
+                >
+                  {column.label}
+                </span>
+              );
+            }
+            // With no explicit choice the board keeps its default order: status, then name.
+            const sortKey = column.sortKey;
+            const active = sort ? sort.key === sortKey : sortKey === "status";
+            const direction = sort?.direction ?? "ascending";
+            return (
+              <span
+                key={column.label}
+                className={`ut-board__column ut-board__column--sortable${numeric}`}
+              >
+                <button
+                  type="button"
+                  className="ut-label ut-board__sort"
+                  onClick={() => selectSort(sortKey)}
+                >
+                  {column.label}
+                  <svg
+                    className={`ut-board__sort-icon${active ? " is-active" : ""}`}
+                    viewBox="0 0 12 12"
+                    aria-hidden="true"
+                  >
+                    {active ? (
+                      <path d={direction === "ascending" ? "M3 7.5l3-3 3 3" : "M3 4.5l3 3 3-3"} />
+                    ) : (
+                      <path d="M3.5 5L6 2.5 8.5 5M3.5 7L6 9.5 8.5 7" />
+                    )}
+                  </svg>
+                  {active && <span className="sr-only">, sorted {direction}</span>}
+                </button>
+              </span>
+            );
+          })}
         </div>
 
         {shown.map((item) => (
@@ -680,8 +695,13 @@ function MonitorRowItem({
           </span>
         </div>
 
+        <span className="ut-monitor__frequency ut-data">
+          {formatInterval(item.monitor.intervalSeconds)}
+        </span>
+
         {/* 3. Nine region dots in registry order */}
         <div>
+          <span className="ut-monitor__mobile-label">Regions: </span>
           <span className="ut-dots" aria-label={formatDotsAriaLabel(item)}>
             {regions.map((region) => {
               const dot = getRegionDotState(item, region.id);
@@ -696,6 +716,10 @@ function MonitorRowItem({
             })}
           </span>
         </div>
+
+        <span className="ut-monitor__requests ut-data ut-num">
+          {item.targetChecksPerDay.toLocaleString()}
+        </span>
 
         {/* 4. 30-day compact strip */}
         <div>

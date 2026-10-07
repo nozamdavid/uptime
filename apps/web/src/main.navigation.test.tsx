@@ -2,7 +2,7 @@
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { RouterProvider } from '@tanstack/react-router';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 window.scrollTo = vi.fn();
@@ -10,6 +10,7 @@ window.scrollTo = vi.fn();
 const apiMock = vi.hoisted(() => ({
   session: vi.fn(),
   monitors: vi.fn(),
+  workspaceEntitlements: vi.fn(),
   signOut: vi.fn(),
 }));
 
@@ -43,15 +44,96 @@ vi.mock('./product-shell.js', async () => {
     InterestSignupPage: page('Signup'),
     LandingPage: page('Landing'),
     OperatorPage: page('Operator'),
+    OperatorWorkspaceEditPage: ({ workspaceId }: { workspaceId: string }) =>
+      createElement('div', null, `Editing ${workspaceId}`),
     ProductSessionContext,
     SettingsPage: page('Settings'),
   };
 });
 
 describe('private section navigation', () => {
+  beforeEach(() => {
+    apiMock.workspaceEntitlements.mockResolvedValue({ tierId: 'free', legacyExempt: false });
+  });
+
   afterEach(() => {
     document.body.innerHTML = '';
     vi.clearAllMocks();
+  });
+
+  it.each([
+    ['free', 'Free'],
+    ['pro', 'Pro'],
+    [null, 'Imported'],
+  ])('shows the effective %s tier and no admin footer', async (tierId, label) => {
+    window.history.replaceState({}, '', '/app');
+    apiMock.workspaceEntitlements.mockResolvedValue({
+      tierId,
+      legacyExempt: tierId === null,
+    });
+    apiMock.session.mockResolvedValue({
+      user: { did: 'did:plc:test', handle: 'test.example' },
+      workspace: { id: 'workspace-1', name: 'Test', plan: 'free', state: 'active' },
+      workspaces: [{ id: 'workspace-1', name: 'Test', state: 'active', role: 'owner' }],
+      role: 'owner',
+    });
+    apiMock.monitors.mockResolvedValue({ monitors: [] });
+
+    const { router } = await import('./main.js');
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(RouterProvider, { router }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('.ut-nav__workspace-label')?.textContent).toBe(
+      `Workspace (${label})`,
+    );
+    expect(container.querySelector('#workspace-select')).not.toBeNull();
+    expect(container.querySelector('.admin-main footer')).toBeNull();
+    expect(container.textContent).not.toContain('Free monitoring');
+    expect(apiMock.workspaceEntitlements).toHaveBeenCalledTimes(1);
+
+    await act(async () => root.unmount());
+  });
+
+  it('shows no tier while entitlements load or after they fail', async () => {
+    window.history.replaceState({}, '', '/app');
+    let rejectEntitlements!: (reason: Error) => void;
+    apiMock.workspaceEntitlements.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectEntitlements = reject;
+      }),
+    );
+    apiMock.session.mockResolvedValue({
+      user: { did: 'did:plc:test', handle: 'test.example' },
+      workspace: { id: 'workspace-1', name: 'Test', plan: 'free', state: 'active' },
+      workspaces: [{ id: 'workspace-1', name: 'Test', state: 'active', role: 'owner' }],
+      role: 'owner',
+    });
+    apiMock.monitors.mockResolvedValue({ monitors: [] });
+
+    const { router } = await import('./main.js');
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(RouterProvider, { router }));
+      await Promise.resolve();
+    });
+
+    const workspaceLabel = () => container.querySelector('.ut-nav__workspace-label')?.textContent;
+    expect(workspaceLabel()).toBe('Workspace');
+    await act(async () => {
+      rejectEntitlements(new Error('Unavailable'));
+      await Promise.resolve();
+    });
+    expect(workspaceLabel()).toBe('Workspace');
+
+    await act(async () => root.unmount());
   });
 
   it('navigates five sections in one session and marks nested routes active', async () => {
@@ -96,6 +178,15 @@ describe('private section navigation', () => {
     await click('Notifications');
     await click('Settings');
     await click('Operator');
+    expect(container.querySelector('.ut-nav__operator + .ut-nav__bottom')).not.toBeNull();
+    await act(async () => {
+      await router.navigate({
+        to: '/operator/workspaces/$workspaceId',
+        params: { workspaceId: 'workspace-2' },
+      });
+    });
+    expect(container.textContent).toContain('Editing workspace-2');
+    expect(link('Operator').getAttribute('aria-current')).toBe('page');
     await act(async () => {
       await router.navigate({ to: '/monitors/$monitorId', params: { monitorId: 'monitor-1' } });
     });

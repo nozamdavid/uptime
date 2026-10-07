@@ -29,6 +29,14 @@ import {
 import { ReportFreshness } from './report-freshness.js';
 import { formatPercentage } from './status-page-format.js';
 import { UptimeStrip, uptimeSeverity } from './uptime-strip.js';
+import {
+  defaultFontFamily,
+  fontOptions,
+  resolveFontFamily,
+  type FontFamily,
+} from './font-choice.js';
+import { Select } from './select.js';
+import { ThemeControl } from './theme.js';
 
 interface EditorGroup {
   key: string;
@@ -157,6 +165,7 @@ export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
   const navigate = useNavigate();
   const [title, setTitle] = useState('');
   const [publicSlug, setPublicSlug] = useState<string | null>(null);
+  const [fontFamily, setFontFamily] = useState<FontFamily>(defaultFontFamily);
   const [groups, setGroups] = useState<EditorGroup[]>([]);
   const [monitors, setMonitors] = useState<MonitorSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -168,6 +177,7 @@ export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
     setError('');
     setTitle('');
     setPublicSlug(null);
+    setFontFamily(defaultFontFamily);
     setGroups([]);
     setMonitors([]);
     Promise.all([api.monitors(), creating ? Promise.resolve(null) : api.statusPage(statusPageId)])
@@ -177,6 +187,7 @@ export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
         if (page && 'groups' in page) {
           setTitle(page.title);
           setPublicSlug(page.publicSlug);
+          setFontFamily(resolveFontFamily(page.fontFamily));
           setGroups(
             page.groups.map((group) => ({
               key: group.id,
@@ -317,6 +328,7 @@ export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
     const input: StatusPageSave = {
       title,
       publicSlug,
+      fontFamily,
       groups: groups.map((group) => ({
         title: group.title,
         monitorIds: group.monitorIds,
@@ -401,6 +413,19 @@ export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
             'Uses lowercase letters, numbers, dots, and hyphens. Leave empty to use the page ID.'}
         </small>
       </label>
+      <div className="field status-page-editor__font">
+        <label htmlFor="status-page-font-family">Public font</label>
+        <Select
+          id="status-page-font-family"
+          options={fontOptions}
+          value={fontFamily}
+          disabled={!canWrite || busy}
+          onChange={setFontFamily}
+        />
+        <p className="font-choice ut-muted" data-font={fontFamily}>
+          Preview: Service status
+        </p>
+      </div>
       <div className="status-page-editor__layout">
         <section className="status-page-editor__groups" aria-label="Status page groups">
           {groups.map((group, groupIndex) => (
@@ -653,9 +678,27 @@ export function PublicStatusPage({ statusPageId }: { statusPageId: string }) {
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [autoRefresh, refreshPage]);
-  if (error && !page) return <p className="state state--error">{error}</p>;
-  if (!page) return <p className="state state--loading">Loading status…</p>;
+  if (error && !page)
+    return (
+      <>
+        <div className="theme-toolbar">
+          <ThemeControl />
+        </div>
+        <p className="state state--error">{error}</p>
+      </>
+    );
+  if (!page)
+    return (
+      <>
+        <div className="theme-toolbar">
+          <ThemeControl />
+        </div>
+        <p className="state state--loading">Loading status…</p>
+      </>
+    );
   const monitorSearch = new URLSearchParams({ statusPage: statusPageId });
+  const workspace = new URLSearchParams(workspaceSearch(null)).get('workspace');
+  if (workspace) monitorSearch.set('workspace', workspace);
   if (snapshotMetadata?.generation) monitorSearch.set('generation', snapshotMetadata.generation);
   const problemMonitors = [
     ...new Map(
@@ -673,18 +716,21 @@ export function PublicStatusPage({ statusPageId }: { statusPageId: string }) {
     ).values(),
   ];
   return (
-    <article className="public-status-page">
+    <article className="public-status-page font-choice" data-font={resolveFontFamily(page.fontFamily)}>
       <header className="public-status-page__head">
         <div className="public-status-page__topline">
           <p className="product-mark">UPTIME STATUS</p>
-          <button
-            type="button"
-            className="button button--quiet public-status-page__refresh-toggle"
-            aria-pressed={autoRefresh}
-            onClick={() => setAutoRefresh((enabled) => !enabled)}
-          >
-            Auto-refresh {autoRefresh ? 'on' : 'off'}
-          </button>
+          <div className="public-status-page__controls">
+            <button
+              type="button"
+              className="button button--quiet public-status-page__refresh-toggle"
+              aria-pressed={autoRefresh}
+              onClick={() => setAutoRefresh((enabled) => !enabled)}
+            >
+              Auto-refresh {autoRefresh ? 'on' : 'off'}
+            </button>
+            <ThemeControl />
+          </div>
         </div>
         <h1>{page.title}</h1>
         <p>Service availability over the last 90 days.</p>
