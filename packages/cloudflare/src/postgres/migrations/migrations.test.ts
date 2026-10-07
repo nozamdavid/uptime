@@ -6,6 +6,7 @@ import {
   loadMigrationsForProfile,
 } from './plan.js';
 import { createPostgresTestDatabase } from '../../testing/postgres.js';
+import { applyPostgresMigrations } from '../migrate.js';
 
 describe('PostgreSQL 18 Migrations Plan & Assets', () => {
   it('defines the exact table counts required', () => {
@@ -32,10 +33,10 @@ describe('PostgreSQL 18 Migrations Plan & Assets', () => {
 
   it('loads hosted tenant migrations with distinct IDs (including two 0013 files)', async () => {
     const files = getMigrationFilesForProfile('hosted');
-    expect(files).toHaveLength(17);
+    expect(files).toHaveLength(18);
 
     const migrations = await loadMigrationsForProfile('hosted');
-    expect(migrations).toHaveLength(17);
+    expect(migrations).toHaveLength(18);
 
     const ids = migrations.map((m) => m.id);
     expect(new Set(ids).size).toBe(ids.length);
@@ -50,10 +51,10 @@ describe('PostgreSQL 18 Migrations Plan & Assets', () => {
 
   it('loads legacy import tenant migrations without hosted quotas', async () => {
     const files = getMigrationFilesForProfile('legacy');
-    expect(files).toHaveLength(15);
+    expect(files).toHaveLength(16);
 
     const migrations = await loadMigrationsForProfile('legacy');
-    expect(migrations).toHaveLength(15);
+    expect(migrations).toHaveLength(16);
 
     const ids = migrations.map((m) => m.id);
     expect(new Set(ids).size).toBe(ids.length);
@@ -133,6 +134,29 @@ describe('PostgreSQL 18 Migrations Plan & Assets', () => {
         );
         // Includes 27 tenant tables + _postgres_migrations
         expect(rows[0]?.count).toBeGreaterThanOrEqual(27);
+      } finally {
+        await testDb.close();
+      }
+    }, 120_000);
+
+    it('defaults existing status pages when adding the font column', async () => {
+      const migrations = await loadMigrationsForProfile('hosted');
+      const previous = migrations.filter((migration) => migration.id !== '0017_status_page_font_family.sql');
+      const testDb = await createPostgresTestDatabase({
+        adminConnectionString: testAdminUrl,
+        migrations: previous,
+        profile: 'full-hosted',
+        tables: ['status_pages'],
+      });
+      try {
+        await testDb.adminDb.query(
+          `INSERT INTO ${testDb.adminDb.table('status_pages')} (id, title) VALUES ('existing', 'Existing page')`,
+        );
+        await applyPostgresMigrations(testDb.adminDb, migrations, 'full-hosted');
+        const { rows } = await testDb.adminDb.query<{ font_family: string }>(
+          `SELECT font_family FROM ${testDb.adminDb.table('status_pages')} WHERE id = 'existing'`,
+        );
+        expect(rows[0]?.font_family).toBe('josefin-sans');
       } finally {
         await testDb.close();
       }

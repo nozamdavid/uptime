@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { statusPageSaveSchema } from './index.js';
+import { statusPageFontFamilies, statusPageSaveSchema } from './index.js';
 
 const firstMonitor = '10000000-0000-4000-8000-000000000001';
 
@@ -15,6 +15,16 @@ describe('status page input', () => {
       title: 'System status',
       groups: [{ title: 'Core', monitorIds: [firstMonitor], width: 'full', showBadges: true }],
     });
+  });
+
+  it('accepts only canonical font families and leaves omitted choices unset', () => {
+    expect(statusPageFontFamilies).toHaveLength(10);
+    const input = { title: 'System status', groups: [] };
+    expect(statusPageSaveSchema.parse(input).fontFamily).toBeUndefined();
+    for (const fontFamily of statusPageFontFamilies) {
+      expect(statusPageSaveSchema.parse({ ...input, fontFamily }).fontFamily).toBe(fontFamily);
+    }
+    expect(() => statusPageSaveSchema.parse({ ...input, fontFamily: 'Comic Sans MS' })).toThrow();
   });
 
   it('rejects the same monitor in multiple groups', () => {

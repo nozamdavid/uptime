@@ -290,7 +290,7 @@ export { toPublicMonitorSummary } from '@uptime/contracts';
 export async function getStatusPage(db: Database, id: string) {
   const page = await pgFirst<StatusPageRow>(
     db,
-    `SELECT id, title, public_slug, created_at, updated_at FROM ${db.table('status_pages')} WHERE id = $1 LIMIT 1`,
+    `SELECT id, title, public_slug, font_family, created_at, updated_at FROM ${db.table('status_pages')} WHERE id = $1 LIMIT 1`,
     [id],
   );
   if (!page) return null;
@@ -315,6 +315,7 @@ export async function getStatusPage(db: Database, id: string) {
     id: page.id,
     title: page.title,
     publicSlug: page.public_slug,
+    fontFamily: page.font_family,
     createdAt: page.created_at,
     updatedAt: page.updated_at,
     monitorCount: monitors.length,
@@ -353,7 +354,7 @@ export async function getPublicStatusPage(db: Database, reference: string) {
 export async function listStatusPageSummaries(db: Database) {
   const pages = await pgAll<StatusPageRow>(
     db,
-    `SELECT sp.id, sp.title, sp.public_slug, sp.created_at, sp.updated_at,
+    `SELECT sp.id, sp.title, sp.public_slug, sp.font_family, sp.created_at, sp.updated_at,
        (SELECT count(*)::integer FROM ${db.table('status_page_monitors')} spm WHERE spm.status_page_id = sp.id) AS monitor_count
      FROM ${db.table('status_pages')} sp ORDER BY sp.created_at DESC`,
   );
@@ -361,6 +362,7 @@ export async function listStatusPageSummaries(db: Database) {
     id: page.id,
     title: page.title,
     publicSlug: page.public_slug,
+    fontFamily: page.font_family,
     monitorCount: Number(page.monitor_count ?? 0),
     createdAt: page.created_at,
     updatedAt: page.updated_at,
@@ -829,6 +831,7 @@ export async function publicStatusPagePayload(
       id: statusPage.id,
       title: statusPage.title,
       publicSlug: statusPage.publicSlug,
+      fontFamily: statusPage.fontFamily,
       groups: statusPage.groups.map((group) => ({
         id: group.id,
         title: group.title,

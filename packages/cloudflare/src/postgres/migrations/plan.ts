@@ -44,6 +44,7 @@ const HOSTED_TENANT_FILES = [
   'tenant/0014_simplify_observation_indexes.sql',
   'tenant/0015_workspace_product_limits.sql',
   'tenant/0016_product_tiers.sql',
+  'tenant/0017_status_page_font_family.sql',
 ];
 
 const LEGACY_TENANT_FILES = [
@@ -61,6 +62,7 @@ const LEGACY_TENANT_FILES = [
   'tenant/0012_notification_history.sql',
   'tenant/0013_retire_report_latency_changefeed.sql',
   'tenant/0014_simplify_observation_indexes.sql',
+  'tenant/0017_status_page_font_family.sql',
 ];
 
 const PREDATA_FILES = ['data-import/0001_predata_disable_triggers.sql'];

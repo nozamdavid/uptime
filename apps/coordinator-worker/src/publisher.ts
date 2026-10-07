@@ -315,6 +315,7 @@ export async function publishDueReports(
         id: statusPage.id,
         title: statusPage.title,
         publicSlug: statusPage.publicSlug,
+        fontFamily: statusPage.fontFamily,
       })),
     }),
     {

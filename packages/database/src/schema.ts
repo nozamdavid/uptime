@@ -185,10 +185,12 @@ export const statusPages = pgTable(
     id: uuid('id').defaultRandom().primaryKey(),
     title: text('title').notNull(),
     publicSlug: text('public_slug'),
+    fontFamily: text('font_family').notNull().default('josefin-sans'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
+    check('status_pages_font_family_valid', sql`${table.fontFamily} in ('josefin-sans', 'rubik', 'roboto', 'open-sans', 'inter', 'dm-sans', 'poppins', 'nunito', 'ubuntu', 'helvetica')`),
     check(
       'status_pages_public_slug_format',
       sql`${table.publicSlug} is null or (length(${table.publicSlug}) between 3 and 64 and ${table.publicSlug} ~ '^[a-z0-9]+([.-][a-z0-9]+)*$')`,

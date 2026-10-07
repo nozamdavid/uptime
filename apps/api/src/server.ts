@@ -606,7 +606,7 @@ export async function buildApi(
     const pages = await rows<StatusPageRow>(
       database.db,
       sql`
-        select sp.id, sp.title, sp.public_slug as "publicSlug", sp.created_at as "createdAt", sp.updated_at as "updatedAt",
+        select sp.id, sp.title, sp.public_slug as "publicSlug", sp.font_family as "fontFamily", sp.created_at as "createdAt", sp.updated_at as "updatedAt",
           count(spm.monitor_id)::integer as "monitorCount"
         from status_pages sp
         left join status_page_monitors spm on spm.status_page_id = sp.id
@@ -625,7 +625,7 @@ export async function buildApi(
       await assertStatusPageMonitorsExist(tx, input);
       const inserted = await rows<StatusPageRow>(
         tx,
-        sql`insert into status_pages (title, public_slug) values (${input.title}, ${input.publicSlug ?? null}) returning id, title, public_slug as "publicSlug", created_at as "createdAt", updated_at as "updatedAt"`,
+        sql`insert into status_pages (title, public_slug, font_family) values (${input.title}, ${input.publicSlug ?? null}, ${input.fontFamily ?? 'josefin-sans'}) returning id, title, public_slug as "publicSlug", font_family as "fontFamily", created_at as "createdAt", updated_at as "updatedAt"`,
       );
       const page = inserted[0];
       if (!page) throw new Error('Status page insert did not return a row');
@@ -652,7 +652,7 @@ export async function buildApi(
       await assertStatusPageMonitorsExist(tx, input);
       const updated = await rows<{ id: string }>(
         tx,
-        sql`update status_pages set title = ${input.title}, public_slug = ${input.publicSlug ?? null}, updated_at = now() where id = ${id} returning id`,
+        sql`update status_pages set title = ${input.title}, public_slug = ${input.publicSlug ?? null}, font_family = coalesce(${input.fontFamily ?? null}, font_family), updated_at = now() where id = ${id} returning id`,
       );
       if (!updated[0]) throw httpError(404, 'not_found', 'Status page was not found');
       await replaceStatusPageGroups(tx, id, input);
@@ -932,6 +932,7 @@ interface StatusPageRow {
   id: string;
   title: string;
   publicSlug: string | null;
+  fontFamily: import('@uptime/contracts').StatusPageFontFamily;
   monitorCount?: number | string;
   createdAt: Date | string;
   updatedAt: Date | string;
@@ -975,6 +976,7 @@ function serializeStatusPageSummary(row: StatusPageRow) {
     id: row.id,
     title: row.title,
     publicSlug: row.publicSlug,
+    fontFamily: row.fontFamily,
     monitorCount: Number(row.monitorCount ?? 0),
     createdAt: iso(row.createdAt),
     updatedAt: iso(row.updatedAt),
@@ -985,7 +987,7 @@ async function getStatusPage(db: SqlExecutor, id: string) {
   const page = (
     await rows<StatusPageRow>(
       db,
-      sql`select id, title, public_slug as "publicSlug", created_at as "createdAt", updated_at as "updatedAt" from status_pages where id = ${id} limit 1`,
+      sql`select id, title, public_slug as "publicSlug", font_family as "fontFamily", created_at as "createdAt", updated_at as "updatedAt" from status_pages where id = ${id} limit 1`,
     )
   )[0];
   if (!page) return null;
@@ -1438,6 +1440,7 @@ async function publicStatusPagePayload(
       id: statusPage.id,
       title: statusPage.title,
       publicSlug: statusPage.publicSlug,
+      fontFamily: statusPage.fontFamily,
       groups: statusPage.groups.map((group) => ({
         id: group.id,
         title: group.title,

@@ -13,6 +13,7 @@ import {
   type Badge,
   type MonitorSummary,
   type PublicMonitorSummary,
+  type StatusPageFontFamily,
 } from '@uptime/contracts';
 import {
   monitorSummaries,
@@ -318,7 +319,7 @@ export async function buildReportCohortData(
 ): Promise<ReportCohortData> {
   const pages = await all<StatusPageRow>(
     db,
-    `SELECT id, title, public_slug FROM ${db.table('status_pages')} ORDER BY created_at ASC`,
+    `SELECT id, title, public_slug, font_family FROM ${db.table('status_pages')} ORDER BY created_at ASC`,
   );
   const groups = await all<StatusPageGroupD1 & { status_page_id: string }>(
     db,
@@ -390,6 +391,7 @@ interface StatusPageRow {
   id: string;
   title: string;
   public_slug: string | null;
+  font_family: StatusPageFontFamily;
 }
 
 interface StatusPageGroupD1 {
@@ -482,6 +484,7 @@ function statusPageSnapshot(
       id: page.id,
       title: page.title,
       publicSlug: page.public_slug,
+      fontFamily: page.font_family,
       groups: pageGroups,
     },
   };

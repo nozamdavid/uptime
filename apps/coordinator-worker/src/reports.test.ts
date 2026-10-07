@@ -60,7 +60,7 @@ async function reportData(db: Database) {
 }
 async function page(db: Database, monitorId: string) {
   await db.query(
-    `INSERT INTO ${db.table('status_pages')} (id,title,public_slug) VALUES ('p1','Acme','acme')`,
+    `INSERT INTO ${db.table('status_pages')} (id,title,public_slug,font_family) VALUES ('p1','Acme','acme','poppins')`,
   );
   await db.query(
     `INSERT INTO ${db.table('status_page_groups')} (id,status_page_id,title,position) VALUES ('g1','p1','Core',0)`,
@@ -192,7 +192,9 @@ describe('coordinator PostgreSQL report snapshots', () => {
     const id = await reportData(db);
     await page(db, id);
     const s = (await buildReportCohortData(db, options)).statusPages.get('p1')!;
-    expect(s.statusPage).toMatchObject({ id: 'p1', title: 'Acme', publicSlug: 'acme' });
+    expect(s.statusPage).toMatchObject({
+      id: 'p1', title: 'Acme', publicSlug: 'acme', fontFamily: 'poppins',
+    });
     const g = s.statusPage.groups[0]!;
     expect(g).toMatchObject({ id: 'g1', title: 'Core', width: 'full', showBadges: true });
     expect(g.monitors[0]).toMatchObject({
@@ -236,7 +238,9 @@ describe('coordinator PostgreSQL report snapshots', () => {
     const r = new FakeR2();
     await publishDueReports(parseReportEnv({ DB: db, REPORTS: r }), now, console);
     const index = JSON.parse(r.store.get(reportCohortIndexKey(String(now.getTime())))!.body);
-    expect(index.statusPages).toEqual([{ id: 'p1', title: 'Acme', publicSlug: 'acme' }]);
+    expect(index.statusPages).toEqual([{
+      id: 'p1', title: 'Acme', publicSlug: 'acme', fontFamily: 'poppins',
+    }]);
     expect(index.schemaVersion).toBe('1');
     expect(index.latestObservationAt).toBe('2026-09-20T11:59:06.000Z');
   });

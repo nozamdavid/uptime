@@ -37,17 +37,23 @@ describe('status page CRUD', () => {
       body: JSON.stringify({
         title: 'Acme status',
         publicSlug: 'acme',
+        fontFamily: 'rubik',
         groups: [{ title: 'Core', monitorIds: [monitorA], width: 'half', showBadges: true }],
       }),
     });
     expect(created.status).toBe(201);
     const statusPage = (await json(created)).statusPage;
     expect(statusPage.title).toBe('Acme status');
+    expect(statusPage.fontFamily).toBe('rubik');
     expect(statusPage.monitorCount).toBe(1);
     expect(statusPage.groups[0].monitors[0].id).toBe(monitorA);
 
     const listed = await request(ctx.app, '/api/status-pages', { cookie });
-    expect((await json(listed)).statusPages).toHaveLength(1);
+    expect((await json(listed)).statusPages).toMatchObject([{ fontFamily: 'rubik' }]);
+    const read = await request(ctx.app, `/api/status-pages/${statusPage.id}`, { cookie });
+    expect((await json(read)).statusPage.fontFamily).toBe('rubik');
+    const publicPage = await request(ctx.app, '/api/status-pages/public/acme');
+    expect((await json(publicPage)).statusPage.fontFamily).toBe('rubik');
 
     const updated = await request(ctx.app, `/api/status-pages/${statusPage.id}`, {
       method: 'PUT',
@@ -55,6 +61,7 @@ describe('status page CRUD', () => {
       body: JSON.stringify({
         title: 'Acme platform',
         publicSlug: 'acme',
+        fontFamily: 'inter',
         groups: [
           {
             title: 'Everything',
@@ -66,7 +73,16 @@ describe('status page CRUD', () => {
       }),
     });
     expect(updated.status).toBe(200);
-    expect((await json(updated)).statusPage.monitorCount).toBe(2);
+    expect((await json(updated)).statusPage).toMatchObject({ monitorCount: 2, fontFamily: 'inter' });
+
+    const preserved = await request(ctx.app, `/api/status-pages/${statusPage.id}`, {
+      method: 'PUT',
+      cookie,
+      body: JSON.stringify({ title: 'Acme platform', publicSlug: 'acme', groups: [] }),
+    });
+    expect((await json(preserved)).statusPage.fontFamily).toBe('inter');
+    const updatedPublicPage = await request(ctx.app, '/api/status-pages/public/acme');
+    expect((await json(updatedPublicPage)).statusPage.fontFamily).toBe('inter');
 
     const deleted = await request(ctx.app, `/api/status-pages/${statusPage.id}`, {
       method: 'DELETE',
@@ -93,6 +109,25 @@ describe('status page CRUD', () => {
     });
     expect(conflict.status).toBe(409);
     expect((await json(conflict)).error.code).toBe('slug_conflict');
+  });
+
+  it('defaults omitted fonts and rejects invalid choices', async () => {
+    const ctx = await context();
+    const { cookie } = await login(ctx.app);
+    const created = await request(ctx.app, '/api/status-pages', {
+      method: 'POST',
+      cookie,
+      body: JSON.stringify({ title: 'Default font', groups: [] }),
+    });
+    expect((await json(created)).statusPage.fontFamily).toBe('josefin-sans');
+
+    const invalid = await request(ctx.app, '/api/status-pages', {
+      method: 'POST',
+      cookie,
+      body: JSON.stringify({ title: 'Invalid font', fontFamily: 'Arial', groups: [] }),
+    });
+    expect(invalid.status).toBe(400);
+    expect((await json(invalid)).error.code).toBe('validation_error');
   });
 
   it('rejects a monitor that appears on two groups', async () => {

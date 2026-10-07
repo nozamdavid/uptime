@@ -1317,16 +1317,16 @@ async function executeStatusPageStatements(
 ): Promise<void> {
   if (insertPage) {
     await tx.query(
-      `INSERT INTO ${tx.table('status_pages')} (id, title, public_slug, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [id, input.title, input.publicSlug ?? null, timestamp, timestamp],
+      `INSERT INTO ${tx.table('status_pages')} (id, title, public_slug, font_family, created_at, updated_at)
+       VALUES ($1, $2, $3, COALESCE($4, 'josefin-sans'), $5, $6)`,
+      [id, input.title, input.publicSlug ?? null, input.fontFamily ?? null, timestamp, timestamp],
     );
   } else {
     await tx.query(
       `UPDATE ${tx.table('status_pages')}
-       SET title = $1, public_slug = $2, updated_at = $3
-       WHERE id = $4`,
-      [input.title, input.publicSlug ?? null, timestamp, id],
+       SET title = $1, public_slug = $2, font_family = COALESCE($3, font_family), updated_at = $4
+       WHERE id = $5`,
+      [input.title, input.publicSlug ?? null, input.fontFamily ?? null, timestamp, id],
     );
     await tx.query(`DELETE FROM ${tx.table('status_page_groups')} WHERE status_page_id = $1`, [id]);
   }

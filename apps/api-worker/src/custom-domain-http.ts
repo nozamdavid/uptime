@@ -10,10 +10,12 @@ import {
 } from '@uptime/cloudflare/postgres';
 import type {
   SnapshotFreshness,
+  StatusPageFontFamily,
   StatusPageReportSnapshot,
   StatusPageReportSnapshotMonitor,
   UptimeDay,
 } from '@uptime/contracts';
+import { defaultStatusPageFontFamily } from '@uptime/contracts';
 
 import {
   createCustomDomainProvider,
@@ -619,6 +621,7 @@ export interface PublicCustomStatusSnapshotDto {
     id: string;
     title: string;
     publicSlug: string | null;
+    fontFamily: StatusPageFontFamily;
     groups: Array<{
       id: string;
       title: string;
@@ -734,6 +737,7 @@ export async function handleCustomDomainPublic(
         id: snapshot.statusPage.id,
         title: snapshot.statusPage.title,
         publicSlug: snapshot.statusPage.publicSlug,
+        fontFamily: snapshot.statusPage.fontFamily ?? defaultStatusPageFontFamily,
         groups: snapshot.statusPage.groups.map((g) => ({
           id: g.id,
           title: g.title,

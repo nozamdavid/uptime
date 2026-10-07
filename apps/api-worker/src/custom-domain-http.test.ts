@@ -155,6 +155,7 @@ describe('Custom Domain HTTP Layer (PostgreSQL Native)', { timeout: 120_000 }, (
         id: overrides?.pageId ?? 'page-1',
         title: overrides?.title ?? 'Acme Corp Status <script>alert(1)</script>',
         publicSlug: overrides?.publicSlug ?? 'pub-slug',
+        fontFamily: 'rubik',
         groups: [
           {
             id: 'grp-1',
@@ -798,11 +799,16 @@ describe('Custom Domain HTTP Layer (PostgreSQL Native)', { timeout: 120_000 }, (
     expect(jsonRes.status).toBe(200);
     expect(jsonRes.headers.get('content-type')).toContain('application/json');
     const snapshotData = (await jsonRes.json()) as {
-      statusPage: { title: string; groups: Array<{ monitors: Array<Record<string, unknown>> }> };
+      statusPage: {
+        title: string;
+        fontFamily: string;
+        groups: Array<{ monitors: Array<Record<string, unknown>> }>;
+      };
       freshness: string;
       generatedAt: string;
     };
     expect(snapshotData.statusPage.title).toBe('Acme Corp Status <script>alert(1)</script>');
+    expect(snapshotData.statusPage.fontFamily).toBe('rubik');
     expect(snapshotData.freshness).toBe('fresh');
 
     // Allowlist check: ensure url and secrets are NOT exposed

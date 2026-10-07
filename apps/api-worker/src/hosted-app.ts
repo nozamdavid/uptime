@@ -37,7 +37,11 @@ import {
   type RuntimePostgresSource,
 } from '@uptime/cloudflare/postgres';
 import type { RegionId } from '@uptime/regions';
-import type { StatusPageReportSnapshot } from '@uptime/contracts';
+import {
+  defaultStatusPageFontFamily,
+  statusPageFontFamilySchema,
+  type StatusPageReportSnapshot,
+} from '@uptime/contracts';
 import { z } from 'zod';
 import { createApiRouter, type LogSink } from './app.js';
 import { monitorRequestCache } from './monitor-cache.js';
@@ -113,6 +117,7 @@ const domainSnapshotSchema = z.looseObject({
     id: z.string(),
     title: z.string(),
     publicSlug: z.string().nullable(),
+    fontFamily: statusPageFontFamilySchema.default(defaultStatusPageFontFamily),
     groups: z.array(
       z.looseObject({
         id: z.string(),
@@ -2446,7 +2451,11 @@ async function publicReport(
     if (!object) throw new HttpErrorLike(503, 'report_pending', 'First report is being prepared');
     const snapshot = z
       .looseObject({
-        statusPages: z.array(z.looseObject({ id: z.string(), publicSlug: z.string().nullable() })),
+        statusPages: z.array(z.looseObject({
+          id: z.string(),
+          publicSlug: z.string().nullable(),
+          fontFamily: statusPageFontFamilySchema.default(defaultStatusPageFontFamily),
+        })),
       })
       .parse(await object.json());
     const current = await all<{ id: string; public_slug: string | null }>(
@@ -2478,6 +2487,7 @@ async function publicReport(
       statusPage: z.looseObject({
         id: z.string(),
         publicSlug: z.string().nullable(),
+        fontFamily: statusPageFontFamilySchema.default(defaultStatusPageFontFamily),
         groups: z.array(z.looseObject({ monitors: z.array(z.looseObject({ id: z.string() })) })),
       }),
     })

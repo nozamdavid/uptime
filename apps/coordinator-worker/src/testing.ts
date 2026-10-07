@@ -19,7 +19,8 @@ export async function makePostgresDatabase() {
     (migration) =>
       Number(migration.id.slice(0, 4)) <= 12 ||
       migration.id === '0013_retire_report_latency_changefeed.sql' ||
-      migration.id === '0014_simplify_observation_indexes.sql',
+      migration.id === '0014_simplify_observation_indexes.sql' ||
+      migration.id === '0017_status_page_font_family.sql',
   );
   const tables = [
     'admins',
