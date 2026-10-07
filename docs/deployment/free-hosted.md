@@ -1,33 +1,77 @@
 # Free hosted deployment
 
-This deployment uses one control D1 database, a precreated tenant D1 pool, one queue, one R2 bucket, an API Worker, a coordinator Worker, and a Pages gateway. The public capacity is between one and ten. Staging adds three dedicated test databases.
+> [!IMPORTANT]
+> **PRODUCTION VS. STAGING ARCHITECTURE**:
+> - This document describes the Cloudflare Workers, Cloudflare D1 multi-tenant database pools, queues, and R2 storage architecture used in **production**.
+> - **Staging** has migrated its core API and scheduler to Debian 12 VPS `217.217.227.164` backed by PostgreSQL 18. Staging D1 databases are retired.
+> - For staging operations, see the canonical [VPS staging runbook](../../deploy/vps/staging/README.md) and [Cloudflare staging guide](../../deploy/cloudflare/staging/README.md).
 
-Deploy hosted Workers with `scripts/deploy-hosted-workers.sh`. Before uploading either Worker, it reads the operator's saved capacity, creates missing databases, applies migrations, registers trusted slots, updates both Workers' bindings, and bootstraps the operator workspace. Existing assignments and tenant data are preserved on repeat deployments. This branch defaults to staging and rejects production deployment.
+This deployment uses one control D1 database, a precreated tenant D1 pool, one queue, one R2 bucket, an API Worker, a coordinator Worker, and a Pages gateway. The public capacity is between one and ten.
+
+Deploy hosted Workers with `scripts/deploy-hosted-workers.sh`. For production, it reads the operator's saved capacity, creates missing D1 databases, applies migrations, registers trusted slots, updates both Workers' bindings, and bootstraps the operator workspace. Existing assignments and tenant data are preserved on repeat deployments. For staging, it deploys the VPC proxy Worker and fenced coordinator, skipping D1 setup.
 
 ```bash
-scripts/deploy-hosted-workers.sh --dry-run
-scripts/deploy-hosted-workers.sh
-# Explicitly change the saved public capacity and prepare that pool:
-scripts/deploy-hosted-workers.sh --capacity 10
+# Production dry run
+scripts/deploy-hosted-workers.sh --environment production --dry-run
+
+# Deploy production hosted workers
+scripts/deploy-hosted-workers.sh --environment production
+
+# Explicitly change the saved public capacity and prepare that pool in production:
+scripts/deploy-hosted-workers.sh --environment production --capacity 10
 ```
 
 ## Interest check before release
 
 The hosted API and local configs default to `INTEREST_CHECK_ONLY=true`. The landing and signup pages collect verified AT Protocol handles through OAuth with only the `atproto` identity scope. The callback records DID, handle, and timestamps in `CONTROL_DB.interest_signups`. Joining does not allocate a tenant slot. The operator page displays the total and latest 500 signups; the full collection can also be queried from the control database. No AT Protocol posts, follows, messages, or repository writes are made.
 
-Apply all control migrations, including `0002_slot_controls.sql` and `0003_interest_signups.sql`, before deploying the updated API. Existing operators and test members retain product access, while new interest-only visitors cannot create monitoring workspaces. To release monitoring signup, set `INTEREST_CHECK_ONLY=false` and replace the temporary public interest form with the product signup entry point. Keep the interest collection for the release follow-up.
+Before deploying the updated API and coordinator, apply all control migrations, including `0002_slot_controls.sql`, `0003_interest_signups.sql`, and `0004_workspace_product_limits.sql`, plus tenant migration `0015_workspace_product_limits.sql`. In production, `scripts/deploy-hosted-workers.sh` applies these migrations to the configured databases before uploading either Worker. Existing operators and test members retain product access, while new interest-only visitors cannot create monitoring workspaces. To release monitoring signup, set `INTEREST_CHECK_ONLY=false` and replace the temporary public interest form with the product signup entry point. Keep the interest collection for the release follow-up.
 
-## Provisioning
+## Production import rollout for uptime.noz.am
 
-1. Create the control database, the tenant job queue and dead-letter queue, the reports bucket, and a Pages project. The deployment script creates the tenant databases.
-2. Replace every `REPLACE_WITH_*` value in `deploy/cloudflare/hosted/*.wrangler.toml` with the real IDs and origin.
-3. Set `SESSION_SECRET`, `CREDENTIAL_ENCRYPTION_SECRET`, and `OAUTH_STORAGE_SECRET` on the API Worker. Set the same `CREDENTIAL_ENCRYPTION_SECRET` on the coordinator, and matching `PROBE_SIGNING_SECRET` values on the coordinator and its probes. Use Wrangler secret storage and separate production secrets.
-4. Run `scripts/deploy-hosted-workers.sh` for the selected environment. It applies control and tenant migrations, creates and registers the required empty databases, and deploys both Workers. Deploy the probes and Pages with their matching environment configs.
-5. `@noz.am` (`did:plc:lmkzmvv6sdxntwtyxpg7fqqq`) is the default operator. A nonempty `OPERATOR_DIDS` allowlist overrides the default. Hosted registration uses AT Protocol OAuth and capacity admission; it does not use `ADMIN_EMAIL` bootstrap credentials.
+The production Pages project is `uptime`; its custom domain is `https://uptime.noz.am`. Keep `INTEREST_CHECK_ONLY=true` and the existing `OPERATOR_DIDS` value. The production `uptime` D1 database is the legacy monitor database and stays at its current migration level. It receives only the singleton `production_workspace_identity` marker, never hosted tenant migrations.
+
+Before applying anything, verify the control D1 ID is `261093f4-98e2-48c8-b84d-932b7f27af7f`, the imported `uptime` D1 ID is `17c009df-5b56-44cc-9776-73e0f1775b0f`, and the existing active @noz.am owner workspace still has its owner membership and assigned empty `TENANT_DB_000`. The adoption helper checks that the old tenant identity matches and has no monitor, service, status-page, check, or history rows. It refuses a different owner, a populated old tenant, or a conflicting marker.
+
+The marker schema is `production_workspace_identity(id INTEGER PRIMARY KEY CHECK(id=1), workspace_id TEXT NOT NULL, database_id TEXT NOT NULL)`. Its single row points to the existing control workspace and the imported `uptime` D1 ID. A pre-existing matching marker is accepted on repeat runs; a mismatch is never replaced.
+
+Start with the read-only adoption check and local Worker config dry runs:
+
+```bash
+bash scripts/adopt-production-import.sh --dry-run
+pnpm --filter @uptime/api-worker exec wrangler deploy --config ../../deploy/cloudflare/production/legacy-api.wrangler.toml --dry-run
+pnpm --filter @uptime/api-worker exec wrangler deploy --config ../../deploy/cloudflare/hosted/api.wrangler.toml --dry-run
+pnpm --filter @uptime/coordinator-worker exec wrangler deploy --config ../../deploy/cloudflare/hosted/coordinator.wrangler.toml --dry-run
+pnpm --filter @uptime/coordinator-worker exec wrangler deploy --config ../../deploy/cloudflare/production/reporter.wrangler.toml --dry-run
+```
+
+After parent signoff, apply pending migrations only to `uptime-control` and the nine currently available empty tenant databases. `TENANT_DB_000` retains its old identity in quarantine, and `uptime` receives no migration:
+
+```bash
+pnpm --filter @uptime/api-worker exec wrangler d1 migrations apply uptime-control --remote --config ../../deploy/cloudflare/hosted/api.wrangler.toml
+for database in uptime-tenant-001 uptime-tenant-002 uptime-tenant-003 uptime-tenant-004 uptime-tenant-005 uptime-tenant-006 uptime-tenant-007 uptime-tenant-008 uptime-tenant-009; do
+  pnpm --filter @uptime/api-worker exec wrangler d1 migrations apply "$database" --remote --config ../../deploy/cloudflare/hosted/api.wrangler.toml
+done
+```
+
+Deploy the compatible legacy API OAuth bridge, hosted API, and hosted coordinator before adoption, using the same configs that passed dry run. The hosted API recognizes and routes the imported workspace to the legacy service; the hosted coordinator excludes it from tenant dispatch and purge. Both must be live before `PRODUCTION_IMPORTED_DB` is assigned, so older consumers cannot treat the main database as a free tenant. Then apply adoption, deploy the reporter, and publish Pages. The reporter config retains the active `* * * * *` cron and `uptime-monitor-refresh` Workflow. Keep the existing `uptime-coordinator` deployed as the sole legacy check runner; it is not a deployment target and its report schedule remains disabled.
+
+```bash
+pnpm --filter @uptime/api-worker exec wrangler deploy --config ../../deploy/cloudflare/production/legacy-api.wrangler.toml
+pnpm --filter @uptime/api-worker exec wrangler deploy --config ../../deploy/cloudflare/hosted/api.wrangler.toml
+pnpm --filter @uptime/coordinator-worker exec wrangler deploy --config ../../deploy/cloudflare/hosted/coordinator.wrangler.toml
+bash scripts/adopt-production-import.sh --apply
+pnpm --filter @uptime/coordinator-worker exec wrangler deploy --config ../../deploy/cloudflare/production/reporter.wrangler.toml
+VITE_API_BASE_URL=/api VITE_REPORTS_BASE_URL=/reports pnpm --filter @uptime/web build
+cp deploy/cloudflare/hosted/_worker.js apps/web/dist/_worker.js
+pnpm --filter @uptime/api-worker exec wrangler pages deploy ../../apps/web/dist --project-name uptime --branch main
+```
+
+For rollback, keep both identity markers, the main monitor/history rows, and the old tenant metadata. If returning to code that predates imported-workspace routing, acquire the workspace's shared 16-minute execution lease, move `PRODUCTION_IMPORTED_DB` to `status='deleting', workspace_id=NULL`, then restore the same workspace to the quarantined `TENANT_DB_000` row as `assigned`. Verify the control assignment before releasing the lease. Never drop the production marker, purge either database, or make the old tenant available automatically.
 
 ## Capacity and registration
 
-After migrating each empty tenant database, register its trusted binding name and actual database ID in the control database:
+After migrating each empty tenant database in production, register its trusted binding name and actual database ID in the control database:
 
 ```sql
 INSERT INTO tenant_slots(binding_name,database_id,schema_version,status)
@@ -40,9 +84,7 @@ The operator's Capacity pool shows available, assigned, held, and quarantined sl
 
 Deployed environments reserve at least one enabled, unused database (`MIN_AVAILABLE_SLOTS=1`). Both allocation and Hold enforce that floor atomically. As a result, a public pool of ten can automatically assign nine while its last database remains available. The configured limit is an upper bound, not a promise that the reserve can be consumed. Provisioning does not automatically recycle quarantined databases.
 
-Staging with capacity ten has thirteen databases: `TENANT_DB_000` through `TENANT_DB_009`, `STAGING_OPERATOR_DB` assigned to @noz.am, and `STAGING_TEST_DB_001` / `STAGING_TEST_DB_002` initially held for later assignment. The three staging slots are outside the public workspace limit. Use Assign workspace on an unused slot to select a verified interest signup and grant that account its own workspace. Explicit assignment can use a held slot, preserves the last available database, and respects the $20 forecast ceiling. Once assigned, the account can use `/app` during the interest-only phase. Test accounts must join the interest list first. No authentication credentials are created or stored by assignment.
-
-Staging also binds its existing imported database as `STAGING_IMPORTED_DB`, a fourteenth slot outside public capacity. Register it with `scripts/register-staging-import.sh --environment staging` and assign it explicitly to an interest signup without an existing workspace. The entire imported fleet and history become that account's workspace. This staging-only exception keeps its original checks, retention, encrypted destination configuration, and root report objects. The hosted queue never schedules or purges it, and workspace deletion is blocked. Suspension blocks workspace access while the legacy staging checks continue. Its legacy scheduler metrics are outside the hosted per-user forecast.
+In staging, the tenant pool is implemented as 13 full-hosted PostgreSQL schemas (`tenant_000` through `tenant_009`, `operator`, `test_001`, `test_002`) co-located with `control` on VPS `217.217.227.164`. Staging schemas are bootstrapped and verified via `scripts/postgres-staging-bootstrap.ts` (see [VPS staging runbook](../../deploy/vps/staging/README.md)). Staging D1 databases are retired.
 
 Activate provisions a waiting workspace through the same identity checks as signup. This explicit operator action may admit an individual while automatic admission is closed or the forecast has reached $15, provided a ready slot and room under the workspace limit exist and the forecast remains below the configured ceiling, at most $20. Resume restores a workspace that the operator suspended. Both actions are audited, and neither changes the automatic admission switch.
 
@@ -55,9 +97,10 @@ Pages owns `/api/*`, `/oauth/*`, and `/reports/*` service routes. Each route is 
 1. Sign in with a real AT Protocol handle and confirm the OAuth callback returns to the configured Pages origin.
 2. Confirm first login allocates exactly one database when an available slot exists; test the waiting state after closing admission.
 3. Verify one durable queue dispatch per minute per active workspace. Deploy the selected regional probes with the same `PROBE_SIGNING_SECRET` as the coordinator before running checks.
-4. Verify an HTTPS origin by hosting the generated token at `/.well-known/uptime-verification.txt`. Create a monitor and confirm three regions, exactly 300-second intervals, 10-second timeout, DNS diagnostics disabled, outage threshold 2, and recovery threshold 1.
-5. Confirm `/health` on the API Worker, `/oauth/client-metadata.json` through Pages, and a public report route carrying `?workspace=WORKSPACE_ID`.
-6. Suspend the workspace and verify queued jobs are acknowledged without running tenant work.
+4. Create a monitor for any public HTTPS website on port 443; no hostname ownership proof is required. Confirm the workspace's configured region choices and per-monitor region cap, exactly 300-second intervals, 10-second timeout, DNS diagnostics disabled, outage threshold 2, and recovery threshold 1. Private and reserved IP literals and non-443 ports must be rejected. Hostname DNS destinations are not pinned or rechecked, so hostnames resolving to private or reserved addresses are not reliably blocked.
+5. In the operator workspace view, change a hosted workspace's monitor quota and allowed regions. Verify the owner and teammates see the effective policy. Attempt a reduction that conflicts with an existing monitor, including a paused monitor, and confirm the API returns a helpful 409 while preserving every monitor and region selection.
+6. Confirm `/health` on the API Worker, `/oauth/client-metadata.json` through Pages, and a public report route carrying `?workspace=WORKSPACE_ID`.
+7. Suspend the workspace and verify queued jobs are acknowledged without running tenant work.
 
 Build and inspect bundles before any deploy:
 
@@ -73,30 +116,3 @@ Build with `VITE_API_BASE_URL=/api` and `VITE_REPORTS_BASE_URL=/reports` for the
 ## Local OAuth development
 
 Use the committed `local.wrangler.toml` and an ignored `deploy/cloudflare/hosted/.dev.vars` containing freshly generated `SESSION_SECRET`, `CREDENTIAL_ENCRYPTION_SECRET`, and `OAUTH_STORAGE_SECRET`, each at least 32 characters. Optionally set `OPERATOR_DIDS` there. Never store an AT account password in that file or application source.
-
-Run these from the repository root:
-
-```sh
-pnpm --filter @uptime/api-worker exec wrangler d1 migrations apply CONTROL_DB --local --config ../../deploy/cloudflare/hosted/local.wrangler.toml --persist-to ../../.wrangler/hosted-local
-for slot_number in {0..9}; do
-  slot_label=$(printf '%03d' "$slot_number")
-  database_suffix=$(printf '%012d' "$((slot_number + 1))")
-  pnpm --filter @uptime/api-worker exec wrangler d1 migrations apply "TENANT_DB_${slot_label}" --local --config ../../deploy/cloudflare/hosted/local.wrangler.toml --persist-to ../../.wrangler/hosted-local
-  pnpm --filter @uptime/api-worker exec wrangler d1 execute CONTROL_DB --local --config ../../deploy/cloudflare/hosted/local.wrangler.toml --persist-to ../../.wrangler/hosted-local --command "INSERT INTO tenant_slots(binding_name,database_id,schema_version,status) VALUES('TENANT_DB_${slot_label}','00000000-0000-4000-8000-${database_suffix}',13,'available') ON CONFLICT(binding_name) DO NOTHING"
-done
-pnpm --filter @uptime/api-worker exec wrangler dev --config ../../deploy/cloudflare/hosted/local.wrangler.toml --persist-to ../../.wrangler/hosted-local --ip 127.0.0.1 --port 8787
-```
-
-Start `pnpm --filter @uptime/web dev --host 127.0.0.1` in a second terminal. Open `http://127.0.0.1:5176/signup`. Vite forwards `/api`, `/oauth`, and `/reports` to the local Worker. Use the IP address consistently so the callback cookie stays on the same host.
-
-Local development includes ten dedicated database slots, matching the initial cohort limit. New signups become active automatically when a slot and admission budget are available. If capacity is exhausted, the workspace shows waiting rather than suspended. After adding capacity, the operator can use Activate or the owner can reload to retry automatic provisioning. Suspended workspaces require the operator's Resume action.
-
-Local OAuth uses the official virtual `http://localhost/` client ID with an encoded loopback callback and `atproto` scope. Production uses HTTPS metadata at the public origin. No tunnel or password proxy is required. See [the AT Protocol localhost specification](https://atproto.com/specs/oauth#localhost-client-development).
-
-Local smoke tests on 2026-10-02 completed provider login, identity-only consent, callbacks, workspace provisioning, operator access, and session persistence after a Worker restart. The interest-check flow returned to its confirmation page and showed the verified handle in the operator's collection without allocating another tenant slot. Operator activation of a waiting test workspace and holding/reopening an unused slot also passed. The password was entered only on the authorization server and was not saved in repository files. These tests do not replace the production-domain smoke checks above.
-
-## Billing and rollback
-
-The API/control and coordinator record measured D1 work in `workspace_usage_daily`. The rolling 31-day forecast includes the $5 baseline and manually configured external costs. Admission pauses at $15; dispatch and queued execution pause at $20. Cleanup continues when dispatch pauses. Configure Cloudflare account alerts at $10, $15, and $20, and review CPU, queue and R2 usage separately. Cloudflare alerts and application forecasts are not a provider hard cap.
-
-To roll back, pause admission and queue consumption, then deploy the prior hosted Worker versions. Keep the control database and tenant identity checks in place; a single-admin build is not a safe fallback for customer traffic. Existing tenant databases and reports remain recoverable. Workspace deletion blocks access immediately, waits for fenced execution leases, and purges data and scoped reports through cron. Keep slots quarantined after deletion. D1 Time Travel can retain recoverable data after live deletion; disclose and test that backup window before public launch.

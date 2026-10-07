@@ -113,6 +113,7 @@ const statusPageSnapshot: StatusPageReportSnapshot = {
     id: 'page-1',
     title: 'Service status',
     publicSlug: 'service-status',
+    fontFamily: 'josefin-sans',
     groups: [
       {
         id: 'group-1',

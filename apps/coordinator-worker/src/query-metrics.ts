@@ -1,17 +1,16 @@
-import type { D1Database, D1Meta, D1PreparedStatement, D1Result } from '@uptime/cloudflare';
+import type { Database } from '@uptime/cloudflare/postgres';
 
 export interface QueryWork {
   statements: number;
-  rowsRead: number;
-  rowsWritten: number;
-  unmeasured: number;
+  durationMs: number;
+  failures: number;
 }
 
 export type QueryWorkByStage = Record<string, QueryWork>;
 
 export class QueryBudgetExceeded extends Error {
   constructor() {
-    super('Coordinator D1 statement budget exhausted');
+    super('Coordinator statement budget exhausted');
   }
 }
 
@@ -19,124 +18,37 @@ export function isQueryBudgetExceeded(error: unknown): boolean {
   return error instanceof QueryBudgetExceeded;
 }
 
-const empty = (): QueryWork => ({ statements: 0, rowsRead: 0, rowsWritten: 0, unmeasured: 0 });
-
-/** Coordinator-local D1 wrapper that preserves native metadata by implementing first via all. */
-export function meterDatabase(source: D1Database) {
+/** Count and time native statements, including those on the pinned transaction. */
+export function meterDatabase(source: Database) {
   let stage = 'startup';
   let statementLimit: number | null = null;
-  const work: QueryWorkByStage = {};
   let reserved = 0;
-  const complete = (target: QueryWork, meta?: Partial<D1Meta>) => {
-    if (meta?.rows_read === undefined || meta.rows_written === undefined) target.unmeasured += 1;
-    else {
-      target.rowsRead += Number(meta.rows_read);
-      target.rowsWritten += Number(meta.rows_written);
-    }
-  };
-  const reserve = (count = 1): QueryWork => {
-    if (statementLimit !== null && reserved + count > statementLimit)
-      throw new QueryBudgetExceeded();
-    reserved += count;
-    const target = (work[stage] ??= empty());
-    target.statements += count;
-    return target;
-  };
-  const wrap = (
-    native: D1PreparedStatement,
-  ): D1PreparedStatement & { native: D1PreparedStatement } => {
-    const statement = {
-      native,
-      bind(...values: unknown[]) {
-        return wrap(native.bind(...values));
-      },
-      async first<T>(columnName?: string): Promise<T | null> {
-        const target = reserve();
-        let result: D1Result<Record<string, unknown>>;
-        try {
-          result = await native.all<Record<string, unknown>>();
-        } catch (error) {
-          target.unmeasured += 1;
-          throw error;
-        }
-        complete(target, result.meta);
-        const row = result.results?.[0];
-        if (!row) return null;
-        return (columnName ? row[columnName] : row) as T;
-      },
-      async run<T>(): Promise<D1Result<T>> {
-        const target = reserve();
-        let result: D1Result<T>;
-        try {
-          result = await native.run<T>();
-        } catch (error) {
-          target.unmeasured += 1;
-          throw error;
-        }
-        complete(target, result.meta);
-        return result;
-      },
-      async all<T>(): Promise<D1Result<T>> {
-        const target = reserve();
-        let result: D1Result<T>;
-        try {
-          result = await native.all<T>();
-        } catch (error) {
-          target.unmeasured += 1;
-          throw error;
-        }
-        complete(target, result.meta);
-        return result;
-      },
-      async raw<T>(options?: { columnNames?: boolean }): Promise<T[]> {
-        const target = reserve();
-        let result: T[];
-        try {
-          result = await native.raw<T>(options);
-        } catch (error) {
-          target.unmeasured += 1;
-          throw error;
-        }
-        complete(target);
-        return result;
-      },
-    };
-    return statement;
-  };
-  const db: D1Database = {
-    prepare: (query) => wrap(source.prepare(query)),
-    async batch<T>(statements: D1PreparedStatement[]) {
-      const target = reserve(statements.length);
-      let results: D1Result<T>[];
+  const work: QueryWorkByStage = {};
+  const wrap = (native: Database): Database => ({
+    schema: native.schema,
+    table: (name) => native.table(name),
+    async query<T extends object = Record<string, unknown>>(
+      sql: string,
+      values?: readonly unknown[],
+    ) {
+      if (statementLimit !== null && reserved + 1 > statementLimit) throw new QueryBudgetExceeded();
+      reserved += 1;
+      const target = (work[stage] ??= { statements: 0, durationMs: 0, failures: 0 });
+      target.statements += 1;
+      const started = performance.now();
       try {
-        results = await source.batch<T>(
-          statements.map(
-            (statement) => (statement as { native?: D1PreparedStatement }).native ?? statement,
-          ),
-        );
+        return await native.query<T>(sql, values);
       } catch (error) {
-        target.unmeasured += statements.length;
+        target.failures += 1;
         throw error;
+      } finally {
+        target.durationMs += performance.now() - started;
       }
-      for (const result of results) complete(target, result.meta);
-      return results;
     },
-    async exec(query) {
-      const target = reserve();
-      let result: { count: number; duration: number };
-      try {
-        result = await source.exec(query);
-      } catch (error) {
-        target.unmeasured += 1;
-        throw error;
-      }
-      complete(target);
-      return result;
-    },
-    dump: () => source.dump(),
-  };
+    transaction: (callback) => native.transaction((tx) => callback(wrap(tx))),
+  });
   return {
-    db,
+    db: wrap(source),
     work,
     setStage: (value: string) => (stage = value),
     setStatementLimit: (value: number | null) => (statementLimit = value),

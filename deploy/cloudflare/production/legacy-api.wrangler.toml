@@ -1,0 +1,35 @@
+# Production API bridge for the existing uptime database.
+# This named config avoids the placeholder database and origin in the generic
+# API preset. It never applies tenant migrations to the imported database.
+
+name = "uptime-api"
+main = "../../../apps/api-worker/src/index.ts"
+compatibility_date = "2026-08-30"
+workers_dev = true
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "uptime"
+database_id = "17c009df-5b56-44cc-9776-73e0f1775b0f"
+
+[[services]]
+binding = "OAUTH"
+service = "uptime-hosted-api"
+
+[vars]
+ENVIRONMENT = "production"
+REGIONS_LIST = "us-east,us-west,canada-central,eu-west,eu-north,eu-south,asia,asia-east,asia-south"
+SESSION_TTL_SECONDS = "604800"
+SESSION_COOKIE_SAMESITE = "lax"
+SESSION_COOKIE_SECURE = "true"
+WEB_ORIGIN = "https://uptime.noz.am"
+ALLOWED_ORIGINS = "https://uptime-2l5.pages.dev,https://uptime.noz.am"
+
+# Existing Worker secrets remain on this Worker. Never commit their values.
+# ADMIN_EMAIL
+# ADMIN_PASSWORD_HASH
+# CREDENTIAL_ENCRYPTION_SECRET
+# SESSION_SECRET

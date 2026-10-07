@@ -18,14 +18,12 @@ import {
 import type { Key } from '@atproto/oauth-client';
 import { WebcryptoKey } from '@atproto/jwk-webcrypto';
 import {
-  first,
-  hashSessionToken,
-  randomToken,
-  run,
   base64UrlDecode,
   base64UrlEncode,
-  type D1Database,
+  hashSessionToken,
+  randomToken,
 } from '@uptime/cloudflare';
+import { type Database, pgFirst, pgRun } from '@uptime/cloudflare/postgres';
 import { isForbiddenIpLiteral } from '@uptime/contracts';
 
 import { clearCookie, parseCookies, serializeCookie } from './http.js';
@@ -38,7 +36,7 @@ const MAX_DISCOVERY_RESPONSE_BYTES = 128 * 1024;
 const DISCOVERY_TIMEOUT_MS = 10_000;
 
 /**
- * Apply this to the control-plane D1 database. OAuth state and token sets are
+ * Apply this to the control-plane PostgreSQL database. OAuth state and token sets are
  * encrypted before storage. Browser session credentials are only stored as
  * HMAC hashes.
  */
@@ -82,7 +80,7 @@ export interface AtprotoAuthConfig {
   /** Public canonical API origin, never an internal Worker URL. */
   publicOrigin: string;
   sessionSecret: string;
-  /** Independent 32+ character secret used only to encrypt D1 OAuth records. */
+  /** Independent 32+ character secret used only to encrypt OAuth records. */
   oauthStorageSecret: string;
   sessionTtlSeconds: number;
   cookieSecure: boolean;
@@ -108,7 +106,7 @@ export interface AtprotoClientLike {
 }
 
 export interface AtprotoAuthDependencies {
-  db: D1Database;
+  db: Database;
   config: AtprotoAuthConfig;
   now?: () => Date;
   /** Inject a fake client in tests. Production uses createAtprotoOAuthClient. */
@@ -133,7 +131,7 @@ interface StateRow {
 
 /** Keep SDK-internal JWK implementation types out of this package's public API. */
 interface OAuthStores {
-  db: D1Database;
+  db: Database;
   stateStore: StateStore;
   sessionStore: SessionStore;
 }
@@ -262,11 +260,11 @@ export function createAtprotoAuth(dependencies: AtprotoAuthDependencies) {
       const token = randomToken(32);
       const expiresAt = new Date(now().getTime() + config.sessionTtlSeconds * 1_000);
       const nowIso = now().toISOString();
-      await run(
+      await pgRun(
         dependencies.db,
-        `INSERT INTO atproto_login_sessions
+        `INSERT INTO ${dependencies.db.table('atproto_login_sessions')}
            (token_hash, did, handle, expires_at, created_at, last_seen_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+         VALUES ($1, $2, $3, $4, $5, $6)`,
         [
           await hashSessionToken(token, config.sessionSecret),
           completed.session.did,
@@ -289,10 +287,10 @@ export function createAtprotoAuth(dependencies: AtprotoAuthDependencies) {
       const token = parseCookies(request.headers.get('cookie'))[SESSION_COOKIE];
       if (!token) return null;
       const current = now();
-      const row = await first<LoginSessionRow>(
+      const row = await pgFirst<LoginSessionRow>(
         dependencies.db,
-        `SELECT did, handle FROM atproto_login_sessions
-          WHERE token_hash = ? AND expires_at > ? LIMIT 1`,
+        `SELECT did, handle FROM ${dependencies.db.table('atproto_login_sessions')}
+          WHERE token_hash = $1 AND expires_at > $2 LIMIT 1`,
         [await hashSessionToken(token, config.sessionSecret), current.toISOString()],
       );
       return row ? { did: row.did, handle: row.handle } : null;
@@ -302,14 +300,16 @@ export function createAtprotoAuth(dependencies: AtprotoAuthDependencies) {
       const token = parseCookies(request.headers.get('cookie'))[SESSION_COOKIE];
       if (token) {
         const tokenHash = await hashSessionToken(token, config.sessionSecret);
-        const session = await first<{ did: string }>(
+        const session = await pgFirst<{ did: string }>(
           dependencies.db,
-          'SELECT did FROM atproto_login_sessions WHERE token_hash = ? LIMIT 1',
+          `SELECT did FROM ${dependencies.db.table('atproto_login_sessions')} WHERE token_hash = $1 LIMIT 1`,
           [tokenHash],
         );
-        await run(dependencies.db, 'DELETE FROM atproto_login_sessions WHERE token_hash = ?', [
-          tokenHash,
-        ]);
+        await pgRun(
+          dependencies.db,
+          `DELETE FROM ${dependencies.db.table('atproto_login_sessions')} WHERE token_hash = $1`,
+          [tokenHash],
+        );
         if (session?.did && client.revoke) await client.revoke(session.did).catch(() => undefined);
       }
       const headers = new Headers({ 'cache-control': 'no-store' });
@@ -319,29 +319,38 @@ export function createAtprotoAuth(dependencies: AtprotoAuthDependencies) {
 
     async prune(): Promise<void> {
       const timestamp = now().toISOString();
-      await run(
+      await pgRun(
         dependencies.db,
-        `DELETE FROM atproto_oauth_states WHERE state_hash IN
-           (SELECT state_hash FROM atproto_oauth_states WHERE expires_at <= ? LIMIT 100)`,
+        `DELETE FROM ${dependencies.db.table('atproto_oauth_states')}
+         WHERE state_hash IN (
+           SELECT state_hash FROM ${dependencies.db.table('atproto_oauth_states')}
+           WHERE expires_at <= $1 LIMIT 100
+         )`,
         [timestamp],
       );
-      await run(
+      await pgRun(
         dependencies.db,
-        `DELETE FROM atproto_login_sessions WHERE token_hash IN
-           (SELECT token_hash FROM atproto_login_sessions WHERE expires_at <= ? LIMIT 100)`,
+        `DELETE FROM ${dependencies.db.table('atproto_login_sessions')}
+         WHERE token_hash IN (
+           SELECT token_hash FROM ${dependencies.db.table('atproto_login_sessions')}
+           WHERE expires_at <= $1 LIMIT 100
+         )`,
         [timestamp],
       );
-      await run(
+      await pgRun(
         dependencies.db,
-        `DELETE FROM atproto_oauth_locks WHERE name IN
-           (SELECT name FROM atproto_oauth_locks WHERE lease_until <= ? LIMIT 100)`,
+        `DELETE FROM ${dependencies.db.table('atproto_oauth_locks')}
+         WHERE name IN (
+           SELECT name FROM ${dependencies.db.table('atproto_oauth_locks')}
+           WHERE lease_until <= $1 LIMIT 100
+         )`,
         [timestamp],
       );
     },
   };
 }
 
-/** Build the official SDK client with Workers-native WebCrypto and D1 stores. */
+/** Build the official SDK client with Workers-native WebCrypto and PostgreSQL stores. */
 export function createAtprotoOAuthClient(
   config: AtprotoAuthConfig,
   stores: OAuthStores,
@@ -379,11 +388,11 @@ export function createAtprotoOAuthClient(
       };
   const runtimeImplementation: RuntimeImplementation = {
     ...oauthRuntime,
-    // Refresh and revocation mutate a DID's token set. A D1 lease serializes
+    // Refresh and revocation mutate a DID's token set. A PostgreSQL lease serializes
     // those updates across Worker isolates; the lease is short and fenced by a
     // random token so a late releaser cannot delete a newer lock.
     requestLock: <T>(name: string, action: () => T | PromiseLike<T>) =>
-      withD1Lease(stores.db, name, async () => await action()),
+      withPostgresLease(stores.db, name, async () => await action()),
   };
   const options: OAuthClientOptions = {
     responseMode: 'query',
@@ -559,11 +568,23 @@ async function boundedResponseText(response: Response): Promise<string> {
 
 /** Workers' WebCrypto uses hyphenated digest names, unlike the SDK's lowercase identifiers. */
 export const workersOAuthRuntime = {
-  // The DPoP private JWK is encrypted in D1 for the callback. WebCrypto keys
+  // The DPoP private JWK is encrypted in PostgreSQL for the callback. WebCrypto keys
   // default to non-extractable, which makes `privateJwk` silently contain only
   // public material after generation and breaks the callback signature.
-  createKey: (algorithms: string[]) =>
-    WebcryptoKey.generate(algorithms, undefined, { extractable: true }),
+  createKey: async (algorithms: string[]) => {
+    // Generate through WebCrypto directly: under Node, `jose` returns KeyObjects and
+    // `WebcryptoKey.generate` rejects them as an invalid CryptoKeyPair.
+    const curves = { ES256: 'P-256', ES384: 'P-384', ES512: 'P-521' } as const;
+    const alg = algorithms.find((candidate): candidate is keyof typeof curves =>
+      Object.hasOwn(curves, candidate),
+    );
+    if (!alg) return WebcryptoKey.generate(algorithms, undefined, { extractable: true });
+    const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: curves[alg] }, true, [
+      'sign',
+      'verify',
+    ]);
+    return WebcryptoKey.fromKeypair(pair, crypto.randomUUID());
+  },
   getRandomValues: (length: number) => {
     const result = new Uint8Array(length);
     crypto.getRandomValues(result);
@@ -591,11 +612,7 @@ function webCryptoDigestName(
   }
 }
 
-function createOAuthStores(
-  db: D1Database,
-  config: AtprotoAuthConfig,
-  now: () => Date,
-): OAuthStores {
+function createOAuthStores(db: Database, config: AtprotoAuthConfig, now: () => Date): OAuthStores {
   return {
     db,
     stateStore: {
@@ -603,12 +620,18 @@ function createOAuthStores(
         const dpopJwk = privateJwk(value.dpopKey, 'state');
         const { dpopKey: _discard, ...rest } = value;
         const payload = await encryptJson(config.oauthStorageSecret, { ...rest, dpopJwk });
-        await run(
+        const stateHash = await hashSessionToken(state, config.sessionSecret);
+        await pgRun(
           db,
-          `INSERT OR REPLACE INTO atproto_oauth_states
-             (state_hash, encrypted_payload, expires_at, created_at) VALUES (?, ?, ?, ?)`,
+          `INSERT INTO ${db.table('atproto_oauth_states')}
+             (state_hash, encrypted_payload, expires_at, created_at)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (state_hash) DO UPDATE SET
+             encrypted_payload = EXCLUDED.encrypted_payload,
+             expires_at = EXCLUDED.expires_at,
+             created_at = EXCLUDED.created_at`,
           [
-            await hashSessionToken(state, config.sessionSecret),
+            stateHash,
             payload,
             new Date(now().getTime() + STATE_TTL_SECONDS * 1_000).toISOString(),
             now().toISOString(),
@@ -617,10 +640,14 @@ function createOAuthStores(
       },
       async get(state: string) {
         const stateHash = await hashSessionToken(state, config.sessionSecret);
-        const row = await first<StateRow>(
+        // Atomic one-time state consumption under concurrency:
+        // DELETE ... RETURNING atomically removes and returns the state record.
+        // Any concurrent request with the same state will receive null.
+        const row = await pgFirst<StateRow>(
           db,
-          `SELECT encrypted_payload FROM atproto_oauth_states
-            WHERE state_hash = ? AND expires_at > ? LIMIT 1`,
+          `DELETE FROM ${db.table('atproto_oauth_states')}
+           WHERE state_hash = $1 AND expires_at > $2
+           RETURNING encrypted_payload`,
           [stateHash, now().toISOString()],
         );
         if (!row) return undefined;
@@ -633,8 +660,9 @@ function createOAuthStores(
         return { ...rest, dpopKey };
       },
       async del(state: string) {
-        await run(db, 'DELETE FROM atproto_oauth_states WHERE state_hash = ?', [
-          await hashSessionToken(state, config.sessionSecret),
+        const stateHash = await hashSessionToken(state, config.sessionSecret);
+        await pgRun(db, `DELETE FROM ${db.table('atproto_oauth_states')} WHERE state_hash = $1`, [
+          stateHash,
         ]);
       },
     },
@@ -642,10 +670,13 @@ function createOAuthStores(
       async set(did: string, value: Session) {
         const dpopJwk = privateJwk(value.dpopKey, 'session');
         const { dpopKey: _discard, ...rest } = value;
-        await run(
+        await pgRun(
           db,
-          `INSERT OR REPLACE INTO atproto_oauth_sessions (did, encrypted_payload, updated_at)
-           VALUES (?, ?, ?)`,
+          `INSERT INTO ${db.table('atproto_oauth_sessions')} (did, encrypted_payload, updated_at)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (did) DO UPDATE SET
+             encrypted_payload = EXCLUDED.encrypted_payload,
+             updated_at = EXCLUDED.updated_at`,
           [
             did,
             await encryptJson(config.oauthStorageSecret, { ...rest, dpopJwk }),
@@ -654,9 +685,9 @@ function createOAuthStores(
         );
       },
       async get(did: string) {
-        const row = await first<StateRow>(
+        const row = await pgFirst<StateRow>(
           db,
-          'SELECT encrypted_payload FROM atproto_oauth_sessions WHERE did = ? LIMIT 1',
+          `SELECT encrypted_payload FROM ${db.table('atproto_oauth_sessions')} WHERE did = $1 LIMIT 1`,
           [did],
         );
         if (!row) return undefined;
@@ -669,7 +700,7 @@ function createOAuthStores(
         return { ...rest, dpopKey };
       },
       async del(did: string) {
-        await run(db, 'DELETE FROM atproto_oauth_sessions WHERE did = ?', [did]);
+        await pgRun(db, `DELETE FROM ${db.table('atproto_oauth_sessions')} WHERE did = $1`, [did]);
       },
     },
   };
@@ -732,28 +763,29 @@ function webcryptoImportAlgorithm(
   throw new TypeError('Unsupported AT Protocol DPoP JWK');
 }
 
-async function withD1Lease<T>(db: D1Database, name: string, action: () => Promise<T>): Promise<T> {
+export async function withPostgresLease<T>(
+  db: Database,
+  name: string,
+  action: () => Promise<T>,
+): Promise<T> {
   const token = randomToken(24);
   const deadline = Date.now() + 15_000;
   let acquired = false;
   while (Date.now() < deadline) {
     const now = new Date();
     const leaseUntil = new Date(now.getTime() + 30_000).toISOString();
-    // D1 serializes writes. The conditional UPDATE is the acquire operation:
+    // The conditional UPDATE is the acquire operation:
     // only one contender can replace an expired lease with its random token.
-    await run(
-      db,
-      `INSERT INTO atproto_oauth_locks (name, token, lease_until) VALUES (?, ?, ?)
-       ON CONFLICT(name) DO UPDATE SET token = excluded.token, lease_until = excluded.lease_until
-       WHERE atproto_oauth_locks.lease_until <= ?`,
+    const result = await db.query<{ token: string }>(
+      `INSERT INTO ${db.table('atproto_oauth_locks')} (name, token, lease_until)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (name) DO UPDATE
+         SET token = EXCLUDED.token, lease_until = EXCLUDED.lease_until
+         WHERE ${db.table('atproto_oauth_locks')}.lease_until <= $4
+       RETURNING token`,
       [name, token, leaseUntil, now.toISOString()],
     );
-    const lock = await first<{ token: string }>(
-      db,
-      'SELECT token FROM atproto_oauth_locks WHERE name = ? LIMIT 1',
-      [name],
-    );
-    if (lock?.token === token) {
+    if (result.rowCount === 1 && result.rows[0]?.token === token) {
       acquired = true;
       break;
     }
@@ -763,9 +795,15 @@ async function withD1Lease<T>(db: D1Database, name: string, action: () => Promis
   try {
     return await action();
   } finally {
-    await run(db, 'DELETE FROM atproto_oauth_locks WHERE name = ? AND token = ?', [name, token]);
+    await pgRun(
+      db,
+      `DELETE FROM ${db.table('atproto_oauth_locks')} WHERE name = $1 AND token = $2`,
+      [name, token],
+    );
   }
 }
+
+export const withOAuthLease = withPostgresLease;
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));

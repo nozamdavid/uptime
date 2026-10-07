@@ -29,6 +29,18 @@ is a schema reference, not a deployment runbook.
 - Enum-like text columns use `CHECK` lists mirroring `@uptime/contracts`.
 - Foreign keys are declared; D1 enforces them.
 
+## Hosted product limits
+
+Hosted control-plane migrations live in `src/control-migrations/*.sql` and are
+applied by the hosted API and coordinator databases. `workspace_product_limits`
+stores optional per-workspace overrides for saved monitor count, regions per
+monitor, and configured region access. Workspaces without an override use the
+deployment defaults: three monitors and the preferred configured regions.
+
+Tenant migration `0015_workspace_product_limits.sql` mirrors the active policy
+in `workspace_metadata`. SQL triggers use that row to enforce monitor and
+region quotas during writes, including concurrent requests.
+
 ## Entity-to-table map
 
 | plan.md entity                     | table(s)                                                     |
@@ -357,3 +369,11 @@ use `@cloudflare/workers-types` or the dependency-free structural
 - Incident evaluation reads `(expected_region_count, received, failures)` per
   finalized round; `received < expected` with zero failures is `unknown`, never
   healthy.
+
+# Operator scheduling controls
+
+CONTROL migration 0005 adds `scheduling_controls`, keyed by `fleet`, workspace UUID,
+or automatic `budget` scope. Pause and resume preserve reason, actor and transition
+time. Manual changes are also written transactionally to `workspace_events`.
+Access suspension remains independent. Pending dispatch age queries have an index
+on `(status, created_at)`. No tenant history scan is needed for scheduling state.

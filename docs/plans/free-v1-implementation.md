@@ -10,7 +10,8 @@ The operator page shows the total and latest 500 signups. `/api/interest/session
 
 ## Product contract
 
-- Three saved monitors, including paused monitors. Fixed five-minute checks, up to three configured regions, HTTPS on port 443, ten-second timeouts, and verified origin ownership.
+- Operator-managed per-workspace quotas default to three saved monitors, including paused monitors, and three regions per monitor, with the initial three regions allowed. Operators can set a saved-monitor cap of 0–1,000, a per-monitor region cap of 1–9, and one to nine allowed region IDs from deployment-configured regions; the per-monitor cap cannot exceed the allowed-region count. Teammates share the workspace quota and region policy. Reductions that conflict with any saved monitor or its regions return a helpful 409 and leave every monitor unchanged.
+- Fixed five-minute checks, public HTTPS URLs on port 443, and ten-second timeouts. Any public website can be monitored without proving hostname ownership. Private and reserved IP literals are rejected, but hostname DNS destinations are not pinned or rechecked, so hostnames resolving to private or reserved addresses are not reliably blocked.
 - An outage requires two failed scheduled rounds. Recovery requires one healthy round. Missing observations keep their existing unknown/coverage behavior. Repeat reminders and DNS diagnostics are unavailable.
 - Twenty-four hours of detailed observations and latency; thirty days of daily uptime. One public status page. Public URLs carry a workspace identifier, and outgoing public payloads remove URL paths and query strings.
 - Live public monitor reports retain the actual latest observation timestamp and show unknown after 420 seconds without a new observation, including when budget controls pause checks.
@@ -47,6 +48,6 @@ Repository checks cover OAuth browser state, replay rejection, loopback metadata
 
 The local development configuration and real OAuth smoke test use the official [localhost OAuth exception](https://atproto.com/specs/oauth#localhost-client-development). The account password is entered at the authorization server only. It is never an application setting, source fixture, or request to this application's API.
 
-Deploy using [the hosted runbook](../deployment/free-hosted.md). Before opening registration, supply the production domain and resource IDs, install secrets, register empty slots, configure the operator DID, deploy the three selected probes, enable billing alerts, and complete a production login plus an owned-target outage/recovery test.
+Deploy using [the hosted runbook](../deployment/free-hosted.md). Before opening registration, supply the production domain and resource IDs, install secrets, register empty slots, configure the operator DID, deploy the three selected probes, enable billing alerts, and complete a production login plus a public-target outage/recovery test.
 
 The landing's brief privacy and acceptable-use disclosures describe actual behavior. Complete service-owner identity/contact information, reviewed customer terms, the privacy notice, support instructions, incident communication, and backup/restore drills before a public product launch. The original [release plan](product-release-plan.md) remains the broader roadmap and launch checklist. Payments, paid entitlements, paid upgrades, and checkout are absent from this version.

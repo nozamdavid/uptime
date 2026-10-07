@@ -2,6 +2,7 @@
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { chooseOption } from './select-test-helpers.js';
 import { SlotAssignment } from './slot-assignment.js';
 
 const assign = vi.hoisted(() => vi.fn());
@@ -32,11 +33,7 @@ async function render(onAssigned = vi.fn(async () => {})) {
 }
 
 async function submit(container: HTMLElement) {
-  await act(async () => {
-    const select = container.querySelector('select')!;
-    select.value = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-  });
+  await chooseOption(container.querySelector('button.ut-select')!, '@test.example');
   await act(async () =>
     container
       .querySelector('form')!
@@ -48,7 +45,11 @@ describe('slot assignment', () => {
   it('requires a selected verified signup and refreshes capacity after granting access', async () => {
     assign.mockResolvedValue({ state: 'active' });
     const { container, onAssigned } = await render();
-    expect(container.querySelector('button')!.disabled).toBe(true);
+    const assignButton = () =>
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Assign workspace',
+      )!;
+    expect(assignButton().disabled).toBe(true);
     await submit(container);
     expect(assign).toHaveBeenCalledWith('STAGING_TEST_DB_001', 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa');
     expect(onAssigned).toHaveBeenCalledTimes(1);

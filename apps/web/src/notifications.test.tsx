@@ -4,9 +4,24 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { buildNotificationConfig, NotificationsPage } from './notifications.js';
+import { ProductSessionContext } from './product-shell.js';
+import { chooseOption } from './select-test-helpers.js';
 
 const reactEnvironment = globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean };
 reactEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
+
+const providerLabelFor: Record<string, string> = {
+  gotify: 'Gotify',
+  webhook: 'Webhook',
+  'home-assistant': 'Home Assistant',
+  smtp: 'SMTP',
+};
+
+function providerOptionLabels(container: HTMLElement) {
+  return [...container.querySelectorAll('[role="option"] .ut-option__label')].map(
+    (label) => label.textContent,
+  );
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -18,7 +33,7 @@ describe('notifications admin', () => {
     setter?.call(input, value);
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
-  function renderPage(response: unknown) {
+  function renderPage(response: unknown, session?: import('./api.js').ProductSession) {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation(
@@ -38,7 +53,18 @@ describe('notifications admin', () => {
     );
     const container = document.createElement('div');
     const root = createRoot(container);
-    return { container, root };
+    return {
+      container,
+      root,
+      render: () =>
+        session
+          ? createElement(
+              ProductSessionContext.Provider,
+              { value: session },
+              createElement(NotificationsPage),
+            )
+          : createElement(NotificationsPage),
+    };
   }
 
   it('offers all supported providers and serializes Resend recipients', async () => {
@@ -53,23 +79,22 @@ describe('notifications admin', () => {
         .find((button) => button.textContent === 'Add service')
         ?.click(),
     );
-    const provider = container.querySelector<HTMLSelectElement>('select')!;
-    expect([...provider.options].map((option) => option.value)).toEqual(
+    const provider = container.querySelector<HTMLButtonElement>('#notification-provider')!;
+    await act(async () => provider.click());
+    expect(providerOptionLabels(container)).toEqual(
       expect.arrayContaining([
-        'telegram',
-        'discord',
-        'resend',
-        'gotify',
-        'webhook',
-        'smtp',
-        'home-assistant',
-        'bluesky',
+        'Telegram',
+        'Discord',
+        'Resend',
+        'Gotify',
+        'Webhook',
+        'SMTP',
+        'Home Assistant',
+        'Bluesky',
       ]),
     );
-    await act(async () => {
-      provider.value = 'resend';
-      provider.dispatchEvent(new Event('change', { bubbles: true }));
-    });
+    await act(async () => provider.click());
+    await chooseOption(provider, 'Resend');
     const labels = [...container.querySelectorAll('label')];
     const inputFor = (text: string) =>
       labels
@@ -120,6 +145,41 @@ describe('notifications admin', () => {
         to: ['a@example.com', 'b@example.com', 'c@example.com'],
       },
     });
+    await act(async () => root.unmount());
+  });
+
+  it('keeps legacy imported workspaces outside the hosted free provider filter', async () => {
+    const { container, root, render } = renderPage(
+      { services: [] },
+      {
+        user: { did: 'did:plc:legacy', handle: 'legacy.test' },
+        role: 'owner',
+        workspace: {
+          id: 'workspace-legacy',
+          name: 'Production',
+          plan: 'free',
+          kind: 'legacy_import',
+          state: 'active',
+        },
+        usage: { monitors: 107, statusPages: 1, notificationServices: 2 },
+        limits: null,
+      },
+    );
+    await act(async () => {
+      root.render(render());
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () =>
+      [...container.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Add service')
+        ?.click(),
+    );
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('#notification-provider')!.click(),
+    );
+    expect(providerOptionLabels(container)).toContain('SMTP');
+    expect(providerOptionLabels(container)).toContain('Resend');
     await act(async () => root.unmount());
   });
 
@@ -209,11 +269,10 @@ describe('notifications admin', () => {
         .find((button) => button.textContent === 'Add service')
         ?.click(),
     );
-    const provider = container.querySelector<HTMLSelectElement>('select')!;
-    await act(async () => {
-      provider.value = providerName;
-      provider.dispatchEvent(new Event('change', { bubbles: true }));
-    });
+    await chooseOption(
+      container.querySelector('#notification-provider')!,
+      providerLabelFor[providerName]!,
+    );
     expect(container.textContent).toContain(secretLabel);
     expect(container.textContent).toContain(secondLabel);
     if (providerName === 'webhook' || providerName === 'smtp') {
@@ -277,6 +336,57 @@ describe('notifications admin', () => {
     await act(async () => root.unmount());
   });
 
+  it('does not display service updatedAt as delivery time and reports unavailable when missing delivery history', async () => {
+    const updatedAtTimestamp = '2026-09-16T10:00:00.000Z';
+    const { container, root } = renderPage({
+      services: [
+        {
+          id: '20000000-0000-4000-8000-000000000001',
+          name: 'Telegram Service',
+          provider: 'telegram',
+          enabled: true,
+          config: { chatId: '-100123456' },
+          createdAt: '2026-09-01T00:00:00.000Z',
+          updatedAt: updatedAtTimestamp,
+        },
+        {
+          id: '20000000-0000-4000-8000-000000000002',
+          name: 'Discord Service',
+          provider: 'discord',
+          enabled: true,
+          config: { webhookUrl: 'https://discord.com/webhook' },
+          createdAt: '2026-09-01T00:00:00.000Z',
+          updatedAt: updatedAtTimestamp,
+        },
+      ],
+    });
+
+    await act(async () => {
+      root.render(createElement(NotificationsPage));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const deliveryElements = container.querySelectorAll('.notification-card__delivery');
+    expect(deliveryElements).toHaveLength(2);
+
+    // The first service only has updatedAt: it must NOT use updatedAt as delivery time.
+    expect(deliveryElements[0]?.textContent).toBe('Last delivery: unavailable');
+    expect(deliveryElements[0]?.textContent).not.toContain('2026-09-16');
+    expect(deliveryElements[0]?.getAttribute('title')).toBe(
+      'Delivery history contains actual timestamps',
+    );
+
+    // The second service only has updatedAt: it must NOT use updatedAt as delivery time.
+    expect(deliveryElements[1]?.textContent).toBe('Last delivery: unavailable');
+    expect(deliveryElements[1]?.textContent).not.toContain('2026-09-16');
+    expect(deliveryElements[1]?.getAttribute('title')).toBe(
+      'Delivery history contains actual timestamps',
+    );
+
+    await act(async () => root.unmount());
+  });
+
   it('creates, edits, retains a blank Bluesky app password, and tests without publishing live posts', async () => {
     const existing = {
       id: '20000000-0000-4000-8000-000000000003',
@@ -323,11 +433,7 @@ describe('notifications admin', () => {
     await act(async () => {
       container.querySelector<HTMLButtonElement>('button')?.click();
     });
-    const provider = container.querySelector<HTMLSelectElement>('select')!;
-    await act(async () => {
-      provider.value = 'bluesky';
-      provider.dispatchEvent(new Event('change', { bubbles: true }));
-    });
+    await chooseOption(container.querySelector('#notification-provider')!, 'Bluesky');
     expect(container.textContent).toContain('Settings → Privacy and Security → App Passwords');
     expect(container.textContent).toContain('publish publicly');
     const inputFor = (labelText: string) =>
@@ -352,7 +458,7 @@ describe('notifications admin', () => {
     expect(container.textContent).toContain('@status.example · Bluesky');
     await act(async () => {
       [...container.querySelectorAll('button')]
-        .find((button) => button.textContent === 'Test')
+        .find((button) => button.textContent === 'Send test notification')
         ?.click();
       await Promise.resolve();
     });

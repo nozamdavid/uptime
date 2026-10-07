@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Provision the hosted D1 pool, bootstrap the operator, and deploy hosted Workers.
+# Deploy hosted Workers. Production also provisions the hosted D1 pool and verifies the operator.
+# Staging runs on the VPS (PostgreSQL), so it skips D1 provisioning and deploys the VPS API proxy.
 set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
@@ -23,29 +24,29 @@ while (($#)); do
 done
 select_deployment_environment "$repo_root" "$environment_arg"
 case "$target" in api|coordinator|all) ;; *) printf '%s\n' 'deploy-hosted-workers: target must be api, coordinator, or all' >&2; exit 1 ;; esac
-provision_args=(--environment "$deployment_environment")
-[[ -n "$capacity_arg" ]] && provision_args+=(--capacity "$capacity_arg")
-((dry_run)) && provision_args+=(--dry-run)
-"$repo_root/scripts/provision-tenant-pool.sh" "${provision_args[@]}"
-if ((dry_run)); then
-  printf '%s\n' 'deploy-hosted-workers: dry-run, skipping operator bootstrap writes' >&2
-else
-  bootstrap="$repo_root/scripts/bootstrap-operator-workspace.sh"
-  [[ -x "$bootstrap" ]] || { printf '%s\n' 'deploy-hosted-workers: bootstrap script is missing' >&2; exit 1; }
-  "$bootstrap" --environment "$deployment_environment"
-fi
 if [[ "$deployment_environment" == staging ]]; then
-  api_config="$repo_root/deploy/cloudflare/staging/oauth-api/wrangler.toml"
+  api_config="$repo_root/deploy/cloudflare/staging/vps-api-proxy/wrangler.toml"
   coordinator_config="$repo_root/deploy/cloudflare/staging/hosted-coordinator/wrangler.toml"
 else
+  provision_args=(--environment "$deployment_environment")
+  [[ -n "$capacity_arg" ]] && provision_args+=(--capacity "$capacity_arg")
+  ((dry_run)) && provision_args+=(--dry-run)
+  "$repo_root/scripts/provision-tenant-pool.sh" "${provision_args[@]}"
+  if ((dry_run)); then
+    printf '%s\n' 'deploy-hosted-workers: dry-run, skipping operator bootstrap writes' >&2
+  else
+    bootstrap="$repo_root/scripts/bootstrap-operator-workspace.sh"
+    [[ -x "$bootstrap" ]] || { printf '%s\n' 'deploy-hosted-workers: bootstrap script is missing' >&2; exit 1; }
+    "$bootstrap" --environment "$deployment_environment"
+  fi
   api_config="$repo_root/deploy/cloudflare/hosted/api.wrangler.toml"
   coordinator_config="$repo_root/deploy/cloudflare/hosted/coordinator.wrangler.toml"
 fi
 extra=()
 ((dry_run)) && extra+=(--dry-run)
 if [[ "$target" == api || "$target" == all ]]; then
-  pnpm --filter @uptime/api-worker exec wrangler deploy --config "$api_config" "${extra[@]}"
+  pnpm --filter @uptime/api-worker exec wrangler deploy --config "$api_config" "${extra[@]+"${extra[@]}"}"
 fi
 if [[ "$target" == coordinator || "$target" == all ]]; then
-  pnpm --filter @uptime/coordinator-worker exec wrangler deploy --config "$coordinator_config" "${extra[@]}"
+  pnpm --filter @uptime/coordinator-worker exec wrangler deploy --config "$coordinator_config" "${extra[@]+"${extra[@]}"}"
 fi

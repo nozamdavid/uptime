@@ -1,10 +1,11 @@
 import {
   parseRegionsList,
   requireBinding,
+  configuredMonitorBatch,
   type CloudflareEnv,
-  type D1Database,
   type R2Bucket,
 } from '@uptime/cloudflare';
+import type { Database, PostgresRuntimeBindings } from '@uptime/cloudflare/postgres';
 import { regionById, type RegionDefinition, type RegionId } from '@uptime/regions';
 import type { MonitorRefreshParams } from './on-demand-monitor.js';
 
@@ -15,13 +16,13 @@ import type { MonitorRefreshParams } from './on-demand-monitor.js';
  * bound is explicit because plan.md requires bounded per-invocation work.
  */
 export interface ReportConfig {
-  readonly db: D1Database;
+  readonly db: Database;
+  readonly schedulingPolicy?: 'hosted' | 'legacy';
   readonly reports: R2Bucket | null;
   readonly reportIntervalSeconds: number;
   readonly staleAfterSeconds: number;
+  /** Compatibility for deployed bindings; publication no longer starts these Workflows. */
   readonly monitorRefresh?: Workflow<MonitorRefreshParams>;
-  /** Report jobs reduce startup work to leave room for required maintenance. */
-  readonly monitorRefreshStartLimit?: () => number;
 }
 
 export interface CoordinatorConfig extends ReportConfig {
@@ -44,17 +45,21 @@ export interface CoordinatorConfig extends ReportConfig {
   readonly environment: string | undefined;
 }
 
-export interface CoordinatorEnv extends CloudflareEnv {
-  DB: D1Database;
+export interface CoordinatorEnv
+  extends
+    Omit<CloudflareEnv, 'DB' | 'CONTROL_DB' | keyof PostgresRuntimeBindings>,
+    PostgresRuntimeBindings {
   REPORTS?: R2Bucket;
   MONITOR_REFRESH?: Workflow<MonitorRefreshParams>;
-  /** Present only in hosted multi-tenant deployments. */
-  CONTROL_DB?: D1Database;
   TENANT_JOBS?: Queue<import('./tenant-dispatch.js').TenantJob>;
+  CURRENT_BUDGET_USAGE_JSON?: string;
+  /** Only "true" disables budget enforcement. Unset keeps it on. */
+  BUDGET_ENFORCEMENT_DISABLED?: string;
 }
 
-export interface ReportEnv extends CloudflareEnv {
-  DB: D1Database;
+/** Internal resolved report session; Worker bindings are resolved at each event. */
+export interface ReportEnv extends Omit<CloudflareEnv, 'DB' | 'CONTROL_DB'> {
+  DB: Database;
   REPORTS: R2Bucket;
 }
 
@@ -125,11 +130,14 @@ function probeWorkerNamePrefix(value: unknown): string {
   return prefix;
 }
 
-function reportSettings(source: CoordinatorEnv): ReportConfig {
+function reportSettings(
+  source: Pick<CoordinatorEnv, 'REPORTS' | 'MONITOR_REFRESH'>,
+  db: Database,
+): ReportConfig {
   const record = source as unknown as Record<string, unknown>;
   const reportIntervalSeconds = intVar(record['REPORT_INTERVAL_SECONDS'], 60, 60, 86_400);
   return {
-    db: requireBinding(source.DB, 'DB'),
+    db,
     reports: source.REPORTS ?? null,
     reportIntervalSeconds,
     staleAfterSeconds: reportIntervalSeconds + 120,
@@ -137,12 +145,13 @@ function reportSettings(source: CoordinatorEnv): ReportConfig {
   };
 }
 
-export function parseReportEnv(source: ReportEnv): ReportConfig {
-  const settings = reportSettings(source);
+export function parseReportEnv(source: ReportEnv, db: Database = source.DB): ReportConfig {
+  const settings = reportSettings(source, db);
   return { ...settings, reports: requireBinding(source.REPORTS, 'REPORTS') };
 }
 
-export function parseCoordinatorEnv(source: CoordinatorEnv): CoordinatorConfig {
+export function parseCoordinatorEnv(source: CoordinatorEnv, db?: Database): CoordinatorConfig {
+  if (!db) throw new Error('Coordinator requires an explicitly resolved PostgreSQL Database');
   const record = source as unknown as Record<string, unknown>;
   const enabledRegionIds = parseRegionsList(
     typeof record['REGIONS_LIST'] === 'string' ? (record['REGIONS_LIST'] as string) : undefined,
@@ -152,7 +161,7 @@ export function parseCoordinatorEnv(source: CoordinatorEnv): CoordinatorConfig {
     'HISTORY_RETENTION_PRESERVE_BEFORE',
   );
   return {
-    ...reportSettings(source),
+    ...reportSettings(source, db),
     enabledRegionIds,
     enabledRegions: enabledRegionIds.map((regionId) => regionById[regionId]),
     workersUrlDomain: workerDomain(record['WORKERS_URL_DOMAIN']),
@@ -165,7 +174,7 @@ export function parseCoordinatorEnv(source: CoordinatorEnv): CoordinatorConfig {
     ),
     credentialEncryptionSecret: optionalSecret(record),
     reportScheduleDisabled: record['REPORT_SCHEDULE_DISABLED'] === 'true',
-    monitorBatch: intVar(record['COORDINATOR_MONITOR_BATCH'], 50, 1, 500),
+    monitorBatch: configuredMonitorBatch(record),
     probeConcurrency: intVar(record['COORDINATOR_PROBE_CONCURRENCY'], 32, 1, 100),
     probeRequestMaxSkewSeconds: intVar(record['PROBE_REQUEST_MAX_SKEW_SECONDS'], 60, 15, 300),
     notificationMaxAttempts: intVar(record['NOTIFICATION_MAX_ATTEMPTS'], 8, 1, 100),

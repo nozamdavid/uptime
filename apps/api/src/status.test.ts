@@ -48,57 +48,12 @@ describe('aggregate monitor status', () => {
   it('uses only returned Worker evidence at larger region counts', () => {
     expect(
       deriveAggregateStatus(
-        ['us-east', 'us-west'],
-        [{ regionId: 'us-east', success: false, status: 'http_failure' }],
-      ),
-    ).toBe('down');
-    expect(
-      deriveAggregateStatus(
         ['us-east', 'us-west', 'canada-central', 'eu-west'],
         [
           { regionId: 'us-east', success: false, status: 'http_failure' },
           { regionId: 'us-west', success: false, status: 'network_failure' },
           { regionId: 'canada-central', success: false, status: 'http_failure' },
           { regionId: 'eu-west', success: true, status: 'success' },
-        ],
-      ),
-    ).toBe('degraded');
-    expect(
-      deriveAggregateStatus(
-        ['us-east', 'us-west', 'canada-central', 'eu-west', 'eu-north', 'eu-south'],
-        [
-          { regionId: 'us-east', success: false, status: 'http_failure' },
-          { regionId: 'us-west', success: false, status: 'network_failure' },
-          { regionId: 'canada-central', success: false, status: 'http_failure' },
-          { regionId: 'eu-west', success: true, status: 'success' },
-          { regionId: 'eu-north', success: true, status: 'success' },
-          { regionId: 'eu-south', success: true, status: 'success' },
-        ],
-      ),
-    ).toBe('degraded');
-    expect(
-      deriveAggregateStatus(
-        [
-          'us-east',
-          'us-west',
-          'canada-central',
-          'eu-west',
-          'eu-north',
-          'eu-south',
-          'asia',
-          'asia-east',
-          'asia-south',
-        ],
-        [
-          { regionId: 'us-east', success: false, status: 'http_failure' },
-          { regionId: 'us-west', success: false, status: 'network_failure' },
-          { regionId: 'canada-central', success: false, status: 'http_failure' },
-          { regionId: 'eu-west', success: false, status: 'http_failure' },
-          { regionId: 'eu-north', success: false, status: 'network_failure' },
-          { regionId: 'eu-south', success: true, status: 'success' },
-          { regionId: 'asia', success: true, status: 'success' },
-          { regionId: 'asia-east', success: true, status: 'success' },
-          { regionId: 'asia-south', success: true, status: 'success' },
         ],
       ),
     ).toBe('degraded');

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, createElement } from 'react';
 import { createTestRoot } from './testing/react-root.js';
+import { chooseOption } from './select-test-helpers.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const apiMock = vi.hoisted(() => ({
@@ -8,19 +9,85 @@ const apiMock = vi.hoisted(() => ({
   statusPage: vi.fn(),
   updateStatusPage: vi.fn(),
   publicStatusPage: vi.fn(),
+  statusPages: vi.fn(),
 }));
 const navigateMock = vi.hoisted(() => vi.fn());
 
-vi.mock('./api.js', () => ({ api: apiMock }));
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => navigateMock }));
+vi.mock('./api.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./api.js')>()),
+  api: apiMock,
+}));
+vi.mock('@tanstack/react-router', () => ({
+  useNavigate: () => navigateMock,
+  useRouter: () => ({ navigate: navigateMock }),
+}));
 
-const { PublicStatusPage, StatusPageEditor } = await import('./status-pages.js');
+const { PublicStatusPage, StatusPageEditor, StatusPagesIndex } = await import('./status-pages.js');
 
 afterEach(() => {
   vi.clearAllMocks();
+  window.history.replaceState({}, '', '/');
 });
 
 describe('public status page monitor rows', () => {
+  it('uses the saved public font independently of the admin preference', async () => {
+    document.documentElement.dataset.font = 'rubik';
+    apiMock.publicStatusPage.mockResolvedValue({
+      id: 'page-1', title: 'Service status', publicSlug: null, fontFamily: 'nunito', groups: [],
+    });
+    const view = createTestRoot();
+    await act(async () => {
+      view.root.render(createElement(PublicStatusPage, { statusPageId: 'page-1' }));
+      await Promise.resolve();
+    });
+    expect(view.container.querySelector('.public-status-page')?.getAttribute('data-font')).toBe('nunito');
+    expect(document.documentElement.dataset.font).toBe('rubik');
+    await view.cleanup();
+    delete document.documentElement.dataset.font;
+  });
+  it('keeps the workspace on a monitor link when its name and public slug are null', async () => {
+    window.history.replaceState(
+      {},
+      '',
+      '/status/bsky?workspace=f401c46b-17c4-4279-ab52-6dd3361a3dc9',
+    );
+    apiMock.publicStatusPage.mockResolvedValue({
+      id: 'page-1',
+      title: 'Service status',
+      publicSlug: 'bsky',
+      groups: [
+        {
+          id: 'group-1',
+          title: 'Services',
+          monitors: [
+            {
+              id: '2cba04b7-f86b-48cd-8357-835e32073d9f',
+              name: null,
+              url: 'https://bsky.app',
+              publicSlug: null,
+              uptimePercentage: 100,
+              status: 'up',
+              days: [],
+            },
+          ],
+        },
+      ],
+    });
+    const { container, root, cleanup } = createTestRoot();
+
+    await act(async () => {
+      root.render(createElement(PublicStatusPage, { statusPageId: 'bsky' }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('.public-status-monitor')?.getAttribute('href')).toBe(
+      '/monitors/public/2cba04b7-f86b-48cd-8357-835e32073d9f?statusPage=bsky&workspace=f401c46b-17c4-4279-ab52-6dd3361a3dc9',
+    );
+
+    await cleanup();
+  });
+
   it('clears a loaded page while the next route is loading or has failed', async () => {
     apiMock.publicStatusPage.mockResolvedValueOnce({
       id: 'page-a',
@@ -362,6 +429,32 @@ describe('public status page monitor rows', () => {
 });
 
 describe('status page editor ordering', () => {
+  it('loads and saves the chosen public font', async () => {
+    apiMock.monitors.mockResolvedValue({ monitors: [] });
+    apiMock.statusPage.mockResolvedValue({
+      id: 'page-1', title: 'Service status', publicSlug: null, fontFamily: 'rubik', groups: [],
+    });
+    apiMock.updateStatusPage.mockResolvedValue({ id: 'page-1' });
+    const view = createTestRoot();
+    await act(async () => {
+      view.root.render(createElement(StatusPageEditor, { statusPageId: 'page-1' }));
+      await Promise.resolve();
+    });
+    const trigger = view.container.querySelector('#status-page-font-family')!;
+    expect(trigger.textContent).toContain('Rubik');
+    await chooseOption(trigger, 'Poppins');
+    expect(view.container.querySelector('.status-page-editor__font .font-choice')?.getAttribute('data-font')).toBe('poppins');
+    await act(async () => {
+      view.container.querySelector<HTMLFormElement>('form')?.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(apiMock.updateStatusPage).toHaveBeenCalledWith(
+      'page-1', expect.objectContaining({ fontFamily: 'poppins' }),
+    );
+    await view.cleanup();
+  });
   it('ignores requests from obsolete routes and saves the current page state', async () => {
     const deferred = <T,>() => {
       let resolve!: (value: T) => void;
@@ -439,6 +532,7 @@ describe('status page editor ordering', () => {
     expect(apiMock.updateStatusPage).toHaveBeenCalledWith('page-d', {
       title: 'Page D',
       publicSlug: 'page-d-slug',
+      fontFamily: 'josefin-sans',
       groups: [
         {
           title: 'Page D group',
@@ -508,6 +602,9 @@ describe('status page editor ordering', () => {
     );
     expect(sortButton).not.toBeNull();
     expect(container.querySelector('.status-page-editor__slug input')).not.toBeNull();
+    expect(container.querySelector('.status-page-editor__layout')).not.toBeNull();
+    expect(container.querySelector('.status-page-editor__groups')).not.toBeNull();
+    expect(container.querySelector('.status-page-editor__available')).not.toBeNull();
     expect(container.querySelectorAll('.status-monitor-editor[draggable="true"]')).toHaveLength(4);
     expect(container.querySelector('.status-monitor-editor .drag-handle[draggable]')).toBeNull();
     expect(container.querySelector('.status-group-editor .monitor-badge')?.textContent).toBe('API');
@@ -552,6 +649,58 @@ describe('status page editor ordering', () => {
         (item) => item.textContent,
       ),
     ).toEqual(['alpha', 'beta.example.test', 'Zulu']);
+
+    await cleanup();
+  });
+});
+
+describe('status pages index', () => {
+  it('renders single primary action on empty state', async () => {
+    apiMock.statusPages.mockResolvedValueOnce({
+      statusPages: [],
+    });
+    const { container, root, cleanup } = createTestRoot();
+
+    await act(async () => {
+      root.render(createElement(StatusPagesIndex));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const primaryButtons = container.querySelectorAll('.button--primary');
+    expect(primaryButtons).toHaveLength(1);
+    expect(primaryButtons[0]?.textContent).toBe('Add status page');
+
+    await cleanup();
+  });
+
+  it('formats updatedAt in UTC with explicit UTC label and maintains single primary button', async () => {
+    apiMock.statusPages.mockResolvedValueOnce({
+      statusPages: [
+        {
+          id: 'sp-1',
+          title: 'Main Status',
+          publicSlug: 'main',
+          monitorCount: 3,
+          updatedAt: '2026-09-16T10:00:00.000Z',
+        },
+      ],
+    });
+    const { container, root, cleanup } = createTestRoot();
+
+    await act(async () => {
+      root.render(createElement(StatusPagesIndex));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const rows = container.querySelectorAll('.status-page-list__row');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain('Updated 2026-09-16 10:00 UTC');
+
+    const primaryButtons = container.querySelectorAll('.button--primary');
+    expect(primaryButtons).toHaveLength(1);
+    expect(primaryButtons[0]?.textContent).toBe('Add status page');
 
     await cleanup();
   });

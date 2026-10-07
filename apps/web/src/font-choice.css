@@ -1,0 +1,79 @@
+@import '@fontsource-variable/josefin-sans/wght.css';
+@import '@fontsource-variable/rubik/wght.css';
+@import '@fontsource-variable/roboto/wght.css';
+@import '@fontsource-variable/open-sans/wght.css';
+@import '@fontsource-variable/inter/wght.css';
+@import '@fontsource-variable/dm-sans/wght.css';
+@import '@fontsource-variable/nunito/wght.css';
+@import '@fontsource/poppins/latin-400.css';
+@import '@fontsource/poppins/latin-500.css';
+@import '@fontsource/poppins/latin-600.css';
+@import '@fontsource/poppins/latin-700.css';
+@import '@fontsource/ubuntu/latin-400.css';
+@import '@fontsource/ubuntu/latin-500.css';
+@import '@fontsource/ubuntu/latin-700.css';
+
+:root,
+:root[data-font='josefin-sans'],
+.font-choice[data-font='josefin-sans'] {
+  --font-body: 'Josefin Sans Variable', sans-serif;
+  --font-display: 'Josefin Sans Variable', sans-serif;
+}
+
+:root[data-font='rubik'],
+.font-choice[data-font='rubik'] {
+  --font-body: 'Rubik Variable', sans-serif;
+  --font-display: 'Rubik Variable', sans-serif;
+}
+
+:root[data-font='roboto'],
+.font-choice[data-font='roboto'] {
+  --font-body: 'Roboto Variable', sans-serif;
+  --font-display: 'Roboto Variable', sans-serif;
+}
+
+:root[data-font='open-sans'],
+.font-choice[data-font='open-sans'] {
+  --font-body: 'Open Sans Variable', sans-serif;
+  --font-display: 'Open Sans Variable', sans-serif;
+}
+
+:root[data-font='inter'],
+.font-choice[data-font='inter'] {
+  --font-body: 'Inter Variable', sans-serif;
+  --font-display: 'Inter Variable', sans-serif;
+}
+
+:root[data-font='dm-sans'],
+.font-choice[data-font='dm-sans'] {
+  --font-body: 'DM Sans Variable', sans-serif;
+  --font-display: 'DM Sans Variable', sans-serif;
+}
+
+:root[data-font='poppins'],
+.font-choice[data-font='poppins'] {
+  --font-body: 'Poppins', sans-serif;
+  --font-display: 'Poppins', sans-serif;
+}
+
+:root[data-font='nunito'],
+.font-choice[data-font='nunito'] {
+  --font-body: 'Nunito Variable', sans-serif;
+  --font-display: 'Nunito Variable', sans-serif;
+}
+
+:root[data-font='ubuntu'],
+.font-choice[data-font='ubuntu'] {
+  --font-body: 'Ubuntu', sans-serif;
+  --font-display: 'Ubuntu', sans-serif;
+}
+
+:root[data-font='helvetica'],
+.font-choice[data-font='helvetica'] {
+  --font-body: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-display: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+
+.font-choice {
+  font-family: var(--font-body);
+}

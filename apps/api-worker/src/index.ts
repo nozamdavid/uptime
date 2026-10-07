@@ -1,4 +1,4 @@
-import type { CloudflareEnv } from '@uptime/cloudflare';
+import { parseRegionsList, type CloudflareEnv } from '@uptime/cloudflare';
 
 import { createApiRouter, type AppEnv, type LogSink } from './app.js';
 import { ensureAdmin, pruneExpiredSessions } from './auth.js';
@@ -15,7 +15,14 @@ import {
 import { parseApiEnv } from './env.js';
 import { UrlPolicyError } from './security.js';
 import { hostedFetch } from './hosted-app.js';
+import { reconcileDueBilling } from './workspace-billing.js';
+import { reconcileCustomStatusDomains } from './custom-domain-http.js';
 import { z } from 'zod';
+import {
+  withPostgresRuntime,
+  resolveRuntimeSource,
+  type Database,
+} from '@uptime/cloudflare/postgres';
 
 /** Rate-limit budgets for login, notification tests, and public endpoints. */
 const loginRateLimit = { max: 8, windowSeconds: 60 };
@@ -51,99 +58,178 @@ const router = createApiRouter({ log, notificationFetch: workerFetch });
  *   hashes are accepted (see `auth.ts`).
  * - SMTP delivery is unsupported (see `providers.ts`).
  */
+/**
+ * One scheduled reconciliation pass. Shared by the Worker cron trigger and the
+ * Node runtime's interval timer; it never rejects.
+ */
+export async function reconcileScheduled(env: CloudflareEnv): Promise<void> {
+  if (env.POSTGRES_SOURCE_DATABASE_ID !== undefined) return;
+  return withPostgresRuntime(env, async (controlDb, catalog) => {
+    const regions = parseRegionsList(env.REGIONS_LIST);
+    // Each reconciler finishes all database work before the client closes.
+    const results = [];
+    for (const reconcile of [
+      () => reconcileDueBilling({ control: controlDb, env, regions }, 10),
+      () => reconcileCustomStatusDomains({ ...env, controlDb, catalog }, { limit: 10 }),
+    ]) {
+      try {
+        await reconcile();
+        results.push({ status: 'fulfilled' as const });
+      } catch {
+        results.push({ status: 'rejected' as const });
+      }
+    }
+    for (const [index, result] of results.entries()) {
+      if (result.status === 'rejected')
+        log.error?.(
+          {
+            event: index === 0 ? 'billing_reconciliation_failed' : 'domain_reconciliation_failed',
+          },
+          'Scheduled reconciliation failed',
+        );
+    }
+  }).catch(() =>
+    log.error?.(
+      { event: 'scheduled_configuration_failed' },
+      'Scheduled runtime configuration is invalid',
+    ),
+  );
+}
+
 export default {
+  async scheduled(_controller: ScheduledController, env: CloudflareEnv, context: ExecutionContext) {
+    context.waitUntil(reconcileScheduled(env));
+  },
   async fetch(request: Request, env: CloudflareEnv, context: ExecutionContext): Promise<Response> {
-    if (env.CONTROL_DB) return hostedFetch(request, env, context);
-    let config;
+    if (env.POSTGRES_SOURCE_DATABASE_ID === undefined) return hostedFetch(request, env, context);
     try {
-      config = parseApiEnv(env);
-    } catch (error) {
-      console.error('Invalid API Worker configuration', error);
-      return errorResponse(500, 'internal_error', 'Worker configuration is invalid');
-    }
-
-    const db = env.DB;
-    const appEnv: AppEnv = {
-      config,
-      db,
-      now: () => new Date(),
-      log,
-    };
-
-    const url = new URL(request.url);
-    const method = request.method.toUpperCase() as
-      'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS';
-
-    const cors = corsHeaders(request, config.allowedOrigins);
-    const withCors = (response: Response): Response => {
-      const headers = new Headers(response.headers);
-      for (const [key, value] of Object.entries(cors)) headers.set(key, value);
-      return new Response(response.body, { status: response.status, headers });
-    };
-
-    if (method === 'OPTIONS') {
-      return withCors(new Response(null, { status: 204 }));
-    }
-
-    try {
-      assertRequestOrigin(request, config.allowedOrigins);
-
-      if (!config.rateLimitDisabled) {
-        const limited = enforceRateLimit(request, url.pathname, method);
-        if (limited) return withCors(limited);
-      }
-
-      const matched = router.match(method, url.pathname);
-      if (!matched) {
-        if (router.hasPath(url.pathname)) {
-          return withCors(errorResponse(405, 'method_not_allowed', 'Method not allowed'));
+      return await withPostgresRuntime(env, async (control, catalog) => {
+        const resolved = await resolveRuntimeSource(
+          control,
+          catalog,
+          env.POSTGRES_SOURCE_DATABASE_ID,
+        );
+        if (resolved.source.profile === 'full-hosted')
+          throw new Error('Dedicated API requires a legacy source');
+        const pending: Promise<unknown>[] = [];
+        const scopedContext = {
+          waitUntil(promise: Promise<unknown>) {
+            pending.push(promise);
+          },
+          passThroughOnException() {
+            context.passThroughOnException();
+          },
+        } as ExecutionContext;
+        try {
+          return await legacyFetch(request, env, scopedContext, resolved.db, resolved.workspaceId);
+        } finally {
+          while (pending.length) await Promise.allSettled(pending.splice(0));
         }
-        return withCors(errorResponse(404, 'not_found', 'Route was not found'));
-      }
-
-      if (url.pathname === '/api/auth/login' || url.pathname === '/health') {
-        // Seed the singleton admin lazily on the first auth/health request.
-        await ensureAdmin(db, config).catch((error) => {
-          log.error?.({ event: 'admin_seed_failed' }, 'Failed to seed admin');
-          console.error(error);
-        });
-      }
-
-      // Opportunistic, bounded session cleanup; failures must not affect requests.
-      // Workers cancel unawaited promises after the response, so register the
-      // work with waitUntil rather than a bare `void` promise.
-      if (url.pathname === '/api/auth/login' && !config.rateLimitDisabled) {
-        context.waitUntil(pruneExpiredSessions(db, new Date()).catch(() => undefined));
-      }
-
-      const atprotoCookie = parseCookies(request.headers.get('cookie')).uptime_atproto_session;
-      if (atprotoCookie && requiresOauthBridge(url.pathname)) {
-        const principal = await lookupHostedIdentity(request, env);
-        appEnv.principal = principal;
-        if (url.pathname === '/api/auth/session' && method === 'GET') {
-          return withCors(
-            json({
-              user: { did: principal.did, handle: principal.handle },
-              role: 'owner',
-              isOperator: !principal.importedWorkspaceId,
-              admin: { id: principal.did, did: principal.did, handle: principal.handle },
-            }),
-          );
-        }
-      }
-
-      const response = await matched.handler({
-        request: request as unknown as Request,
-        env: appEnv,
-        params: matched.params,
-        url,
       });
-      return withCors(response);
-    } catch (error) {
-      return withCors(handleError(error, url.pathname));
+    } catch {
+      return errorResponse(500, 'internal_error', 'Worker configuration is invalid');
     }
   },
 } satisfies ExportedHandler<CloudflareEnv>;
+
+async function legacyFetch(
+  request: Request,
+  env: CloudflareEnv,
+  context: ExecutionContext,
+  db: Database,
+  workspaceId: string,
+): Promise<Response> {
+  let config;
+  try {
+    config = parseApiEnv(env);
+  } catch (error) {
+    console.error('Invalid API Worker configuration', error);
+    return errorResponse(500, 'internal_error', 'Worker configuration is invalid');
+  }
+
+  const appEnv: AppEnv = {
+    config,
+    db,
+    monitorCacheScope: workspaceId,
+    now: () => new Date(),
+    log,
+  };
+
+  const url = new URL(request.url);
+  const method = request.method.toUpperCase() as
+    'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS';
+
+  const cors = corsHeaders(request, config.allowedOrigins);
+  const withCors = (response: Response): Response => {
+    const headers = new Headers(response.headers);
+    for (const [key, value] of Object.entries(cors)) headers.set(key, value);
+    return new Response(response.body, { status: response.status, headers });
+  };
+
+  if (method === 'OPTIONS') {
+    return withCors(new Response(null, { status: 204 }));
+  }
+
+  try {
+    assertRequestOrigin(request, config.allowedOrigins);
+
+    if (!config.rateLimitDisabled) {
+      const limited = enforceRateLimit(request, url.pathname, method);
+      if (limited) return withCors(limited);
+    }
+
+    const matched = router.match(method, url.pathname);
+    if (!matched) {
+      if (router.hasPath(url.pathname)) {
+        return withCors(errorResponse(405, 'method_not_allowed', 'Method not allowed'));
+      }
+      return withCors(errorResponse(404, 'not_found', 'Route was not found'));
+    }
+
+    if (url.pathname === '/api/auth/login' || url.pathname === '/health') {
+      // Seed the singleton admin lazily on the first auth/health request.
+      await ensureAdmin(db, config).catch((error) => {
+        log.error?.({ event: 'admin_seed_failed' }, 'Failed to seed admin');
+        console.error(error);
+      });
+    }
+
+    // Opportunistic, bounded session cleanup; failures must not affect requests.
+    // Workers cancel unawaited promises after the response, so register the
+    // work with waitUntil rather than a bare `void` promise.
+    if (url.pathname === '/api/auth/login' && !config.rateLimitDisabled) {
+      context.waitUntil(pruneExpiredSessions(db, new Date()).catch(() => undefined));
+    }
+
+    const atprotoCookie = parseCookies(request.headers.get('cookie')).uptime_atproto_session;
+    if (atprotoCookie && requiresOauthBridge(url.pathname)) {
+      const principal = await lookupHostedIdentity(request, env);
+      if (principal.importedWorkspaceId && principal.importedWorkspaceId !== workspaceId)
+        throw new HttpErrorLike(403, 'forbidden', 'Workspace access denied');
+      appEnv.principal = principal;
+      if (url.pathname === '/api/auth/session' && method === 'GET') {
+        return withCors(
+          json({
+            user: { did: principal.did, handle: principal.handle },
+            role: principal.role ?? 'owner',
+            isOperator: !principal.importedWorkspaceId,
+            admin: { id: principal.did, did: principal.did, handle: principal.handle },
+          }),
+        );
+      }
+    }
+
+    const response = await matched.handler({
+      request: request as unknown as Request,
+      env: appEnv,
+      params: matched.params,
+      url,
+    });
+    return withCors(response);
+  } catch (error) {
+    return withCors(handleError(error, url.pathname));
+  }
+}
 
 function requiresOauthBridge(pathname: string): boolean {
   if (pathname === '/api/auth/session' || pathname === '/api/auth/logout') return true;
@@ -162,6 +248,7 @@ interface HostedIdentity {
   did: string;
   handle: string;
   importedWorkspaceId?: string;
+  role?: 'owner' | 'maintainer' | 'viewer';
 }
 
 async function lookupHostedIdentity(request: Request, env: CloudflareEnv): Promise<HostedIdentity> {
@@ -227,6 +314,7 @@ async function lookupHostedIdentity(request: Request, env: CloudflareEnv): Promi
       did: candidate.user.did,
       handle: candidate.user.handle,
       importedWorkspaceId: importedWorkspace,
+      role: candidate.role as 'owner' | 'maintainer' | 'viewer',
     };
   }
   if (

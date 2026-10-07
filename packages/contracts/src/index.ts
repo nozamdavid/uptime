@@ -148,10 +148,19 @@ export const statusPageGroupInputSchema = z.object({
   width: z.enum(['full', 'half']).default('full'),
   showBadges: z.boolean().default(true),
 });
+export const statusPageFontFamilies = [
+  'josefin-sans', 'rubik', 'roboto', 'open-sans', 'inter', 'dm-sans',
+  'poppins', 'nunito', 'ubuntu', 'helvetica',
+] as const;
+export const statusPageFontFamilySchema = z.enum(statusPageFontFamilies);
+export type StatusPageFontFamily = z.infer<typeof statusPageFontFamilySchema>;
+export const defaultStatusPageFontFamily: StatusPageFontFamily = 'josefin-sans';
+
 export const statusPageSaveSchema = z
   .object({
     title: z.string().trim().min(1).max(120),
     publicSlug: z.union([publicStatusPageSlugSchema, z.null()]).optional(),
+    fontFamily: statusPageFontFamilySchema.optional(),
     groups: z.array(statusPageGroupInputSchema).max(20),
   })
   .superRefine((value, context) => {

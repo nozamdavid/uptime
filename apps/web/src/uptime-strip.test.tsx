@@ -25,4 +25,20 @@ describe('uptime strip severity', () => {
     expect(markup).toContain('uptime-day--orange');
     expect(markup).toContain('uptime-day--red');
   });
+
+  it('renders keyboard-accessible day bars and tooltip overlays with screenreader labels', () => {
+    const markup = renderToStaticMarkup(
+      createElement(UptimeStrip, {
+        label: 'Daily uptime',
+        days: [
+          { date: '2026-09-01', uptimePercentage: 95, averageResponseMs: 120 },
+        ],
+      }),
+    );
+
+    expect(markup).toContain('tabindex="0"');
+    expect(markup).toContain('role="tooltip"');
+    expect(markup).toContain('72m downtime');
+    expect(markup).toContain('aria-label="2026-09-01: 95% uptime, 72m downtime, 120ms average response"');
+  });
 });

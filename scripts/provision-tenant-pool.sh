@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Idempotently provision the hosted tenant D1 pool.
+# Idempotently provision the hosted tenant D1 pool (production only; staging runs on PostgreSQL on the VPS).
 set -euo pipefail
 sql_quote() { local value="$1"; value="$(printf '%s' "$value" | sed "s/'/''/g")"; printf "'%s'" "$value"; }
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,7 +13,7 @@ dry_run=0
 usage() {
   cat <<'EOF'
 Usage: scripts/provision-tenant-pool.sh [options]
-  --environment staging|production
+  --environment production (staging D1 is retired)
   --capacity 1..10
   --dry-run
 EOF
@@ -37,19 +37,36 @@ case "$capacity_arg" in
 esac
 
 if [[ "$deployment_environment" == staging ]]; then
-  control_config="$repo_root/deploy/cloudflare/staging/oauth-api/wrangler.toml"
-  worker_config="$repo_root/deploy/cloudflare/staging/hosted-coordinator/wrangler.toml"
-  control_db=uptime-staging-control
-  prefix=uptime-staging-tenant
-  tenant_migrations_dir=../../../../packages/cloudflare/src/migrations
-else
-  control_config="$repo_root/deploy/cloudflare/hosted/api.wrangler.toml"
-  worker_config="$repo_root/deploy/cloudflare/hosted/coordinator.wrangler.toml"
-  control_db=uptime-control
-  prefix=uptime-tenant
-  tenant_migrations_dir=../../../packages/cloudflare/src/migrations
+  printf '%s\n' 'provision-tenant-pool: staging D1 is retired; staging uses PostgreSQL on the VPS (see scripts/postgres-staging-bootstrap.ts)' >&2
+  exit 1
 fi
+
+control_config="$repo_root/deploy/cloudflare/hosted/api.wrangler.toml"
+worker_config="$repo_root/deploy/cloudflare/hosted/coordinator.wrangler.toml"
+control_db=uptime-control
+prefix=uptime-tenant
+tenant_migrations_dir=../../../packages/cloudflare/src/migrations
 [[ -f "$control_config" && -f "$worker_config" ]] || { printf '%s\n' 'provision-tenant-pool: required Wrangler config is missing' >&2; exit 1; }
+
+if [[ "$deployment_environment" == production ]]; then
+  for config in "$control_config" "$worker_config"; do
+    awk '
+      /^\[\[d1_databases\]\]/{in_binding=0}
+      /^binding = "CONTROL_DB"$/{in_binding=1}
+      in_binding && /^database_name = "uptime-control"$/{has_name=1}
+      in_binding && /^database_id = "261093f4-98e2-48c8-b84d-932b7f27af7f"$/{has_id=1}
+      END{exit(!(has_name && has_id))}
+    ' "$config" || { printf 'provision-tenant-pool: production CONTROL_DB binding is missing or mismatched in %s\n' "$config" >&2; exit 1; }
+    awk '
+      /^\[\[d1_databases\]\]/{in_binding=0}
+      /^binding = "PRODUCTION_IMPORTED_DB"$/{in_binding=1}
+      in_binding && /^database_name = "uptime"$/{has_name=1}
+      in_binding && /^database_id = "17c009df-5b56-44cc-9776-73e0f1775b0f"$/{has_id=1}
+      in_binding && /^migrations_dir =/{has_migrations=1}
+      END{exit(!(has_name && has_id && !has_migrations))}
+    ' "$config" || { printf 'provision-tenant-pool: production import binding is missing, mismatched, or migration-enabled in %s\n' "$config" >&2; exit 1; }
+  done
+fi
 
 wrangler() { pnpm --filter @uptime/api-worker exec wrangler "$@"; }
 json_first() { jq -r "$1" 2>/dev/null | head -n 1 || true; }
@@ -74,10 +91,6 @@ for ((slot=0; slot<capacity_arg; slot++)); do
   bindings+=("TENANT_DB_$(printf '%03d' "$slot")")
   names+=("$prefix-$(printf '%03d' "$slot")")
 done
-if [[ "$deployment_environment" == staging ]]; then
-  bindings+=(STAGING_OPERATOR_DB STAGING_TEST_DB_001 STAGING_TEST_DB_002)
-  names+=(uptime-staging-operator uptime-staging-test-001 uptime-staging-test-002)
-fi
 printf '%s\n' "provision-tenant-pool: environment=$deployment_environment capacity=$capacity_arg databases=${#bindings[@]}" >&2
 if ((dry_run)); then
   printf '%s\n' 'provision-tenant-pool: dry-run, no Cloudflare or config writes' >&2
@@ -98,6 +111,10 @@ for i in "${!bindings[@]}"; do
     [[ "$database_id" =~ ^[0-9a-fA-F-]{36}$ ]] || { printf '%s\n' "provision-tenant-pool: unable to resolve ID for $db_name" >&2; exit 1; }
   fi
   [[ "$database_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || { printf 'provision-tenant-pool: invalid database ID\n' >&2; exit 1; }
+  if [[ "$deployment_environment" == production && "$database_id" == 17c009df-5b56-44cc-9776-73e0f1775b0f ]]; then
+    printf '%s\n' 'provision-tenant-pool: refusing to include the production import in the tenant pool' >&2
+    exit 1
+  fi
   for config in "$control_config" "$worker_config"; do
     if grep -q "binding = \"$binding\"" "$config"; then
       awk -v b="$binding" -v n="$db_name" -v id="$database_id" '
@@ -111,19 +128,25 @@ for i in "${!bindings[@]}"; do
       printf '\n[[d1_databases]]\nbinding = "%s"\ndatabase_name = "%s"\ndatabase_id = "%s"\nmigrations_dir = "%s"\n' "$binding" "$db_name" "$database_id" "$tenant_migrations_dir" >> "$config"
     fi
   done
-  wrangler d1 migrations apply "$db_name" --remote --config "$worker_config" >/dev/null
   slot_json="$(wrangler d1 execute "$control_db" --remote --config "$control_config" --command "SELECT binding_name,database_id,status FROM tenant_slots WHERE binding_name=$(sql_quote "$binding")" --json)"
   existing_id="$(printf '%s' "$slot_json" | json_first '.. | objects | .database_id? // empty')"
+  existing_status="$(printf '%s' "$slot_json" | json_first '.. | objects | .status? // empty')"
   if [[ -n "$existing_id" ]]; then
     [[ "$existing_id" == "$database_id" ]] || { printf '%s\n' "provision-tenant-pool: slot $binding ID mismatch" >&2; exit 1; }
   else
+    existing_status=""
+  fi
+  if [[ "$deployment_environment" == production && "$existing_status" == deleting ]]; then
+    printf '%s\n' "provision-tenant-pool: preserving quarantined $binding without tenant migrations" >&2
+  else
+    wrangler d1 migrations apply "$db_name" --remote --config "$worker_config" >/dev/null
+  fi
+  if [[ -z "$existing_id" ]]; then
     used_json="$(wrangler d1 execute "$db_name" --remote --config "$worker_config" --command 'SELECT (SELECT count(*) FROM workspace_metadata) + (SELECT count(*) FROM monitors) + (SELECT count(*) FROM notification_services) + (SELECT count(*) FROM status_pages) AS used' --json)"
     used="$(printf '%s' "$used_json" | json_first '.. | objects | .used? // empty')"
     [[ "$used" =~ ^[0-9]+$ ]] || { printf '%s\n' "provision-tenant-pool: could not verify $db_name is empty" >&2; exit 1; }
     ((used == 0)) || { printf '%s\n' "provision-tenant-pool: refusing to register non-empty database $db_name" >&2; exit 1; }
-    admission=1
-    [[ "$binding" == STAGING_OPERATOR_DB || "$binding" == STAGING_TEST_DB_001 || "$binding" == STAGING_TEST_DB_002 ]] && admission=0
-    sql="INSERT INTO tenant_slots(binding_name,database_id,schema_version,status) VALUES($(sql_quote "$binding"),$(sql_quote "$database_id"),13,'available'); INSERT INTO tenant_slot_controls(binding_name,admission_enabled) VALUES($(sql_quote "$binding"),$admission);"
+    sql="INSERT INTO tenant_slots(binding_name,database_id,schema_version,status) VALUES($(sql_quote "$binding"),$(sql_quote "$database_id"),13,'available'); INSERT INTO tenant_slot_controls(binding_name,admission_enabled) VALUES($(sql_quote "$binding"),1);"
     wrangler d1 execute "$control_db" --remote --config "$control_config" --command "$sql" >/dev/null
   fi
 done

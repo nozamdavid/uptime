@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { api } from './api.js';
+import { Select } from './select.js';
 
 export function SlotAssignment({
   bindingName,
@@ -30,24 +31,20 @@ export function SlotAssignment({
   }
   return (
     <form className="operator-controls slot-assignment" onSubmit={submit}>
-      <label>
-        Assign {bindingName} to
-        <select
+      <div className="field">
+        <label htmlFor={`slot-owner-${bindingName}`}>Assign {bindingName} to</label>
+        <Select
+          id={`slot-owner-${bindingName}`}
           value={ownerDid}
-          onChange={(event) => setOwnerDid(event.target.value)}
+          onChange={setOwnerDid}
           disabled={busy}
-        >
-          <option value="">Choose an interest signup</option>
-          {signups.map((signup) => (
-            <option key={signup.did} value={signup.did}>
-              @{signup.handle}
-            </option>
-          ))}
-        </select>
-      </label>
+          placeholder="Choose an interest signup"
+          options={signups.map((signup) => ({ value: signup.did, label: `@${signup.handle}` }))}
+        />
+      </div>
       {imported && (
         <p className="settings-note">
-          This existing staging monitor fleet and its history will belong to the assigned user.
+          This existing imported monitor fleet and its history will belong to the assigned user.
         </p>
       )}
       <button className="button button--quiet" disabled={busy || !ownerDid}>

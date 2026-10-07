@@ -1,5 +1,9 @@
+import type { Database } from './postgres/database.js';
+import {
+  resolvePostgresWorkspaceDatabase,
+  type PostgresTenantCatalogEntry,
+} from './postgres/tenancy.js';
 import type {
-  D1Database,
   R2Bucket,
   R2GetOptions,
   R2Object,
@@ -7,11 +11,7 @@ import type {
   R2PutOptions,
 } from './workers-types.js';
 
-export interface TenantBindingEnv {
-  readonly DB: D1Database;
-  readonly CONTROL_DB?: D1Database;
-  readonly [binding: string]: unknown;
-}
+export { type PostgresTenantCatalogEntry } from './postgres/tenancy.js';
 
 export interface FreeLimits {
   readonly maxRegions: 3;
@@ -39,9 +39,11 @@ export const freeLimits: FreeLimits = {
 
 export interface MeasuredUsage {
   readonly checks?: number;
-  readonly rowsRead?: number;
-  readonly rowsWritten?: number;
-  readonly storageBytes?: number;
+  readonly rowsRead?: number | null;
+  readonly rowsWritten?: number | null;
+  readonly storageBytes?: number | null;
+  readonly statements?: number;
+  readonly durationMs?: number;
 }
 
 export interface UsageAllowances {
@@ -63,13 +65,16 @@ const defaultAllowances: UsageAllowances = {
   storageBytes: 5_000_000_000,
 };
 
-/** D1 estimate only. Check counts are not billable Workers request/CPU measurements. */
+/** Historical D1 estimate only. Native PostgreSQL statements/duration do not fabricate D1 row measurements. */
 export function estimateMonthlyCost(
   usage: MeasuredUsage,
   allowances: UsageAllowances = defaultAllowances,
 ): MonthlyCostEstimate {
-  const overage = (key: keyof UsageAllowances, rate: number) =>
-    Math.max(0, Number(usage[key] ?? 0) - allowances[key]) * rate;
+  const overage = (key: keyof UsageAllowances, rate: number) => {
+    const val = usage[key];
+    if (val === null || val === undefined) return 0;
+    return Math.max(0, Number(val) - allowances[key]) * rate;
+  };
   const overageUsd =
     overage('rowsRead', 0.000000001) +
     overage('rowsWritten', 0.000001) +
@@ -82,56 +87,13 @@ export function estimateMonthlyCost(
   };
 }
 
-interface WorkspaceSlotRow {
-  binding_name: string;
-  workspace_id: string;
-  database_id: string;
-  status: string;
-}
-
-interface WorkspaceMetadataRow {
-  workspace_id: string;
-  database_id: string | null;
-  plan: string;
-}
-
-/** Resolve a statically bound tenant database and verify its identity metadata. */
+/** Resolve a tenant workspace database using verified PG resolver. */
 export async function resolveWorkspaceDatabase(
-  env: TenantBindingEnv,
+  control: Database,
   workspaceId: string,
-): Promise<D1Database> {
-  if (!env.CONTROL_DB) return env.DB;
-  const slot = await env.CONTROL_DB.prepare(
-    `SELECT binding_name, workspace_id, database_id, status
-       FROM tenant_slots WHERE workspace_id = ? LIMIT 1`,
-  )
-    .bind(workspaceId)
-    .first<WorkspaceSlotRow>();
-  if (!slot || slot.status !== 'assigned' || slot.workspace_id !== workspaceId) {
-    throw new Error(`Workspace ${workspaceId} has no assigned tenant database`);
-  }
-  const database = env[slot.binding_name];
-  if (!database || typeof (database as D1Database).prepare !== 'function') {
-    throw new Error(`Missing tenant database binding: ${slot.binding_name}`);
-  }
-  const metadata = await (database as D1Database)
-    .prepare(
-      `SELECT workspace_id, database_id, plan FROM workspace_metadata
-       WHERE id = 1 LIMIT 1`,
-    )
-    .first<WorkspaceMetadataRow>()
-    .catch((error) => {
-      throw new Error(`Tenant database metadata is unavailable: ${String(error)}`);
-    });
-  if (
-    !metadata ||
-    metadata.workspace_id !== workspaceId ||
-    (metadata.database_id !== null && metadata.database_id !== slot.database_id) ||
-    metadata.plan !== 'free'
-  ) {
-    throw new Error(`Tenant database identity mismatch for workspace ${workspaceId}`);
-  }
-  return database as D1Database;
+  catalog: readonly PostgresTenantCatalogEntry[],
+): Promise<Database> {
+  return resolvePostgresWorkspaceDatabase(control, workspaceId, catalog);
 }
 
 function prefixed(prefix: string, key: string): string {

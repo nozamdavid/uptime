@@ -1,4 +1,6 @@
-import { first, nowIso, run, type D1Database } from '@uptime/cloudflare';
+import { nowIso } from '@uptime/cloudflare';
+import { pgFirst as first, pgRun as run, type Database } from '@uptime/cloudflare/postgres';
+import type { QueryWorkByStage } from './query-metrics.js';
 
 export interface RetentionCheckpoint {
   observationsBefore?: string;
@@ -8,6 +10,7 @@ export interface RetentionCheckpoint {
 }
 
 export interface CoordinatorMetrics {
+  regionalProbes?: Record<string, { attempts: number; failures: number; missingResults: number }>;
   updatedAt: string;
   lastTickAt: string;
   dueMonitors: number;
@@ -29,10 +32,7 @@ export interface CoordinatorMetrics {
     notificationHistoryDeleted: number;
   };
   lastError: string | null;
-  queryWork: Record<
-    string,
-    { statements: number; rowsRead: number; rowsWritten: number; unmeasured: number }
-  >;
+  queryWork: QueryWorkByStage;
 }
 
 export function emptyMetrics(now: Date): CoordinatorMetrics {
@@ -59,6 +59,7 @@ export function emptyMetrics(now: Date): CoordinatorMetrics {
     },
     lastError: null,
     queryWork: {},
+    regionalProbes: {},
   };
 }
 
@@ -113,7 +114,7 @@ function isoDaysAgo(now: Date, days: number): string {
  * entire eligible history on every invocation.
  */
 export async function runRetention(
-  db: D1Database,
+  db: Database,
   now: Date,
   config: RetentionConfig,
   checkpoint: RetentionCheckpoint,
@@ -129,25 +130,25 @@ export async function runRetention(
 
   const observations = await run(
     db,
-    `DELETE FROM observations WHERE id IN (
-       SELECT o.id FROM observations o INDEXED BY observations_created_at_idx
-       CROSS JOIN check_runs cr ON cr.id = o.check_run_id
-       WHERE o.created_at > ? AND o.created_at < ?
+    `DELETE FROM ${db.table('observations')} WHERE id IN (
+       SELECT o.id FROM ${db.table('observations')} o
+       JOIN ${db.table('check_runs')} cr ON cr.id = o.check_run_id
+       WHERE o.created_at > $1 AND o.created_at < $2
          AND cr.status IN ('complete', 'partial')
          AND cr.finalized_at IS NOT NULL
-       ORDER BY o.created_at ASC LIMIT ?
+       ORDER BY o.created_at ASC LIMIT $3
      )`,
     [preserveBefore, observationsBefore, batch],
   );
   const checkRuns = await run(
     db,
-    `DELETE FROM check_runs WHERE id IN (
-       SELECT cr.id FROM check_runs cr INDEXED BY check_runs_retention_idx
-       WHERE cr.created_at > ? AND cr.created_at < ?
+    `DELETE FROM ${db.table('check_runs')} WHERE id IN (
+       SELECT cr.id FROM ${db.table('check_runs')} cr
+       WHERE cr.created_at > $1 AND cr.created_at < $2
          AND cr.status IN ('complete', 'partial')
          AND cr.finalized_at IS NOT NULL
-         AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.check_run_id = cr.id)
-       ORDER BY cr.created_at ASC LIMIT ?
+         AND NOT EXISTS (SELECT 1 FROM ${db.table('observations')} o WHERE o.check_run_id = cr.id)
+       ORDER BY cr.created_at ASC LIMIT $3
      )`,
     [preserveBefore, checkRunsBefore, batch],
   );
@@ -157,35 +158,35 @@ export async function runRetention(
   // cleanup by one batch at most.
   const diagnostics = await run(
     db,
-    `DELETE FROM network_diagnostics WHERE id IN (
-       SELECT id FROM network_diagnostics INDEXED BY network_diagnostics_retention_idx
-       WHERE created_at > ? AND created_at < ? AND lifecycle <> 'pending'
-       ORDER BY created_at ASC LIMIT ?
+    `DELETE FROM ${db.table('network_diagnostics')} WHERE id IN (
+       SELECT id FROM ${db.table('network_diagnostics')}
+       WHERE created_at > $1 AND created_at < $2 AND lifecycle <> 'pending'
+       ORDER BY created_at ASC LIMIT $3
      )`,
     [preserveBefore, networkDiagnosticsBefore, batch],
   );
   const sessions = await run(
     db,
-    `DELETE FROM sessions WHERE id IN (
-       SELECT id FROM sessions WHERE expires_at < ? ORDER BY expires_at ASC LIMIT ?
+    `DELETE FROM ${db.table('sessions')} WHERE id IN (
+       SELECT id FROM ${db.table('sessions')} WHERE expires_at < $1 ORDER BY expires_at ASC LIMIT $2
      )`,
     [nowIso(now), batch],
   );
   const deliveries = await run(
     db,
-    `DELETE FROM notification_deliveries WHERE id IN (
-       SELECT id FROM notification_deliveries INDEXED BY notification_deliveries_retention_idx
-       WHERE created_at > ? AND created_at < ? AND status IN ('sent', 'cancelled', 'failed')
-       ORDER BY created_at ASC LIMIT ?
+    `DELETE FROM ${db.table('notification_deliveries')} WHERE id IN (
+       SELECT id FROM ${db.table('notification_deliveries')}
+       WHERE created_at > $1 AND created_at < $2 AND status IN ('sent', 'cancelled', 'failed')
+       ORDER BY created_at ASC LIMIT $3
      )`,
     [preserveBefore, isoDaysAgo(now, 90), batch],
   );
   const notificationHistory = await run(
     db,
-    `DELETE FROM notification_history WHERE id IN (
-       SELECT id FROM notification_history INDEXED BY notification_history_retention_idx
-       WHERE created_at > ? AND created_at < ?
-       ORDER BY created_at ASC, id ASC LIMIT ?
+    `DELETE FROM ${db.table('notification_history')} WHERE id IN (
+       SELECT id FROM ${db.table('notification_history')}
+       WHERE created_at > $1 AND created_at < $2
+       ORDER BY created_at ASC, id ASC LIMIT $3
      )`,
     [preserveBefore, isoDaysAgo(now, 90), batch],
   );
@@ -194,24 +195,24 @@ export async function runRetention(
     db,
     `SELECT (
        EXISTS (
-         SELECT 1 FROM observations o INDEXED BY observations_created_at_idx
-         CROSS JOIN check_runs cr ON cr.id = o.check_run_id
-         WHERE o.created_at > ? AND o.created_at < ?
+         SELECT 1 FROM ${db.table('observations')} o
+         JOIN ${db.table('check_runs')} cr ON cr.id = o.check_run_id
+         WHERE o.created_at > $1 AND o.created_at < $2
            AND cr.status IN ('complete', 'partial')
            AND cr.finalized_at IS NOT NULL
        )
        OR EXISTS (
-         SELECT 1 FROM check_runs cr INDEXED BY check_runs_retention_idx
-         WHERE cr.created_at > ? AND cr.created_at < ?
+         SELECT 1 FROM ${db.table('check_runs')} cr
+         WHERE cr.created_at > $3 AND cr.created_at < $4
            AND cr.status IN ('complete', 'partial')
            AND cr.finalized_at IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.check_run_id = cr.id)
+           AND NOT EXISTS (SELECT 1 FROM ${db.table('observations')} o WHERE o.check_run_id = cr.id)
        )
        OR EXISTS (
-         SELECT 1 FROM network_diagnostics INDEXED BY network_diagnostics_retention_idx
-         WHERE created_at > ? AND created_at < ? AND lifecycle <> 'pending'
+         SELECT 1 FROM ${db.table('network_diagnostics')}
+         WHERE created_at > $5 AND created_at < $6 AND lifecycle <> 'pending'
        )
-     ) AS c`,
+     )::integer AS c`,
     [
       preserveBefore,
       observationsBefore,
@@ -223,12 +224,12 @@ export async function runRetention(
   );
   const complete = (remaining?.c ?? 0) === 0;
   return {
-    observationsDeleted: observations.meta.changes,
-    checkRunsDeleted: checkRuns.meta.changes,
-    networkDiagnosticsDeleted: diagnostics.meta.changes,
-    sessionsDeleted: sessions.meta.changes,
-    deliveriesDeleted: deliveries.meta.changes,
-    notificationHistoryDeleted: notificationHistory.meta.changes,
+    observationsDeleted: observations.rowCount ?? 0,
+    checkRunsDeleted: checkRuns.rowCount ?? 0,
+    networkDiagnosticsDeleted: diagnostics.rowCount ?? 0,
+    sessionsDeleted: sessions.rowCount ?? 0,
+    deliveriesDeleted: deliveries.rowCount ?? 0,
+    notificationHistoryDeleted: notificationHistory.rowCount ?? 0,
     complete,
     // Persist fresh cutoffs only when starting a new pass.
     checkpoint: complete
@@ -242,13 +243,13 @@ export async function runRetention(
 }
 
 export async function countStaleRounds(
-  db: D1Database,
+  db: Database,
   now: Date,
   staleSeconds: number,
 ): Promise<number> {
   const row = await first<{ c: number }>(
     db,
-    `SELECT COUNT(*) AS c FROM check_runs WHERE status = 'pending' AND deadline_at <= ?`,
+    `SELECT COUNT(*)::integer AS c FROM ${db.table('check_runs')} WHERE status = 'pending' AND deadline_at <= $1`,
     [nowIso(new Date(now.getTime() - staleSeconds * 1_000))],
   );
   return row?.c ?? 0;

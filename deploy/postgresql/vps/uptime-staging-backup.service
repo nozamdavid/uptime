@@ -1,0 +1,15 @@
+[Unit]
+Description=PostgreSQL uptime_staging Daily Local Backup
+Requires=postgresql.service
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+UMask=0077
+ExecStart=/usr/bin/pg_dump -d uptime_staging -Fc -f /var/backups/postgresql/uptime_staging.dump.tmp
+ExecStartPost=/bin/mv /var/backups/postgresql/uptime_staging.dump.tmp /var/backups/postgresql/uptime_staging-latest.dump
+
+[Install]
+WantedBy=multi-user.target

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { pgFirst } from '@uptime/cloudflare/postgres';
 
 import {
   createTestContext,
@@ -19,8 +20,8 @@ async function context() {
   return ctx;
 }
 
-afterEach(() => {
-  for (const ctx of contexts.splice(0)) ctx.db.close();
+afterEach(async () => {
+  for (const ctx of contexts.splice(0)) await ctx.close();
 });
 
 const validMonitor = {
@@ -91,7 +92,7 @@ describe('monitor create/update/delete', () => {
 
   it('prevents duplicate public slugs', async () => {
     const ctx = await context();
-    seedMonitor(ctx.sqlite, { publicSlug: 'website' });
+    await seedMonitor(ctx.db, { publicSlug: 'website' });
     const { cookie } = await login(ctx.app);
     const response = await request(ctx.app, '/api/monitors', {
       method: 'POST',
@@ -104,7 +105,7 @@ describe('monitor create/update/delete', () => {
 
   it('updates a monitor, replacing regions and preserving settings', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite, { regions: ['us-east'], name: 'Old' });
+    const id = await seedMonitor(ctx.db, { regions: ['us-east'], name: 'Old' });
     const { cookie } = await login(ctx.app);
     const response = await request(ctx.app, `/api/monitors/${id}`, {
       method: 'PATCH',
@@ -120,7 +121,7 @@ describe('monitor create/update/delete', () => {
 
   it('deletes a monitor and returns 404 afterwards', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite);
+    const id = await seedMonitor(ctx.db);
     const { cookie } = await login(ctx.app);
     const deleted = await request(ctx.app, `/api/monitors/${id}`, { method: 'DELETE', cookie });
     expect(deleted.status).toBe(204);
@@ -132,8 +133,8 @@ describe('monitor create/update/delete', () => {
 describe('bulk updates and badges', () => {
   it('updates frequencies for multiple monitors', async () => {
     const ctx = await context();
-    const a = seedMonitor(ctx.sqlite, { id: '30000000-0000-4000-8000-000000000001' });
-    const b = seedMonitor(ctx.sqlite, { id: '30000000-0000-4000-8000-000000000002' });
+    const a = await seedMonitor(ctx.db, { id: '30000000-0000-4000-8000-000000000001' });
+    const b = await seedMonitor(ctx.db, { id: '30000000-0000-4000-8000-000000000002' });
     const { cookie } = await login(ctx.app);
     const response = await request(ctx.app, '/api/monitors/bulk-frequency', {
       method: 'PATCH',
@@ -142,15 +143,17 @@ describe('bulk updates and badges', () => {
     });
     expect(response.status).toBe(200);
     expect((await json(response)).updatedCount).toBe(2);
-    const interval = ctx.sqlite
-      .prepare('SELECT interval_seconds FROM monitors WHERE id = ?')
-      .get(a) as { interval_seconds: number };
-    expect(interval.interval_seconds).toBe(900);
+    const interval = await pgFirst<{ interval_seconds: number }>(
+      ctx.db,
+      `SELECT interval_seconds FROM ${ctx.db.table('monitors')} WHERE id = $1`,
+      [a],
+    );
+    expect(interval?.interval_seconds).toBe(900);
   });
 
   it('rejects a bulk update referencing a missing monitor without mutating existing rows', async () => {
     const ctx = await context();
-    const a = seedMonitor(ctx.sqlite, { id: '30000000-0000-4000-8000-000000000001' });
+    const a = await seedMonitor(ctx.db, { id: '30000000-0000-4000-8000-000000000001' });
     const { cookie } = await login(ctx.app);
     const response = await request(ctx.app, '/api/monitors/bulk-frequency', {
       method: 'PATCH',
@@ -162,10 +165,12 @@ describe('bulk updates and badges', () => {
     });
     expect(response.status).toBe(404);
     // A missing id must leave every monitor unchanged.
-    const interval = ctx.sqlite
-      .prepare('SELECT interval_seconds FROM monitors WHERE id = ?')
-      .get(a) as { interval_seconds: number };
-    expect(interval.interval_seconds).toBe(300);
+    const interval = await pgFirst<{ interval_seconds: number }>(
+      ctx.db,
+      `SELECT interval_seconds FROM ${ctx.db.table('monitors')} WHERE id = $1`,
+      [a],
+    );
+    expect(interval?.interval_seconds).toBe(300);
   });
 
   it('updates the maximum of 100 monitors within the D1 bound-parameter limit', async () => {
@@ -173,8 +178,18 @@ describe('bulk updates and badges', () => {
     const ids: string[] = [];
     for (let index = 0; index < 100; index += 1) {
       const suffix = String(index + 1).padStart(12, '0');
-      ids.push(seedMonitor(ctx.sqlite, { id: `30000000-0000-4000-8000-${suffix}` }));
+      ids.push(`30000000-0000-4000-8000-${suffix}`);
     }
+    await ctx.db.query(
+      `INSERT INTO ${ctx.db.table('monitors')} (id, name, url, interval_seconds, timeout_ms, enabled,
+         dns_diagnostics_enabled, is_public, public_slug, badge_id, uptime_thresholds,
+         outage_threshold, recovery_threshold, next_check_at, created_at, updated_at)
+       SELECT '30000000-0000-4000-8000-' || lpad(i::text, 12, '0'),
+              'Monitor ' || i, 'https://api.example.com/health', 300, 10000, 1, 0, 0, NULL, NULL,
+              '{"green":99.5,"lightGreen":99,"orange":90}', 3, 2, '2026-09-16T10:00:00.000Z',
+              '2026-09-16T10:00:00.000Z', '2026-09-16T10:00:00.000Z'
+       FROM generate_series(1, 100) AS i`,
+    );
     const { cookie } = await login(ctx.app);
     const response = await request(ctx.app, '/api/monitors/bulk-frequency', {
       method: 'PATCH',
@@ -187,7 +202,7 @@ describe('bulk updates and badges', () => {
 
   it('creates, lists and bulk-assigns badges', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite);
+    const id = await seedMonitor(ctx.db);
     const { cookie } = await login(ctx.app);
     const created = await request(ctx.app, '/api/badges', {
       method: 'POST',
@@ -231,9 +246,9 @@ describe('bulk updates and badges', () => {
 describe('monitor history deletion', () => {
   it('removes all history tables and reschedules the monitor', async () => {
     const ctx = await context();
-    const id = seedMonitor(ctx.sqlite);
-    const runId = seedRun(ctx.sqlite, { monitorId: id, status: 'complete' });
-    seedObservation(ctx.sqlite, { checkRunId: runId, monitorId: id });
+    const id = await seedMonitor(ctx.db);
+    const runId = await seedRun(ctx.db, { monitorId: id, status: 'complete' });
+    await seedObservation(ctx.db, { checkRunId: runId, monitorId: id });
     const { cookie } = await login(ctx.app);
     const response = await request(ctx.app, `/api/monitors/${id}/history`, {
       method: 'DELETE',
@@ -247,8 +262,11 @@ describe('monitor history deletion', () => {
       'notification_deliveries',
       'monitor_notification_state',
     ]) {
-      const row = ctx.sqlite.prepare(`SELECT count(*) AS c FROM ${table}`).get() as { c: number };
-      expect(row.c).toBe(0);
+      const row = await pgFirst<{ c: string }>(
+        ctx.db,
+        `SELECT count(*) AS c FROM ${ctx.db.table(table)}`,
+      );
+      expect(Number(row?.c)).toBe(0);
     }
   });
 });

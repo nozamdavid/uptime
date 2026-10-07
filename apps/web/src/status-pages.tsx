@@ -29,6 +29,14 @@ import {
 import { ReportFreshness } from './report-freshness.js';
 import { formatPercentage } from './status-page-format.js';
 import { UptimeStrip, uptimeSeverity } from './uptime-strip.js';
+import {
+  defaultFontFamily,
+  fontOptions,
+  resolveFontFamily,
+  type FontFamily,
+} from './font-choice.js';
+import { Select } from './select.js';
+import { ThemeControl } from './theme.js';
 
 interface EditorGroup {
   key: string;
@@ -67,6 +75,19 @@ export function sortMonitorIdsAlphabetically(
   });
 }
 
+
+function formatUtcDateTime(value: string | number | Date): string {
+  const date = typeof value === "object" && value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.valueOf())) return String(value);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const year = date.getUTCFullYear();
+  const month = pad(date.getUTCMonth() + 1);
+  const day = pad(date.getUTCDate());
+  const hours = pad(date.getUTCHours());
+  const minutes = pad(date.getUTCMinutes());
+  return `${year}-${month}-${day} ${hours}:${minutes} UTC`;
+}
+
 export function StatusPagesIndex() {
   const session = useProductSession();
   const canWrite = !session?.user || session.role === 'owner' || session.role === 'maintainer';
@@ -88,7 +109,7 @@ export function StatusPagesIndex() {
           <h1>Status pages</h1>
           <p>Group monitors into a public, ninety-day service history.</p>
         </div>
-        {canWrite && (
+        {canWrite && (pages?.length ?? 0) > 0 && (
           <AppLink className="button button--primary" href="/status-pages/new">
             Add status page
           </AppLink>
@@ -99,7 +120,14 @@ export function StatusPagesIndex() {
       ) : !pages ? (
         <p className="state state--loading">Loading status pages…</p>
       ) : pages.length === 0 ? (
-        <p className="empty-inline">No status pages yet.</p>
+        <div className="state state--empty">
+          <p>No status pages yet. Group monitors into a public page your users can bookmark.</p>
+          {canWrite && (
+            <AppLink className="button button--primary" href="/status-pages/new">
+              Add status page
+            </AppLink>
+          )}
+        </div>
       ) : (
         <div className="status-page-list">
           {pages.map((page) => (
@@ -107,7 +135,7 @@ export function StatusPagesIndex() {
               <AppLink className="status-page-list__details" href={`/status-pages/${page.id}`}>
                 <strong>{page.title}</strong>
                 <span>{page.monitorCount} monitors</span>
-                <small>Updated {new Date(page.updatedAt).toLocaleString()}</small>
+                <small>Updated {formatUtcDateTime(page.updatedAt)}</small>
               </AppLink>
               <a
                 className="status-page-list__external"
@@ -137,6 +165,7 @@ export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
   const navigate = useNavigate();
   const [title, setTitle] = useState('');
   const [publicSlug, setPublicSlug] = useState<string | null>(null);
+  const [fontFamily, setFontFamily] = useState<FontFamily>(defaultFontFamily);
   const [groups, setGroups] = useState<EditorGroup[]>([]);
   const [monitors, setMonitors] = useState<MonitorSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -148,6 +177,7 @@ export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
     setError('');
     setTitle('');
     setPublicSlug(null);
+    setFontFamily(defaultFontFamily);
     setGroups([]);
     setMonitors([]);
     Promise.all([api.monitors(), creating ? Promise.resolve(null) : api.statusPage(statusPageId)])
@@ -157,6 +187,7 @@ export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
         if (page && 'groups' in page) {
           setTitle(page.title);
           setPublicSlug(page.publicSlug);
+          setFontFamily(resolveFontFamily(page.fontFamily));
           setGroups(
             page.groups.map((group) => ({
               key: group.id,
@@ -297,6 +328,7 @@ export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
     const input: StatusPageSave = {
       title,
       publicSlug,
+      fontFamily,
       groups: groups.map((group) => ({
         title: group.title,
         monitorIds: group.monitorIds,
@@ -381,6 +413,19 @@ export function StatusPageEditor({ statusPageId }: { statusPageId: string }) {
             'Uses lowercase letters, numbers, dots, and hyphens. Leave empty to use the page ID.'}
         </small>
       </label>
+      <div className="field status-page-editor__font">
+        <label htmlFor="status-page-font-family">Public font</label>
+        <Select
+          id="status-page-font-family"
+          options={fontOptions}
+          value={fontFamily}
+          disabled={!canWrite || busy}
+          onChange={setFontFamily}
+        />
+        <p className="font-choice ut-muted" data-font={fontFamily}>
+          Preview: Service status
+        </p>
+      </div>
       <div className="status-page-editor__layout">
         <section className="status-page-editor__groups" aria-label="Status page groups">
           {groups.map((group, groupIndex) => (
@@ -633,9 +678,27 @@ export function PublicStatusPage({ statusPageId }: { statusPageId: string }) {
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [autoRefresh, refreshPage]);
-  if (error && !page) return <p className="state state--error">{error}</p>;
-  if (!page) return <p className="state state--loading">Loading status…</p>;
+  if (error && !page)
+    return (
+      <>
+        <div className="theme-toolbar">
+          <ThemeControl />
+        </div>
+        <p className="state state--error">{error}</p>
+      </>
+    );
+  if (!page)
+    return (
+      <>
+        <div className="theme-toolbar">
+          <ThemeControl />
+        </div>
+        <p className="state state--loading">Loading status…</p>
+      </>
+    );
   const monitorSearch = new URLSearchParams({ statusPage: statusPageId });
+  const workspace = new URLSearchParams(workspaceSearch(null)).get('workspace');
+  if (workspace) monitorSearch.set('workspace', workspace);
   if (snapshotMetadata?.generation) monitorSearch.set('generation', snapshotMetadata.generation);
   const problemMonitors = [
     ...new Map(
@@ -653,18 +716,21 @@ export function PublicStatusPage({ statusPageId }: { statusPageId: string }) {
     ).values(),
   ];
   return (
-    <article className="public-status-page">
+    <article className="public-status-page font-choice" data-font={resolveFontFamily(page.fontFamily)}>
       <header className="public-status-page__head">
         <div className="public-status-page__topline">
           <p className="product-mark">UPTIME STATUS</p>
-          <button
-            type="button"
-            className="button button--quiet public-status-page__refresh-toggle"
-            aria-pressed={autoRefresh}
-            onClick={() => setAutoRefresh((enabled) => !enabled)}
-          >
-            Auto-refresh {autoRefresh ? 'on' : 'off'}
-          </button>
+          <div className="public-status-page__controls">
+            <button
+              type="button"
+              className="button button--quiet public-status-page__refresh-toggle"
+              aria-pressed={autoRefresh}
+              onClick={() => setAutoRefresh((enabled) => !enabled)}
+            >
+              Auto-refresh {autoRefresh ? 'on' : 'off'}
+            </button>
+            <ThemeControl />
+          </div>
         </div>
         <h1>{page.title}</h1>
         <p>Service availability over the last 90 days.</p>

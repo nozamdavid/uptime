@@ -20,11 +20,10 @@ function externalHref(value: string | null) {
 function formattedDate(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) return { local: value, absolute: value };
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const formatted = `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())} UTC`;
   return {
-    local: new Intl.DateTimeFormat(undefined, {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    }).format(date),
+    local: formatted,
     absolute: date.toISOString(),
   };
 }
@@ -138,12 +137,13 @@ export function NotificationHistoryView({
           ) : (
             <>
               <h2 id="notification-history-title">Notification history</h2>
-              <p>All providers, newest first. Expand a row to see the message.</p>
+              <p>Recent messages across all configured notification services.</p>
             </>
           )}
         </div>
         {!service && (
           <button
+            type="button"
             className="button button--quiet"
             onClick={() => setReload((value) => value + 1)}
             disabled={loading || loadingMore}
@@ -153,44 +153,45 @@ export function NotificationHistoryView({
         )}
       </header>
 
-      {error && (
-        <p className="field-error notification-feedback" role="alert">
+      {error && !loading && (
+        <p className="field-error" role="alert">
           {error}
         </p>
       )}
+
       {loading ? (
         <div className="state state--loading" role="status">
           <p>Loading notification history…</p>
         </div>
-      ) : entries.length === 0 && !loadFailed ? (
-        <div className="state state--empty" role="status">
-          <p>No notification history yet.</p>
-          <small>New notifications will appear here.</small>
-        </div>
-      ) : null}
-      {!loading && loadFailed && entries.length === 0 ? (
-        <div className="notification-history__retry">
-          <button className="button button--quiet" onClick={() => setReload((value) => value + 1)}>
+      ) : loadFailed && entries.length === 0 ? (
+        <div className="state state--error">
+          <p>{error || 'Notification history could not be loaded.'}</p>
+          <button
+            className="button button--quiet"
+            onClick={() => {
+              setReload((current) => current + 1);
+            }}
+          >
             Try again
           </button>
         </div>
+      ) : entries.length === 0 ? (
+        <div className="state state--empty">
+          <p>No notification history yet.</p>
+        </div>
       ) : (
-        !loading &&
-        entries.length > 0 && (
+        services && (
           <>
             <ol className="notification-history__list">
-              {entries.map((entry) => (
-                <li
-                  key={entry.id}
-                  className={`notification-history__item notification-history__item--${entry.status}`}
-                >
+              {entries.map((item) => (
+                <li key={item.id} className="notification-history__item">
                   {service ? (
-                    <HistoryEntryView entry={entry} />
+                    <CompactHistoryEntry entry={item} serviceName={undefined} />
                   ) : (
                     <CompactHistoryEntry
-                      entry={entry}
+                      entry={item}
                       serviceName={
-                        services.find((item) => item.id === entry.notificationServiceId)?.name
+                        services.find((match) => match.id === item.notificationServiceId)?.name
                       }
                     />
                   )}
@@ -223,6 +224,7 @@ function CompactHistoryEntry({
   serviceName: string | undefined;
 }) {
   const date = formattedDate(entry.createdAt);
+  const delivered = entry.status === 'sent';
   return (
     <details className="notification-history__row">
       <summary>
@@ -230,9 +232,10 @@ function CompactHistoryEntry({
           ›
         </span>
         <span
-          className={`notification-history__status notification-history__status--${entry.status}`}
+          className={`ut-status ut-status--${delivered ? 'up' : 'down'} notification-history__status notification-history__status--${entry.status}`}
         >
-          {entry.status === 'sent' ? 'Sent' : 'Failed'}
+          <span className={`ut-glyph ut-glyph--${delivered ? 'up' : 'down'}`} aria-hidden="true" />
+          {delivered ? 'Sent' : 'Failed'}
         </span>
         <span className="notification-history__row-kind">{titleForKind(entry.kind)}</span>
         <span className="notification-history__destination">
@@ -261,8 +264,9 @@ function HistoryEntryView({ entry }: { entry: NotificationHistoryEntry }) {
       <header className="notification-history__entry-head">
         <div className="notification-history__event">
           <span
-            className={`notification-history__status notification-history__status--${entry.status}`}
+            className={`ut-status ut-status--${delivered ? 'up' : 'down'} notification-history__status notification-history__status--${entry.status}`}
           >
+            <span className={`ut-glyph ut-glyph--${delivered ? 'up' : 'down'}`} aria-hidden="true" />
             {delivered ? 'Sent' : 'Failed'}
           </span>
           <span className="notification-history__kind">{titleForKind(entry.kind)}</span>

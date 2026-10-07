@@ -1,10 +1,21 @@
-import { flushUsage, meterDatabase, nowIso, type D1Database } from '@uptime/cloudflare';
-
+import {
+  budgetEnforcementDisabled,
+  nowIso,
+  schedulerCapacity,
+  schedulingState,
+} from '@uptime/cloudflare';
+import { pgFirst, resolveRuntimeSource, withPostgresRuntime } from '@uptime/cloudflare/postgres';
 import { runCoordinatorTick, type CoordinatorDependencies } from './coordinator.js';
 import { parseCoordinatorEnv, type CoordinatorEnv, type ReportConfig } from './env.js';
 import { ReportJobFailure, runReportJob } from './report-job.js';
 import { claimJob, reportLeaseSeconds, saveJobState } from './state.js';
-import { dispatchDueTenants, runTenantJob, type TenantJob } from './tenant-dispatch.js';
+import {
+  budgetAllowsWork,
+  configuredBudgetUsage,
+  dispatchDueTenants,
+  isTenantJob,
+  runTenantJob,
+} from './tenant-dispatch.js';
 
 export { reportLeaseSeconds } from './state.js';
 
@@ -12,14 +23,8 @@ export { reportLeaseSeconds } from './state.js';
 export const runtimeFetch: typeof fetch = (input, init) => globalThis.fetch(input, init);
 
 export function coordinatorRuntimeDependencies(): CoordinatorDependencies {
-  // Omit `now` so queued batches sample the live clock when they are dispatched.
   return { fetch: runtimeFetch, log: console };
 }
-
-const regionalTaskBudget = 108;
-const configuredMonitorLimit = 50;
-const maximumMonitorTimeoutMs = 30_000;
-const leaseCompletionMarginMs = 30_000;
 
 export function coordinatorLeaseSeconds(config: {
   readonly enabledRegionIds: readonly unknown[];
@@ -27,58 +32,63 @@ export function coordinatorLeaseSeconds(config: {
 }): number {
   const regionCount = Math.max(1, config.enabledRegionIds.length);
   const concurrency = Math.max(1, config.probeConcurrency);
-  const taskCount = Math.min(regionalTaskBudget, configuredMonitorLimit * regionCount);
-  // A region batch has at most five 30-second probes plus 15 seconds of batch
-  // overhead. For uneven region membership, list scheduling finishes within
-  // totalWork / concurrency + (1 - 1 / concurrency) * largestBatch.
+  const taskCount = Math.min(
+    schedulerCapacity.regionalTasksPerMinute,
+    schedulerCapacity.monitorClaimsPerMinute * regionCount,
+  );
   const batchCount = Math.floor((taskCount + 4 * regionCount) / 5);
-  const maximumBatchMs = 5 * maximumMonitorTimeoutMs + 15_000;
-  const totalWorkMs = taskCount * maximumMonitorTimeoutMs + batchCount * 15_000;
+  const maximumBatchMs = 5 * 30_000 + 15_000;
+  const totalWorkMs = taskCount * 30_000 + batchCount * 15_000;
   const dispatchBudget =
     batchCount <= concurrency
       ? maximumBatchMs
       : totalWorkMs / concurrency + (1 - 1 / concurrency) * maximumBatchMs;
-  return Math.ceil((dispatchBudget + leaseCompletionMarginMs) / 1_000);
+  return Math.ceil((dispatchBudget + 30_000) / 1_000);
 }
 
-/**
- * Cloudflare coordinator Worker entry point.
- *
- * `scheduled` runs every minute. Overlapping invocations are bounded by the
- * `coordinator` and `reports` leases isolate probe work from snapshot
- * publication. A live coordinator lease therefore cannot suppress the next
- * minute's report attempt. All work is idempotent if a lease expires mid-tick,
- * so a crashed invocation is recovered by a later one.
- */
 export default {
   async scheduled(_event: ScheduledController, env: CoordinatorEnv): Promise<void> {
-    if (env.CONTROL_DB) {
-      const rawControl = env.CONTROL_DB;
-      const controlMeter = meterDatabase(rawControl);
-      try {
-        await dispatchDueTenants({ ...env, CONTROL_DB: controlMeter.db } as CoordinatorEnv & {
-          CONTROL_DB: D1Database;
-        });
-      } finally {
-        await flushUsage(rawControl, '__control__', controlMeter.usage).catch((error) => {
-          console.warn({ event: 'control_usage_flush_failed', error: String(error) });
-        });
+    await withPostgresRuntime(env, async (control, catalog) => {
+      if (env.LEGACY_IMPORT_COORDINATOR !== 'true') {
+        await dispatchDueTenants({ ...env, controlDb: control, catalog });
+        return;
       }
-      return;
-    }
-    const config = parseCoordinatorEnv(env);
-    const results = await Promise.allSettled([
-      runCoordinatorSchedule(config),
-      runReportSchedule(config, new Date(), config.reportScheduleDisabled),
-    ]);
-    for (const [index, result] of results.entries()) {
-      if (result.status === 'rejected') {
-        console.error({
-          event: index === 0 ? 'coordinator_schedule_failed' : 'report_schedule_failed',
-          error: String(result.reason),
-        });
-      }
-    }
+      const resolved = await resolveRuntimeSource(
+        control,
+        catalog,
+        env.POSTGRES_SOURCE_DATABASE_ID,
+      );
+      if (resolved.schedulingPolicy !== 'legacy')
+        throw new Error('Legacy coordinator requires an explicit legacy source profile');
+      const now = new Date();
+      const budgetOff = budgetEnforcementDisabled(env);
+      const allowed = await budgetAllowsWork(control, now, configuredBudgetUsage(env), budgetOff);
+      const paused = (
+        await schedulingState(control, resolved.workspaceId, { ignoreBudget: budgetOff })
+      ).paused;
+      const workspace = await pgFirst<{ state: string }>(
+        control,
+        `SELECT state FROM ${control.table('workspaces')} WHERE id = $1`,
+        [resolved.workspaceId],
+      );
+      await control.query(
+        `INSERT INTO ${control.table('coordinator_runtime_health')} (workspace_id, source, last_seen_at)
+        VALUES ($1, $2, $3) ON CONFLICT (workspace_id) DO UPDATE SET source = excluded.source, last_seen_at = excluded.last_seen_at`,
+        [resolved.workspaceId, resolved.source.profile, now.toISOString()],
+      );
+      const config = {
+        ...parseCoordinatorEnv(env, resolved.db),
+        schedulingPolicy: 'legacy' as const,
+      };
+      const maintenanceOnly = !allowed || paused || workspace?.state !== 'active';
+      // Await both branches before closing this event's client, including failures.
+      const results = await Promise.allSettled([
+        runCoordinatorSchedule(config, now, maintenanceOnly),
+        runReportSchedule(config, now, maintenanceOnly || config.reportScheduleDisabled),
+      ]);
+      const failure = results.find((result) => result.status === 'rejected');
+      if (failure?.status === 'rejected') throw failure.reason;
+    });
   },
 
   async fetch(): Promise<Response> {
@@ -89,44 +99,25 @@ export default {
   },
 
   async queue(batch: MessageBatch<unknown>, env: CoordinatorEnv): Promise<void> {
-    if (!env.CONTROL_DB) return;
-    const rawControl = env.CONTROL_DB;
-    const controlMeter = meterDatabase(rawControl);
-    try {
-      for (const message of batch.messages) {
-        const job = message.body as TenantJob;
-        if (
-          !job ||
-          typeof job.workspaceId !== 'string' ||
-          !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-            job.workspaceId,
-          ) ||
-          typeof job.scheduledAt !== 'string' ||
-          !Number.isFinite(Date.parse(job.scheduledAt))
-        ) {
-          console.warn({ event: 'tenant_job_invalid' });
-          message.ack();
-          continue;
-        }
-        try {
-          await runTenantJob(
-            { ...env, CONTROL_DB: controlMeter.db } as CoordinatorEnv & { CONTROL_DB: D1Database },
-            job,
-          );
-          message.ack();
-        } catch (error) {
-          console.error({
-            event: 'tenant_job_failed',
-            workspaceId: job.workspaceId,
-            error: String(error),
-          });
-          message.retry();
-        }
+    for (const message of batch.messages) {
+      if (!isTenantJob(message.body)) {
+        console.warn({ event: 'tenant_job_invalid' });
+        message.ack();
+        continue;
       }
-    } finally {
-      await flushUsage(rawControl, '__control__', controlMeter.usage).catch((error) => {
-        console.warn({ event: 'control_usage_flush_failed', error: String(error) });
-      });
+      try {
+        // Each message has an independent session and closes before acknowledgement.
+        await withPostgresRuntime(env, (control, catalog) =>
+          runTenantJob(
+            { ...env, controlDb: control, catalog },
+            message.body as import('./tenant-dispatch.js').TenantJob,
+          ),
+        );
+        message.ack();
+      } catch {
+        console.error({ event: 'tenant_job_failed', workspaceId: message.body.workspaceId });
+        message.retry();
+      }
     }
   },
 } satisfies ExportedHandler<CoordinatorEnv>;
@@ -134,18 +125,17 @@ export default {
 export async function runCoordinatorSchedule(
   config: ReturnType<typeof parseCoordinatorEnv>,
   now = new Date(),
+  maintenanceOnly = false,
 ): Promise<void> {
-  // Cover the worst queued probe workload plus persistence. Fast ticks still
-  // release immediately through saveJobState.
   const lease = await claimJob(config.db, 'coordinator', now, coordinatorLeaseSeconds(config));
   if (!lease) return;
   try {
     const result = await runCoordinatorTick(config, coordinatorRuntimeDependencies(), {
       publishReports: false,
+      maintenanceOnly,
     });
-    const completedAt = new Date();
     await saveJobState(config.db, 'coordinator', {
-      now: completedAt,
+      now: new Date(),
       leaseToken: lease,
       state: result.metrics,
       completed: true,
@@ -155,7 +145,7 @@ export async function runCoordinatorSchedule(
     await saveJobState(config.db, 'coordinator', {
       now: failedAt,
       leaseToken: lease,
-      state: { lastError: String(error), failedAt: nowIso(failedAt) },
+      state: { lastError: 'Coordinator schedule failed', failedAt: nowIso(failedAt) },
     }).catch(() => undefined);
     throw error;
   }
@@ -167,15 +157,12 @@ export async function runReportSchedule(
   publicationDisabled = false,
 ): Promise<void> {
   if (publicationDisabled) {
-    // A separate reporter owns the reports lease and metrics. Maintenance
-    // fences live leases in SQL without competing for its scheduling slot.
     await runReportJob(config, { log: console, publicationDisabled: true });
     return;
   }
   const lease = await claimJob(config.db, 'reports', now, reportLeaseSeconds);
   if (!lease) return;
   try {
-    // Sample again after lease acquisition so generatedAt reflects publication time.
     const metrics = await runReportJob(config, {
       log: console,
       jobLeaseToken: lease,
@@ -194,7 +181,7 @@ export async function runReportSchedule(
     await saveJobState(config.db, 'reports', {
       now: failedAt,
       leaseToken: lease,
-      state: { ...metrics, lastError: String(error), failedAt: nowIso(failedAt) },
+      state: { ...metrics, lastError: 'Report schedule failed', failedAt: nowIso(failedAt) },
     }).catch(() => undefined);
     throw error;
   }

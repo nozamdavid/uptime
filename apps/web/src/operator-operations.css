@@ -1,0 +1,309 @@
+/* operator-operations.css */
+
+/* Health Panel & Scheduling */
+.operator-health {
+  display: grid;
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+  min-width: 0;
+  width: 100%;
+}
+
+.operator-health__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.operator-health__header > div,
+.operator-workspace-health-card__header > div,
+.operator-scheduling-box form > * {
+  min-width: 0;
+}
+
+.operator-health__header > div,
+.operator-scheduling-box form > div {
+  flex-wrap: wrap;
+}
+
+.operator-paused-banner {
+  background: var(--surface);
+  border: 2px solid var(--down);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-paused-banner h3 {
+  margin: 0;
+  color: var(--down);
+  font-size: var(--text-heading-size);
+  line-height: var(--text-heading-line-height);
+  font-weight: 600;
+}
+
+.operator-paused-banner p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-paused-banner ul {
+  margin: var(--space-1) 0 0 var(--space-4);
+  padding: 0;
+}
+
+.operator-dispatch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  min-width: 0;
+}
+
+.operator-dispatch-stat {
+  background: var(--surface);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--rule);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-dispatch-stat small {
+  display: block;
+  color: var(--muted);
+  font-size: var(--text-body-sm-size);
+  line-height: var(--text-body-sm-line-height);
+  overflow-wrap: anywhere;
+}
+
+.operator-dispatch-stat strong {
+  font-size: var(--text-heading-size);
+  line-height: var(--text-heading-line-height);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.operator-workspaces-health {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.operator-workspace-health-card {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  background: var(--surface);
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-workspace-health-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.operator-workspace-health-card strong {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.operator-badge {
+  display: inline-block;
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-label-size);
+  line-height: var(--text-label-line-height);
+  border-radius: var(--radius-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.operator-badge--hosted {
+  background: var(--sunken);
+  color: var(--ink-soft);
+}
+
+.operator-badge--staging_import {
+  background: var(--degraded-tint);
+  color: var(--accent);
+}
+
+.operator-badge--legacy_import {
+  background: var(--sunken);
+  color: var(--ink);
+}
+
+.operator-badge--paused {
+  background: var(--down-tint);
+  color: var(--down);
+}
+
+.operator-badge--ok {
+  background: var(--up-tint);
+  color: var(--up);
+}
+
+.operator-badge--stale {
+  background: var(--degraded-tint);
+  color: var(--degraded);
+}
+
+.operator-telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: var(--space-2);
+  font-size: var(--text-body-sm-size);
+  line-height: var(--text-body-sm-line-height);
+  min-width: 0;
+}
+
+.operator-telemetry-grid > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-regional-probes {
+  margin-top: var(--space-1);
+  font-size: var(--text-body-sm-size);
+  line-height: var(--text-body-sm-line-height);
+  border-top: 1px solid var(--rule);
+  padding-top: var(--space-1);
+  min-width: 0;
+}
+
+.operator-regional-probes summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.operator-pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: var(--space-3);
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* Scheduling Controls */
+.operator-scheduling-box {
+  margin-top: var(--space-2);
+  padding: var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.operator-scheduling-box form {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.operator-scheduling-box textarea,
+.operator-scheduling-box input[type='text'] {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: var(--text-body-sm-size);
+  line-height: var(--text-body-sm-line-height);
+}
+
+/* Quota Editor Live Preview */
+.operator-capacity-preview {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--rule);
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-capacity-preview--unsafe {
+  border-color: var(--down);
+  background: var(--down-tint);
+}
+
+.operator-capacity-preview__title {
+  font-size: var(--text-body-sm-size);
+  line-height: var(--text-body-sm-line-height);
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.operator-capacity-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: var(--space-3);
+  font-size: var(--text-body-sm-size);
+  line-height: var(--text-body-sm-line-height);
+  min-width: 0;
+}
+
+.operator-capacity-metric-item {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operator-capacity-progress {
+  width: 100%;
+  height: 6px;
+  background: var(--sunken);
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+}
+
+.operator-capacity-progress-bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-xs);
+  transition: width 0.2s ease;
+}
+
+.operator-capacity-progress-bar--warning {
+  background: var(--degraded);
+}
+
+.operator-capacity-progress-bar--danger {
+  background: var(--down);
+}
+
+.operator-capacity-warnings {
+  margin: var(--space-1) 0 0 0;
+  padding-left: var(--space-4);
+  color: var(--down);
+  font-size: var(--text-body-sm-size);
+  line-height: var(--text-body-sm-line-height);
+  overflow-wrap: anywhere;
+}

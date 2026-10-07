@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Backup Timer for uptime_staging PostgreSQL database
+Requires=uptime-staging-backup.service
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

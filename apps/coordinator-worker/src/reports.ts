@@ -1,13 +1,11 @@
 import {
-  all,
-  first,
   nowIso,
   parseUptimeThresholds,
   toBoolean,
-  type D1Database,
   type MonitorDailyUptimeRow,
   type MonitorRow,
 } from '@uptime/cloudflare';
+import { pgAll as all, pgFirst as first, type Database } from '@uptime/cloudflare/postgres';
 import { regionIds as canonicalRegionIds, type RegionId } from '@uptime/regions';
 import {
   summarizeUptimeDays,
@@ -15,6 +13,7 @@ import {
   type Badge,
   type MonitorSummary,
   type PublicMonitorSummary,
+  type StatusPageFontFamily,
 } from '@uptime/contracts';
 import {
   monitorSummaries,
@@ -77,16 +76,18 @@ function deriveAggregateStatus(
   return 'degraded';
 }
 
-async function loadBadge(db: D1Database, badgeId: string | null): Promise<Badge | null> {
+async function loadBadge(db: Database, badgeId: string | null): Promise<Badge | null> {
   if (!badgeId) return null;
-  const row = await first<Badge>(db, 'SELECT id, name, color FROM badges WHERE id = ? LIMIT 1', [
-    badgeId,
-  ]);
+  const row = await first<Badge>(
+    db,
+    `SELECT id, name, color FROM ${db.table('badges')} WHERE id = $1 LIMIT 1`,
+    [badgeId],
+  );
   return row;
 }
 
 async function buildPublicSummary(
-  db: D1Database,
+  db: Database,
   monitor: MonitorRow,
   regions: readonly RegionId[],
 ): Promise<PublicMonitorSummary> {
@@ -98,8 +99,8 @@ async function buildPublicSummary(
     expected_region_count: number;
   }>(
     db,
-    `SELECT id, window_started_at, expected_regions, expected_region_count FROM check_runs
-     WHERE monitor_id = ? AND status IN ('complete', 'partial')
+    `SELECT id, window_started_at, expected_regions, expected_region_count FROM ${db.table('check_runs')}
+     WHERE monitor_id = $1 AND status IN ('complete', 'partial')
      ORDER BY window_started_at DESC LIMIT 1`,
     [monitor.id],
   );
@@ -109,7 +110,7 @@ async function buildPublicSummary(
           db,
           `SELECT region_id, status, success, http_status, response_ms, total_ms, error_code,
              started_at, completed_at
-           FROM observations WHERE check_run_id = ?`,
+           FROM ${db.table('observations')} WHERE check_run_id = $1`,
           [latestRun.id],
         )
       : [];
@@ -160,13 +161,13 @@ async function buildPublicSummary(
 }
 
 async function loadUptimeRows(
-  db: D1Database,
+  db: Database,
   monitorId: string,
   sinceDay: string,
 ): Promise<MonitorDailyUptimeRow[]> {
   return all<MonitorDailyUptimeRow>(
     db,
-    `SELECT * FROM monitor_daily_uptime WHERE monitor_id = ? AND day >= ? ORDER BY day ASC`,
+    `SELECT * FROM ${db.table('monitor_daily_uptime')} WHERE monitor_id = $1 AND day >= $2 ORDER BY day ASC`,
     [monitorId, sinceDay],
   );
 }
@@ -211,7 +212,7 @@ interface RecoveryRow {
  * when the latest two all succeeded, otherwise `down`.
  */
 async function loadRegionRecovery(
-  db: D1Database,
+  db: Database,
   monitorId: string,
   sinceIso: string,
 ): Promise<RecoveryRow[]> {
@@ -223,12 +224,12 @@ async function loadRegionRecovery(
      FROM candidate_regions candidate
      WHERE EXISTS (
        SELECT 1
-       FROM observations o
-       JOIN check_runs cr ON cr.id = o.check_run_id
-       WHERE o.monitor_id = ? AND o.region_id = candidate.region_id
-         AND o.success = 0 AND o.scheduled_window >= ?
+       FROM ${db.table('observations')} o
+       JOIN ${db.table('check_runs')} cr ON cr.id = o.check_run_id
+       WHERE o.monitor_id = $1 AND o.region_id = candidate.region_id
+         AND o.success = 0 AND o.scheduled_window >= $2
          AND cr.monitor_id = o.monitor_id
-         AND cr.status IN ('complete', 'partial') AND cr.window_started_at >= ?
+         AND cr.status IN ('complete', 'partial') AND cr.window_started_at >= $3
        LIMIT 1
      )`,
     [monitorId, sinceIso, sinceIso],
@@ -243,9 +244,9 @@ async function loadRegionRecovery(
       const recent = await all<{ success: number }>(
         db,
         `SELECT o.success
-         FROM check_runs cr
-         JOIN observations o ON o.check_run_id = cr.id AND o.region_id = ?
-         WHERE cr.monitor_id = ? AND cr.status IN ('complete', 'partial')
+         FROM ${db.table('check_runs')} cr
+         JOIN ${db.table('observations')} o ON o.check_run_id = cr.id AND o.region_id = $1
+         WHERE cr.monitor_id = $2 AND cr.status IN ('complete', 'partial')
          ORDER BY cr.window_started_at DESC
          LIMIT 5`,
         [region_id, monitorId],
@@ -276,17 +277,19 @@ export type MonitorSnapshotBase = Omit<MonitorReportSnapshot, 'latency' | 'laten
 
 /** Build summary and uptime; the full-history builder adds the chart payloads. */
 export async function buildMonitorSnapshotBase(
-  db: D1Database,
+  db: Database,
   monitorId: string,
   options: ReportBuildOptions,
 ): Promise<MonitorSnapshotBase | null> {
-  const monitor = await first<MonitorRow>(db, 'SELECT * FROM monitors WHERE id = ? LIMIT 1', [
-    monitorId,
-  ]);
+  const monitor = await first<MonitorRow>(
+    db,
+    `SELECT * FROM ${db.table('monitors')} WHERE id = $1 LIMIT 1`,
+    [monitorId],
+  );
   if (!monitor) return null;
   const regionRows = await all<{ region_id: RegionId }>(
     db,
-    'SELECT region_id FROM monitor_regions WHERE monitor_id = ? ORDER BY region_id',
+    `SELECT region_id FROM ${db.table('monitor_regions')} WHERE monitor_id = $1 ORDER BY region_id`,
     [monitorId],
   );
   const regions = regionRows.map((row) => row.region_id);
@@ -295,7 +298,7 @@ export async function buildMonitorSnapshotBase(
   const recovery = await loadRegionRecovery(db, monitorId, `${today}T00:00:00.000Z`);
   uptime.recoveryStatus = overallRecovery(recovery);
 
-  const summary = await buildPublicSummary(db, monitor, regions);
+  const summary = withFreshStatus(await buildPublicSummary(db, monitor, regions), options);
   return {
     schemaVersion: '1',
     generatedAt: nowIso(options.now),
@@ -311,31 +314,31 @@ export async function buildMonitorSnapshotBase(
  * bounded bulk queries. Individual monitor reports refresh independently.
  */
 export async function buildReportCohortData(
-  db: D1Database,
+  db: Database,
   options: ReportBuildOptions,
 ): Promise<ReportCohortData> {
   const pages = await all<StatusPageRow>(
     db,
-    'SELECT id, title, public_slug FROM status_pages ORDER BY created_at ASC',
+    `SELECT id, title, public_slug, font_family FROM ${db.table('status_pages')} ORDER BY created_at ASC`,
   );
   const groups = await all<StatusPageGroupD1 & { status_page_id: string }>(
     db,
     `SELECT id, status_page_id, title, position, width, show_badges
-     FROM status_page_groups ORDER BY status_page_id, position`,
+     FROM ${db.table('status_page_groups')} ORDER BY status_page_id, position`,
   );
   const memberships = await all<StatusPageMonitorD1 & { status_page_id: string; position: number }>(
     db,
     `SELECT spm.status_page_id, spm.group_id, spm.position, m.*,
        '[]' AS notification_service_ids
-     FROM status_page_monitors spm
-     JOIN monitors m ON m.id = spm.monitor_id
+     FROM ${db.table('status_page_monitors')} spm
+     JOIN ${db.table('monitors')} m ON m.id = spm.monitor_id
      ORDER BY spm.status_page_id, spm.position`,
   );
   const monitorRows = await all<StatusPageMonitorD1>(
     db,
     `SELECT NULL AS group_id, m.*, '[]' AS notification_service_ids
-     FROM monitors m
-     WHERE EXISTS (SELECT 1 FROM status_page_monitors spm WHERE spm.monitor_id = m.id)
+     FROM ${db.table('monitors')} m
+     WHERE EXISTS (SELECT 1 FROM ${db.table('status_page_monitors')} spm WHERE spm.monitor_id = m.id)
      ORDER BY m.id`,
   );
   const monitorIds = monitorRows.map((monitor) => monitor.id);
@@ -350,7 +353,10 @@ export async function buildReportCohortData(
     const summary = summariesById.get(monitor.id);
     const details = uptimeDetails.get(monitor.id);
     if (!summary || !details) continue;
-    const publicSummary = toPublicMonitorSummary(summary as MonitorSummary);
+    const publicSummary = withFreshStatus(
+      toPublicMonitorSummary(summary as MonitorSummary),
+      options,
+    );
     const latestObservationAt = latestSummaryObservation(publicSummary);
     monitors.set(monitor.id, {
       summary: publicSummary,
@@ -385,6 +391,7 @@ interface StatusPageRow {
   id: string;
   title: string;
   public_slug: string | null;
+  font_family: StatusPageFontFamily;
 }
 
 interface StatusPageGroupD1 {
@@ -407,6 +414,22 @@ function latestSummaryObservation(summary: PublicMonitorSummary | MonitorSummary
       .sort()
       .at(-1) ?? null
   );
+}
+
+function withFreshStatus(
+  summary: PublicMonitorSummary,
+  options: ReportBuildOptions,
+): PublicMonitorSummary {
+  // A fresh publication cannot renew old probe evidence. Allow one check interval plus publication slack.
+  const oldestMs =
+    options.now.getTime() - (summary.monitor.intervalSeconds + options.staleAfterSeconds) * 1000;
+  const newestMs = options.now.getTime() + 60_000;
+  const fresh = summary.monitor.regionIds.every((regionId) => {
+    const observation = summary.latestByRegion[regionId];
+    const observedMs = observation ? Date.parse(observation.startedAt) : NaN;
+    return Number.isFinite(observedMs) && observedMs >= oldestMs && observedMs <= newestMs;
+  });
+  return fresh ? summary : { ...summary, status: 'unknown' };
 }
 
 /** Project the cohort's shared monitor evidence into each status page. */
@@ -461,6 +484,7 @@ function statusPageSnapshot(
       id: page.id,
       title: page.title,
       publicSlug: page.public_slug,
+      fontFamily: page.font_family,
       groups: pageGroups,
     },
   };

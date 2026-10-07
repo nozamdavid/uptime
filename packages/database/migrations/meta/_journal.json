@@ -93,6 +93,13 @@
       "when": 1789587600000,
       "tag": "0013_notification_providers",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1791417600000,
+      "tag": "0014_status_page_font_family",
+      "breakpoints": true
     }
   ]
 }

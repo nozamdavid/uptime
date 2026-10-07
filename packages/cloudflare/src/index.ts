@@ -13,3 +13,8 @@ export * from './tenancy.js';
 export * from './usage-meter.js';
 export * from './tenant-lifecycle.js';
 export * from './staging-import.js';
+export * from './product-limits.js';
+export * from './capacity.js';
+export * from './operations.js';
+export * from './product-tiers.js';
+export * from './postgres/index.js';

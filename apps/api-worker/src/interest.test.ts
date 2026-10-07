@@ -1,25 +1,18 @@
-import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createD1Adapter, createTestDatabase } from '@uptime/cloudflare/testing';
+import { pgFirst } from '@uptime/cloudflare/postgres';
+import { createControlFixture, type ControlTestFixture } from './testing/control-fixture.js';
 import { createAtprotoAuth, type AtprotoClientLike } from './atproto-auth.js';
 import { interestList, interestReturnPath, interestSignup, recordInterest } from './interest.js';
 
-const databases: ReturnType<typeof createTestDatabase>[] = [];
-afterEach(() => {
-  for (const database of databases.splice(0)) database.close();
+const databases: ControlTestFixture[] = [];
+afterEach(async () => {
+  for (const database of databases.splice(0)) await database.close();
 });
 
-function fixture() {
-  const database = createTestDatabase();
+async function fixture() {
+  const database = await createControlFixture();
   databases.push(database);
-  for (const name of ['0001_control.sql', '0002_slot_controls.sql', '0003_interest_signups.sql'])
-    database.exec(
-      readFileSync(
-        new URL(`../../../packages/cloudflare/src/control-migrations/${name}`, import.meta.url),
-        'utf8',
-      ),
-    );
-  const db = createD1Adapter(database);
+  const db = database.db;
   const did = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
   const scopes: string[] = [];
   let clock = new Date('2026-10-02T12:00:00.000Z');
@@ -83,7 +76,7 @@ function fixture() {
 
 describe('interest signup collection', () => {
   it('records verified identity-only OAuth once per DID without creating a workspace', async () => {
-    const context = fixture();
+    const context = await fixture();
     const first = await context.signup('@alice.bsky.social');
     expect(first.response.status).toBe(303);
     expect(first.response.headers.get('location')).toBe(interestReturnPath);
@@ -106,10 +99,20 @@ describe('interest signup collection', () => {
         },
       ],
     });
-    expect(context.database.prepare('SELECT count(*) AS count FROM workspaces').get()).toEqual({
+    expect(
+      await pgFirst(
+        context.db,
+        `SELECT count(*)::integer AS count FROM ${context.db.table('workspaces')}`,
+      ),
+    ).toEqual({
       count: 0,
     });
-    expect(context.database.prepare('SELECT count(*) AS count FROM users').get()).toEqual({
+    expect(
+      await pgFirst(
+        context.db,
+        `SELECT count(*)::integer AS count FROM ${context.db.table('users')}`,
+      ),
+    ).toEqual({
       count: 0,
     });
     expect((await first.replay()).headers.get('location')).toContain('auth_error');
@@ -117,7 +120,7 @@ describe('interest signup collection', () => {
   });
 
   it('does not collect failed, browser-mismatched, or ordinary application logins', async () => {
-    const context = fixture();
+    const context = await fixture();
     const mismatch = await context.signup('alice.bsky.social', interestReturnPath, true);
     expect(mismatch.response.headers.get('location')).toContain('auth_error');
     await context.signup('alice.bsky.social', '/app');

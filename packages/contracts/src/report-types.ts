@@ -1,4 +1,4 @@
-import type { Badge, PublicMonitorSummary, UptimeThresholds } from './index.js';
+import type { Badge, PublicMonitorSummary, StatusPageFontFamily, UptimeThresholds } from './index.js';
 import type { RegionId } from '@uptime/regions';
 
 export interface SnapshotFreshness {
@@ -94,6 +94,7 @@ export interface StatusPageReportSnapshot extends SnapshotFreshness {
     id: string;
     title: string;
     publicSlug: string | null;
+    fontFamily: StatusPageFontFamily;
     groups: Array<{
       id: string;
       title: string;
@@ -105,5 +106,10 @@ export interface StatusPageReportSnapshot extends SnapshotFreshness {
 }
 
 export interface StatusPageIndexSnapshot extends SnapshotFreshness {
-  statusPages: Array<{ id: string; title: string; publicSlug: string | null }>;
+  statusPages: Array<{
+    id: string;
+    title: string;
+    publicSlug: string | null;
+    fontFamily: StatusPageFontFamily;
+  }>;
 }

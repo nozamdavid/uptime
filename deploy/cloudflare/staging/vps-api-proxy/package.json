@@ -1,0 +1,5 @@
+{
+  "name": "@uptime/staging-vps-api-proxy",
+  "private": true,
+  "type": "module"
+}

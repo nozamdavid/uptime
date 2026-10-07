@@ -173,6 +173,25 @@ describe('notification history', () => {
 
     await act(async () => root.unmount());
   });
+
+  it('formats entry timestamps in UTC with explicit UTC label', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/notification-services')) return response({ services: [service] });
+      if (url.endsWith('/notification-history')) return response({ entries: [], nextCursor: null });
+      if (url.endsWith('/history')) return response({ entries: [entry], nextCursor: null });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    await openHistory(fetchMock, container, root);
+
+    const timeElement = container.querySelector('time');
+    expect(timeElement?.textContent).toBe('2026-09-29 18:42 UTC');
+
+    await act(async () => root.unmount());
+  });
 });
 
 describe('global notification history', () => {
@@ -280,7 +299,7 @@ describe('global notification history', () => {
     expect(container.textContent).toContain('No notification history yet.');
     await act(async () =>
       [...container.querySelectorAll('button')]
-        .find((button) => button.textContent === 'Test')
+        .find((button) => button.textContent === 'Send test notification')
         ?.click(),
     );
     expect(container.querySelectorAll('.notification-history__row')).toHaveLength(1);

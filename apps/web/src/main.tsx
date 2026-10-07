@@ -9,9 +9,10 @@ import {
   useRouterState,
 } from '@tanstack/react-router';
 import { createRoot } from 'react-dom/client';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import type { MonitorSummary } from '@uptime/contracts';
+import './styles.css';
 import { api } from './api.js';
 import type { ProductSession } from './api.js';
 import { MonitorDetail } from './monitor-detail.js';
@@ -19,23 +20,32 @@ import { MonitorForm } from './monitor-form.js';
 import { monitorDisplayName } from './monitor-format.js';
 import { MonitorList } from './monitor-list.js';
 import { NotificationsPage } from './notifications.js';
+import { PricingPage } from './pricing.js';
 import { PublicStatusPage, StatusPageEditor, StatusPagesIndex } from './status-pages.js';
 import { WorkspaceState } from './workspace-state.js';
-import './styles.css';
 import {
   AuthPage,
   InterestSignupPage,
   LandingPage,
   OperatorPage,
+  OperatorWorkspaceEditPage,
   ProductSessionContext,
   SettingsPage,
 } from './product-shell.js';
+import { MockBillingCheckoutPage } from './mock-billing-checkout.js';
+import { Select } from './select.js';
+import { ThemeControl } from './theme.js';
 
 const rootRoute = createRootRoute({ component: AppShell });
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
   component: LandingPage,
+});
+const pricingRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/pricing',
+  component: PricingPage,
 });
 const appRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -61,6 +71,11 @@ const operatorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/operator',
   component: OperatorPage,
+});
+const operatorWorkspaceEditRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/operator/workspaces/$workspaceId',
+  component: OperatorWorkspaceEditRoute,
 });
 const detailRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -92,19 +107,27 @@ const publicStatusPageRoute = createRoute({
   path: '/status/$statusPageId',
   component: PublicStatusPageRoute,
 });
+const mockBillingCheckoutRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/mock-billing/checkout',
+  component: MockBillingCheckoutPage,
+});
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  pricingRoute,
   appRoute,
   loginRoute,
   signupRoute,
   settingsRoute,
   operatorRoute,
+  operatorWorkspaceEditRoute,
   detailRoute,
   publicDetailRoute,
   statusPagesRoute,
   notificationsRoute,
   statusPageEditorRoute,
   publicStatusPageRoute,
+  mockBillingCheckoutRoute,
 ]);
 const router = createRouter({ routeTree });
 declare module '@tanstack/react-router' {
@@ -117,16 +140,23 @@ export function isPublicMonitorPath(pathname: string) {
   return pathname.startsWith('/monitors/public/') || pathname.startsWith('/status/');
 }
 
+function workspacePlanLabel(tierId: string | null, legacyExempt: boolean) {
+  if (legacyExempt && !tierId) return 'Imported';
+  if (!tierId) return null;
+  return tierId === 'free' ? 'Free' : tierId === 'pro' ? 'Pro' : tierId;
+}
+
 export function AppShell() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const isPublicRoute = isPublicMonitorPath(pathname);
   const isPublicStatusPage = pathname.startsWith('/status/');
   const isLanding = pathname === '/';
+  const isPricing = pathname === '/pricing';
   const isAuthRoute = pathname === '/login' || pathname === '/signup';
   const [session, setSession] = useState<ProductSession | null>(null);
   const sessionGeneration = useRef(0);
   const [authenticated, setAuthenticated] = useState<boolean | null>(
-    isLanding || isAuthRoute ? false : null,
+    isLanding || isPricing || isAuthRoute ? false : null,
   );
   const clearSession = () => {
     sessionGeneration.current += 1;
@@ -135,7 +165,7 @@ export function AppShell() {
     setAuthenticated(false);
   };
   useEffect(() => {
-    if (isPublicRoute || isLanding || isAuthRoute) return;
+    if (isPublicRoute || isLanding || isPricing || isAuthRoute) return;
     let active = true;
     const generation = sessionGeneration.current;
     setAuthenticated(null);
@@ -154,27 +184,34 @@ export function AppShell() {
     return () => {
       active = false;
     };
-  }, [isPublicRoute, isLanding, isAuthRoute]);
+  }, [isPublicRoute, isLanding, isPricing, isAuthRoute]);
   useEffect(() => {
     window.addEventListener('uptime:session-expired', clearSession);
     return () => window.removeEventListener('uptime:session-expired', clearSession);
   }, []);
-  if (isLanding)
+  if (isLanding || isPricing)
     return (
       <main className="public-workspace">
+        <div className="theme-toolbar">
+          <ThemeControl />
+        </div>
         <Outlet />
       </main>
     );
   if (isAuthRoute)
     return (
       <main className="public-workspace">
+        <div className="theme-toolbar">
+          <ThemeControl />
+        </div>
         <Outlet />
       </main>
     );
   if (isPublicRoute)
     return (
       <main
-        className={`workspace public-workspace${isPublicStatusPage ? ' public-status-workspace' : ''}`}
+        className={`workspace public-workspace font-choice${isPublicStatusPage ? ' public-status-workspace' : ' public-monitor-workspace'}`}
+        data-font="josefin-sans"
       >
         <Outlet />
       </main>
@@ -206,7 +243,11 @@ export function AppShell() {
         }}
       />
     );
-  const allowRestrictedRoute = pathname === '/settings' || pathname === '/operator';
+  const allowRestrictedRoute =
+    pathname === '/settings' ||
+    pathname === '/operator' ||
+    pathname.startsWith('/operator/') ||
+    pathname === '/mock-billing/checkout';
   return (
     <ProductSessionContext.Provider value={session}>
       <Workspace
@@ -220,7 +261,7 @@ export function AppShell() {
   );
 }
 
-function Workspace({
+export function Workspace({
   children,
   onSignOut,
   session,
@@ -232,123 +273,315 @@ function Workspace({
   allowRestrictedRoute: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [query, setQuery] = useState('');
-  const [monitors, setMonitors] = useState<MonitorSummary[]>([]);
+  const [monitors, setMonitors] = useState<MonitorSummary[] | null>(null);
+  const [workspaceTier, setWorkspaceTier] = useState<{
+    workspaceId: string;
+    label: string | null;
+  } | null>(null);
+  const requestedWorkspaceId = useRef(session?.workspace?.id);
   const [selected, setSelected] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const mobileToggleRef = useRef<HTMLButtonElement>(null);
+  const navRef = useRef<HTMLElement>(null);
   const wasOpen = useRef(false);
+  const wasMobileOpen = useRef(false);
   const navigate = useNavigate();
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+
+  useEffect(() => {
+    const workspaceId = session?.workspace?.id;
+    requestedWorkspaceId.current = workspaceId;
+    if (!workspaceId) return;
+    let active = true;
+    api.workspaceEntitlements()
+      .then(({ tierId, legacyExempt }) => {
+        if (active && requestedWorkspaceId.current === workspaceId) {
+          setWorkspaceTier({ workspaceId, label: workspacePlanLabel(tierId, legacyExempt) });
+        }
+      })
+      .catch(() => {
+        if (active && requestedWorkspaceId.current === workspaceId) {
+          setWorkspaceTier({ workspaceId, label: null });
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [session?.workspace?.id]);
+
+  const refreshMonitors = useCallback(() => {
+    api
+      .monitors()
+      .then((result) => setMonitors(result.monitors))
+      .catch(() => setMonitors(null));
+  }, []);
+
+  useEffect(() => {
+    refreshMonitors();
+  }, [pathname, refreshMonitors]);
+
+  useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    const handleRefresh = () => refreshMonitors();
+    window.addEventListener('uptime:monitors-changed', handleRefresh);
+    window.addEventListener('focus', handleRefresh);
+    return () => {
+      window.removeEventListener('uptime:monitors-changed', handleRefresh);
+      window.removeEventListener('focus', handleRefresh);
+    };
+  }, [refreshMonitors]);
+
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
+        setMobileMenuOpen(false);
         setOpen(true);
+        return;
       }
-      if (event.key === 'Escape') setOpen(false);
+      if (event.key === 'Escape') {
+        if (open) {
+          event.preventDefault();
+          setOpen(false);
+        } else if (mobileMenuOpen) {
+          event.preventDefault();
+          setMobileMenuOpen(false);
+        }
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, []);
+  }, [open, mobileMenuOpen]);
+
   useEffect(() => {
     if (open) {
       wasOpen.current = true;
       setSelected(0);
-      void api
-        .monitors()
-        .then((result) => setMonitors(result.monitors))
-        .catch(() => setMonitors([]));
+      refreshMonitors();
       setTimeout(() => input.current?.focus(), 0);
       document.body.style.overflow = 'hidden';
     } else if (wasOpen.current) {
       wasOpen.current = false;
       trigger.current?.focus();
+      if (!mobileMenuOpen) {
+        document.body.style.overflow = '';
+      }
     }
-    return () => {
-      document.body.style.overflow = '';
-    };
-  }, [open]);
-  const results = monitors
+  }, [open, mobileMenuOpen, refreshMonitors]);
+
+  useEffect(() => {
+    if (mobileMenuOpen) {
+      wasMobileOpen.current = true;
+      document.body.style.overflow = 'hidden';
+      const firstFocusable = navRef.current?.querySelector<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      firstFocusable?.focus();
+    } else if (wasMobileOpen.current) {
+      wasMobileOpen.current = false;
+      mobileToggleRef.current?.focus();
+      if (!open) {
+        document.body.style.overflow = '';
+      }
+    }
+  }, [mobileMenuOpen, open]);
+
+  const handleNavKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Tab' || !mobileMenuOpen) return;
+    const navEl = navRef.current;
+    const toggleEl = mobileToggleRef.current;
+    if (!navEl) return;
+    const focusables = Array.from(
+      navEl.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((el) => !el.hasAttribute('disabled') && (el as HTMLElement).offsetParent !== null);
+    if (toggleEl) {
+      focusables.unshift(toggleEl);
+    }
+    if (focusables.length === 0) return;
+    const firstEl = focusables[0];
+    const lastEl = focusables[focusables.length - 1];
+    if (!firstEl || !lastEl) return;
+    if (event.shiftKey && document.activeElement === firstEl) {
+      event.preventDefault();
+      lastEl.focus();
+    } else if (!event.shiftKey && document.activeElement === lastEl) {
+      event.preventDefault();
+      firstEl.focus();
+    }
+  };
+
+  const results = (monitors ?? [])
     .filter((item) =>
       `${item.monitor.name ?? ''} ${item.monitor.url}`.toLowerCase().includes(query.toLowerCase()),
     )
     .slice(0, 8);
+
   const openResult = (item: MonitorSummary | undefined) => {
     if (!item) return;
     void navigate({ to: '/monitors/$monitorId', params: { monitorId: item.monitor.id } });
     setOpen(false);
     setQuery('');
   };
+
+  const hasMonitorsData = monitors !== null;
+  const downCount = hasMonitorsData ? monitors.filter((item) => item.status === 'down').length : null;
+  const totalMonitors = hasMonitorsData ? monitors.length : session?.usage?.monitors;
+  const statusPagesCount = session?.usage?.statusPages ?? 0;
+  const notificationsCount = session?.usage?.notificationServices ?? 0;
+  const planLabel =
+    requestedWorkspaceId.current === session?.workspace?.id &&
+    workspaceTier !== null &&
+    workspaceTier.workspaceId === session?.workspace?.id
+      ? workspaceTier.label
+      : null;
+
   return (
-    <>
-      <header className="topbar">
-        <div className="topbar__inner">
-          <nav className="topbar__nav" aria-label="Admin sections">
-            <SectionLink to="/app">Monitors</SectionLink>
-            {session?.workspaces && session.workspaces.length > 1 && (
-              <label className="workspace-switcher">
-                <span className="sr-only">Workspace</span>
-                <select
-                  value={session.workspace?.id ?? ''}
-                  onChange={(event) => {
-                    window.sessionStorage.setItem('uptime.workspaceId', event.target.value);
-                    window.location.reload();
-                  }}
-                >
-                  {session.workspaces.map((workspace) => (
-                    <option value={workspace.id} key={workspace.id}>
-                      {workspace.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-            <span className="topbar__divider" aria-hidden="true" />
-            <SectionLink to="/status-pages">Status pages</SectionLink>
-            <span className="topbar__divider" aria-hidden="true" />
-            <SectionLink to="/notifications">Notifications</SectionLink>
-            <span className="topbar__divider" aria-hidden="true" />
-            <SectionLink to="/settings">Settings</SectionLink>
-            {session?.isOperator && (
-              <>
-                <span className="topbar__divider" aria-hidden="true" />
-                <SectionLink to="/operator">Operator</SectionLink>
-              </>
-            )}
-          </nav>
-          <button
-            ref={trigger}
-            className="search-pill"
-            onClick={() => setOpen(true)}
-            aria-haspopup="dialog"
-            aria-expanded={open}
-          >
-            <span>Search monitors</span>
-            <span className="search-pill__mobile">Search</span>
-            <kbd>⌘ K</kbd>
-          </button>
-          <div className="topbar__actions">
-            <button
-              className="button button--quiet"
-              onClick={() => void api.signOut().finally(onSignOut)}
-            >
-              Sign out
-            </button>
-          </div>
-        </div>
-      </header>
-      <main
-        className={`workspace${session?.workspace?.state !== 'active' ? ' workspace--restricted' : ''}`}
+    <div className="admin-shell">
+      <div className="admin-mobile-bar">
+        <Link to="/app" className="admin-mobile-bar__brand">
+          Uptime
+        </Link>
+        <button
+          ref={mobileToggleRef}
+          type="button"
+          className="admin-mobile-bar__toggle"
+          aria-label="Toggle navigation menu"
+          aria-expanded={mobileMenuOpen}
+          onClick={() => setMobileMenuOpen((prev) => !prev)}
+        >
+          {mobileMenuOpen ? 'Close' : 'Menu'}
+        </button>
+      </div>
+
+      <nav
+        ref={navRef}
+        onKeyDown={handleNavKeyDown}
+        className={`ut-nav${mobileMenuOpen ? ' is-open' : ''}`}
+        aria-label="Admin sections"
       >
-        {session?.workspace?.state !== 'active' && !allowRestrictedRoute ? (
-          <WorkspaceState state={session?.workspace?.state ?? 'waiting_for_capacity'} />
-        ) : (
-          children
+        <Link
+          to="/app"
+          className="ut-wordmark"
+          onClick={() => setMobileMenuOpen(false)}
+        >
+          Uptime
+        </Link>
+
+        <button
+          ref={trigger}
+          className="ut-nav__search"
+          onClick={() => {
+            setMobileMenuOpen(false);
+            setOpen(true);
+          }}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+        >
+          <span>Search monitors</span>
+          <kbd className="ut-kbd">⌘K</kbd>
+        </button>
+
+        <ul className="ut-nav__items">
+          <li>
+            <SectionLink to="/app" onClick={() => setMobileMenuOpen(false)}>
+              <span className="ut-nav__label">Monitors</span>
+              {downCount !== null && downCount > 0 ? (
+                <span className="ut-count ut-count--down">{downCount} down</span>
+              ) : totalMonitors !== undefined && totalMonitors !== null && totalMonitors > 0 ? (
+                <span className="ut-count">{totalMonitors}</span>
+              ) : null}
+            </SectionLink>
+          </li>
+          <li>
+            <SectionLink to="/status-pages" onClick={() => setMobileMenuOpen(false)}>
+              <span className="ut-nav__label">Status pages</span>
+              {statusPagesCount > 0 ? (
+                <span className="ut-count">{statusPagesCount}</span>
+              ) : null}
+            </SectionLink>
+          </li>
+          <li>
+            <SectionLink to="/notifications" onClick={() => setMobileMenuOpen(false)}>
+              <span className="ut-nav__label">Notifications</span>
+              {notificationsCount > 0 ? (
+                <span className="ut-count">{notificationsCount}</span>
+              ) : null}
+            </SectionLink>
+          </li>
+          <li>
+            <SectionLink to="/settings" onClick={() => setMobileMenuOpen(false)}>
+              <span className="ut-nav__label">Settings</span>
+            </SectionLink>
+          </li>
+        </ul>
+
+        {session?.isOperator && (
+          <div className="ut-nav__group ut-nav__operator">
+            <ul className="ut-nav__items">
+              <li>
+                <SectionLink to="/operator" onClick={() => setMobileMenuOpen(false)}>
+                  <span className="ut-nav__label">Operator</span>
+                </SectionLink>
+              </li>
+            </ul>
+          </div>
         )}
-      </main>
-      <footer className="footer-line">
-        <span>Free monitoring</span>
-      </footer>
+
+        <div className="ut-nav__bottom">
+          {session?.workspaces && session.workspaces.length > 0 && (
+            <div className="ut-nav__workspace">
+              <label className="ut-nav__workspace-label" htmlFor="workspace-select">
+                Workspace{planLabel ? ` (${planLabel})` : ''}
+              </label>
+              <Select
+                id="workspace-select"
+                className="ut-nav__workspace-select"
+                value={session.workspace?.id ?? ''}
+                options={session.workspaces.map((workspace) => ({
+                  value: workspace.id,
+                  label: workspace.name,
+                }))}
+                onChange={(val) => {
+                  requestedWorkspaceId.current = val;
+                  setWorkspaceTier(null);
+                  window.sessionStorage.setItem('uptime.workspaceId', val);
+                  window.location.reload();
+                }}
+              />
+            </div>
+          )}
+          <button
+            className="ut-nav__signout"
+            onClick={() => void api.signOut().finally(onSignOut)}
+          >
+            Sign out
+          </button>
+        </div>
+      </nav>
+
+      <div className="admin-main" inert={mobileMenuOpen ? true : undefined}>
+        <div className="admin-theme-toolbar">
+          <ThemeControl />
+        </div>
+        <main
+          className={`admin-content workspace${session?.workspace?.state !== 'active' ? ' workspace--restricted' : ''}`}
+        >
+          {session?.workspace?.state !== 'active' && !allowRestrictedRoute ? (
+            <WorkspaceState state={session?.workspace?.state ?? 'waiting_for_capacity'} />
+          ) : (
+            children
+          )}
+        </main>
+      </div>
+
       {open && (
         <div
           className="palette-layer"
@@ -442,16 +675,18 @@ function Workspace({
           </section>
         </div>
       )}
-    </>
+    </div>
   );
 }
 
 function SectionLink({
   to,
   children,
+  onClick,
 }: {
   to: '/app' | '/status-pages' | '/notifications' | '/settings' | '/operator';
   children: React.ReactNode;
+  onClick?: () => void;
 }) {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const isActive =
@@ -460,11 +695,12 @@ function SectionLink({
       : pathname === to || pathname.startsWith(`${to}/`);
   return (
     <Link
-      className="brand"
+      className="ut-nav__item brand"
       to={to}
       activeOptions={{ exact: false }}
       activeProps={{ 'aria-current': 'page' }}
       aria-current={isActive ? 'page' : undefined}
+      onClick={onClick}
     >
       {children}
     </Link>
@@ -478,6 +714,12 @@ function Overview() {
     null,
   );
   const [error, setError] = useState('');
+
+  const handleMonitorsChanged = () => {
+    setReload((value) => value + 1);
+    window.dispatchEvent(new CustomEvent('uptime:monitors-changed'));
+  };
+
   useEffect(() => {
     let alive = true;
     setItems(null);
@@ -492,59 +734,85 @@ function Overview() {
       alive = false;
     };
   }, [reload]);
+
+  const upCount = items ? items.filter((item) => item.status === 'up').length : 0;
+  const degradedCount = items ? items.filter((item) => item.status === 'degraded').length : 0;
+  const downCount = items ? items.filter((item) => item.status === 'down').length : 0;
+
+  if (formOpen) {
+    return (
+      <MonitorForm
+        onCancel={() => setFormOpen(false)}
+        onSaved={() => {
+          setFormOpen(false);
+          handleMonitorsChanged();
+        }}
+      />
+    );
+  }
+
   return (
-    <>
-      {formOpen ? (
-        <MonitorForm
-          onCancel={() => setFormOpen(false)}
-          onSaved={() => {
-            setFormOpen(false);
-            setReload((value) => value + 1);
+    <section className="overview">
+      <div className="page-head">
+        <div>
+          <h1 className="ut-title-lg">Monitors</h1>
+          <p className="ut-summary-line" aria-label="System status summary">
+            <span className="ut-status ut-status--up">
+              <span className="ut-glyph ut-glyph--up" aria-hidden="true" />
+              <strong className="ut-figure">{upCount}</strong> up
+            </span>
+            <span className="ut-status ut-status--degraded">
+              <span className="ut-glyph ut-glyph--degraded" aria-hidden="true" />
+              <strong className="ut-figure">{degradedCount}</strong> degraded
+            </span>
+            <span className="ut-status ut-status--down">
+              <span className="ut-glyph ut-glyph--down" aria-hidden="true" />
+              <strong className="ut-figure">{downCount}</strong> down
+            </span>
+          </p>
+        </div>
+        <div className="actions">
+          <button
+            className="button button--quiet"
+            type="button"
+            onClick={() => {
+              setReload((value) => value + 1);
+            }}
+          >
+            Refresh
+          </button>
+          {items && items.length > 0 && (
+            <button
+              className="button button--primary"
+              type="button"
+              onClick={() => setFormOpen(true)}
+            >
+              Add monitor
+            </button>
+          )}
+        </div>
+      </div>
+      {error ? (
+        <State
+          kind="error"
+          text={error}
+          action={() => {
+            setError('');
+            handleMonitorsChanged();
           }}
         />
+      ) : items === null ? (
+        <State kind="loading" text="Loading monitors…" />
+      ) : items.length === 0 ? (
+        <State
+          kind="empty"
+          text="No monitors yet. Add a URL to start recording regional checks."
+          action={() => setFormOpen(true)}
+        />
       ) : (
-        <section className="overview">
-          <div className="page-head">
-            <div>
-              <h1>Monitors</h1>
-              {items && (
-                <p className="tnum">
-                  {items
-                    .reduce((total, item) => total + item.targetChecksPerDay, 0)
-                    .toLocaleString()}{' '}
-                  total requests/day
-                </p>
-              )}
-            </div>
-            {items && items.length > 0 && (
-              <button className="button button--primary" onClick={() => setFormOpen(true)}>
-                Add monitor
-              </button>
-            )}
-          </div>
-          {error ? (
-            <State
-              kind="error"
-              text={error}
-              action={() => {
-                setError('');
-                setReload((value) => value + 1);
-              }}
-            />
-          ) : items === null ? (
-            <State kind="loading" text="Loading monitors…" />
-          ) : items.length === 0 ? (
-            <State
-              kind="empty"
-              text="No monitors yet. Add a URL to start recording regional checks."
-              action={() => setFormOpen(true)}
-            />
-          ) : (
-            <MonitorList items={items} onChanged={() => setReload((value) => value + 1)} />
-          )}
-        </section>
+        <MonitorList items={items} onChanged={handleMonitorsChanged} />
       )}
-    </>
+    </section>
   );
 }
 
@@ -565,6 +833,10 @@ function SignupRoute() {
 function DetailRoute() {
   const { monitorId } = detailRoute.useParams();
   return <MonitorDetail monitorId={monitorId} />;
+}
+function OperatorWorkspaceEditRoute() {
+  const { workspaceId } = operatorWorkspaceEditRoute.useParams();
+  return <OperatorWorkspaceEditPage workspaceId={workspaceId} />;
 }
 function PublicDetailRoute() {
   const { monitorId } = publicDetailRoute.useParams();
@@ -594,13 +866,17 @@ function State({
     <div className={`state state--${kind}`} role={kind === 'error' ? 'alert' : 'status'}>
       <p>{text}</p>
       {action && (
-        <button className="button button--quiet" onClick={action}>
-          {kind === 'error' ? 'Try again' : 'Add monitor'}
+        <button
+          className={kind === 'empty' ? 'button button--primary' : 'button button--secondary'}
+          onClick={action}
+        >
+          {kind === 'empty' ? 'Add monitor' : 'Retry'}
         </button>
       )}
     </div>
   );
 }
+
 export { router };
 
 const rootElement = document.getElementById('root');

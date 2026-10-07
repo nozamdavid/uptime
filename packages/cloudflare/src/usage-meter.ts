@@ -1,113 +1,95 @@
-import type { D1Database, D1PreparedStatement, D1Result } from './workers-types.js';
+import type { Database } from './postgres/database.js';
+import { pgRun } from './postgres/query.js';
 
 export interface DatabaseUsage {
-  rowsRead: number;
-  rowsWritten: number;
-  storageBytes: number;
+  readonly rowsRead?: number | null;
+  readonly rowsWritten?: number | null;
+  readonly storageBytes?: number | null;
+  statements?: number;
+  durationMs?: number;
 }
 
-export interface MeteredDatabase {
-  db: D1Database;
+export interface MeteredDatabase<T = Database> {
+  db: T;
   usage: DatabaseUsage;
 }
 
-/** Preserve D1 metadata while keeping Worker binding calls on their native receiver. */
-export function meterDatabase(source: D1Database): MeteredDatabase {
-  const usage: DatabaseUsage = { rowsRead: 0, rowsWritten: 0, storageBytes: 0 };
-  const originals = new WeakMap<D1PreparedStatement, D1PreparedStatement>();
-  const natives = new WeakMap<D1PreparedStatement, D1PreparedStatement>();
-  const record = (result: D1Result<unknown>) => {
-    usage.rowsRead += Number(result.meta.rows_read ?? 0);
-    usage.rowsWritten += Number(result.meta.rows_written ?? 0);
-    usage.storageBytes = Math.max(usage.storageBytes, Number(result.meta.size_after ?? 0));
+export function meterDatabase(source: Database): MeteredDatabase<Database> {
+  const usage: DatabaseUsage = {
+    statements: 0,
+    durationMs: 0,
+    rowsRead: null,
+    rowsWritten: null,
+    storageBytes: null,
   };
-  const wrap = (native: D1PreparedStatement): D1PreparedStatement => {
-    const wrapped: D1PreparedStatement = {
-      bind(...values) {
-        return wrap(native.bind(...values));
-      },
-      async first<T>(columnName?: string) {
-        const result = await native.all<Record<string, unknown>>();
-        record(result);
-        const row = result.results[0];
-        return (row ? (columnName ? row[columnName] : row) : null) as T | null;
-      },
-      async all<T>() {
-        const result = await native.all<T>();
-        record(result as D1Result<unknown>);
+
+  const wrapped: Database = {
+    get schema() {
+      return source.schema;
+    },
+    table(name: string) {
+      return source.table(name);
+    },
+    async query<T extends object = Record<string, unknown>>(sql: string, values?: readonly unknown[]) {
+      const start = performance.now();
+      try {
+        const result = await source.query<T>(sql, values);
+        usage.statements = (usage.statements ?? 0) + 1;
+        usage.durationMs = (usage.durationMs ?? 0) + (performance.now() - start);
         return result;
-      },
-      async run<T>() {
-        const result = await native.run<T>();
-        record(result as D1Result<unknown>);
-        return result;
-      },
-      raw<T>(options?: { columnNames?: boolean }) {
-        return native.raw<T>(options);
-      },
-    };
-    natives.set(wrapped, native);
-    return wrapped;
-  };
-  const db: D1Database = {
-    prepare(query) {
-      const native = source.prepare(query);
-      const existing = originals.get(native);
-      if (existing) return existing;
-      const wrapped = wrap(native);
-      originals.set(native, wrapped);
-      return wrapped;
+      } catch (err) {
+        usage.statements = (usage.statements ?? 0) + 1;
+        usage.durationMs = (usage.durationMs ?? 0) + (performance.now() - start);
+        throw err;
+      }
     },
-    async batch<T>(statements: D1PreparedStatement[]) {
-      const result = await source.batch<T>(
-        statements.map((statement: D1PreparedStatement) => natives.get(statement) ?? statement),
-      );
-      for (const item of result) record(item as D1Result<unknown>);
-      return result;
-    },
-    exec(query) {
-      return source.exec(query);
-    },
-    dump() {
-      return source.dump();
+    async transaction<T>(callback: (tx: Database) => Promise<T>) {
+      return source.transaction(async (tx) => {
+        const meteredTx = meterDatabase(tx);
+        try {
+          return await callback(meteredTx.db);
+        } finally {
+          usage.statements = (usage.statements ?? 0) + (meteredTx.usage.statements ?? 0);
+          usage.durationMs = (usage.durationMs ?? 0) + (meteredTx.usage.durationMs ?? 0);
+        }
+      });
     },
   };
-  return { db, usage };
+  return { db: wrapped, usage };
 }
 
 export async function flushUsage(
-  control: D1Database,
+  control: Database,
   workspaceId: string,
   usage: DatabaseUsage,
   now = new Date(),
   checks = 0,
 ): Promise<void> {
-  await control
-    .prepare(
-      `INSERT INTO workspace_usage_daily
-    (workspace_id, day, checks, rows_read, rows_written, storage_bytes, updated_at)
-    VALUES (
-      CASE WHEN (SELECT state FROM workspaces WHERE id = ?) = 'deleted' THEN '__deleted__' ELSE ? END,
-      ?, ?, ?, ?,
-      CASE WHEN (SELECT state FROM workspaces WHERE id = ?) = 'deleted' THEN 0 ELSE ? END,
-      ?)
-    ON CONFLICT(workspace_id, day) DO UPDATE SET
-      checks = checks + excluded.checks,
-      rows_read = rows_read + excluded.rows_read,
-      rows_written = rows_written + excluded.rows_written,
-      storage_bytes = MAX(storage_bytes, excluded.storage_bytes),
-      updated_at = excluded.updated_at`,
-    )
-    .bind(
-      workspaceId,
-      workspaceId,
-      now.toISOString().slice(0, 10),
-      checks,
-      usage.rowsRead,
-      usage.rowsWritten,
-      workspaceId,
-      usage.storageBytes,
-      now.toISOString(),
-    )
-    .run();
+  const day = now.toISOString().slice(0, 10);
+  const timestamp = now.toISOString();
+  const rowsRead = usage.rowsRead ?? 0;
+  const rowsWritten = usage.rowsWritten ?? 0;
+  const storageBytes = usage.storageBytes ?? 0;
+
+  await pgRun(
+    control,
+    `INSERT INTO ${control.table('workspace_usage_daily')}
+      (workspace_id, day, checks, rows_read, rows_written, storage_bytes, updated_at)
+     VALUES (
+       CASE WHEN (SELECT state FROM ${control.table('workspaces')} WHERE id = $1) = 'deleted' THEN '__deleted__' ELSE $1 END,
+       $2, $3, $4, $5,
+       CASE WHEN (SELECT state FROM ${control.table('workspaces')} WHERE id = $1) = 'deleted' THEN 0 ELSE $6 END,
+       $7
+     )
+     ON CONFLICT (workspace_id, day) DO UPDATE SET
+       checks = ${control.table('workspace_usage_daily')}.checks + excluded.checks,
+       rows_read = ${control.table('workspace_usage_daily')}.rows_read + excluded.rows_read,
+       rows_written = ${control.table('workspace_usage_daily')}.rows_written + excluded.rows_written,
+       storage_bytes = CASE
+         WHEN (SELECT state FROM ${control.table('workspaces')} WHERE id = $1) = 'deleted' THEN 0
+         ELSE GREATEST(${control.table('workspace_usage_daily')}.storage_bytes, excluded.storage_bytes)
+       END,
+       updated_at = excluded.updated_at`,
+    [workspaceId, day, checks, rowsRead, rowsWritten, storageBytes, timestamp],
+  );
 }

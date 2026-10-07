@@ -1,4 +1,5 @@
-import { all, run, nowIso, type D1Database } from '@uptime/cloudflare';
+import { nowIso } from '@uptime/cloudflare';
+import { pgAll as all, pgRun as run, type Database } from '@uptime/cloudflare/postgres';
 import type { RegionId } from '@uptime/regions';
 import type { DnsDiagnosticResult } from '@uptime/contracts';
 
@@ -17,7 +18,7 @@ export function utcDayWindow(value: Date): Date {
  * snapshot semantics.
  */
 export async function reserveDiagnostics(
-  db: D1Database,
+  db: Database,
   round: { id: string; monitorId: string; windowStartedAt: string },
   regionIds: readonly RegionId[],
 ): Promise<Map<RegionId, ReservedDiagnostic>> {
@@ -26,9 +27,9 @@ export async function reserveDiagnostics(
   for (const regionId of regionIds) {
     const inserted = await all<{ id: string; region_id: RegionId; window_started_at: string }>(
       db,
-      `INSERT INTO network_diagnostics (
+      `INSERT INTO ${db.table('network_diagnostics')} (
          monitor_id, check_run_id, region_id, kind, window_started_at, lifecycle, requested_at, started_at
-       ) VALUES (?, ?, ?, 'dns_candidates', ?, 'pending', ?, ?)
+       ) VALUES ($1, $2, $3, 'dns_candidates', $4, 'pending', $5, $6)
        ON CONFLICT (monitor_id, region_id, kind, window_started_at) DO NOTHING
        RETURNING id, region_id, window_started_at`,
       [round.monitorId, round.id, regionId, windowStartedAt, nowIso(), nowIso()],
@@ -45,7 +46,7 @@ export async function reserveDiagnostics(
 
 /** Persist a diagnostic outcome without ever affecting the target's health. */
 export async function persistDiagnostic(
-  db: D1Database,
+  db: Database,
   reserved: ReservedDiagnostic,
   observationId: string | null,
   disposition: DiagnosticDisposition,
@@ -58,10 +59,10 @@ export async function persistDiagnostic(
     if (matches) {
       await run(
         db,
-        `UPDATE network_diagnostics
-         SET lifecycle = 'complete', result = ?, failure_code = NULL,
-           observation_id = ?, completed_at = ?
-         WHERE id = ? AND lifecycle = 'pending'`,
+        `UPDATE ${db.table('network_diagnostics')}
+         SET lifecycle = 'complete', result = $1, failure_code = NULL,
+           observation_id = $2, completed_at = $3
+         WHERE id = $4 AND lifecycle = 'pending'`,
         [JSON.stringify(disposition.result), observationId, nowIso(), reserved.id],
       );
       return;
@@ -73,23 +74,23 @@ export async function persistDiagnostic(
       : 'worker_unsupported_or_missing';
   await run(
     db,
-    `UPDATE network_diagnostics
-     SET lifecycle = 'unavailable', failure_code = ?, observation_id = ?, completed_at = ?
-     WHERE id = ? AND lifecycle = 'pending'`,
+    `UPDATE ${db.table('network_diagnostics')}
+     SET lifecycle = 'unavailable', failure_code = $1, observation_id = $2, completed_at = $3
+     WHERE id = $4 AND lifecycle = 'pending'`,
     [failureCode, observationId, nowIso(), reserved.id],
   );
 }
 
 /** Mark diagnostics abandoned by an interrupted coordinator as unavailable. */
-export async function finalizeStaleDiagnostics(db: D1Database, now: Date): Promise<number> {
+export async function finalizeStaleDiagnostics(db: Database, now: Date): Promise<number> {
   const result = await run(
     db,
-    `UPDATE network_diagnostics
-     SET lifecycle = 'unavailable', failure_code = 'scheduler_abandoned', completed_at = ?
-     WHERE lifecycle = 'pending' AND requested_at <= ?`,
+    `UPDATE ${db.table('network_diagnostics')}
+     SET lifecycle = 'unavailable', failure_code = 'scheduler_abandoned', completed_at = $1
+     WHERE lifecycle = 'pending' AND requested_at <= $2`,
     [nowIso(now), nowIso(new Date(now.getTime() - dnsDiagnosticStaleMs))],
   );
-  return result.meta.changes;
+  return result.rowCount ?? 0;
 }
 
 export type { DnsDiagnosticResult };

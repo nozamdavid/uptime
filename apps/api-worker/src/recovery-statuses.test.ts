@@ -18,11 +18,11 @@ async function context() {
   return ctx;
 }
 
-afterEach(() => {
-  for (const ctx of contexts.splice(0)) ctx.db.close();
+afterEach(async () => {
+  for (const ctx of contexts.splice(0)) await ctx.close();
 });
 
-function addObservation(
+async function addObservation(
   ctx: TestContext,
   monitorId: string,
   minute: number,
@@ -30,12 +30,12 @@ function addObservation(
 ) {
   const window = `2026-09-16T10:${String(minute).padStart(2, '0')}:00.000Z`;
   const success = options.success ?? true;
-  const run = seedRun(ctx.sqlite, {
+  const run = await seedRun(ctx.db, {
     monitorId,
     status: options.runStatus ?? 'complete',
     windowStartedAt: window,
   });
-  seedObservation(ctx.sqlite, {
+  await seedObservation(ctx.db, {
     checkRunId: run,
     monitorId,
     scheduledWindow: window,
@@ -48,55 +48,52 @@ function addObservation(
 describe('recovery status reads', () => {
   it('seeks by the failed-row and scheduled-window indexes', async () => {
     const ctx = await context();
-    const failedPlan = ctx.sqlite
-      .prepare(
-        `EXPLAIN QUERY PLAN SELECT o.scheduled_window FROM observations o
-         WHERE o.monitor_id = ? AND o.region_id = ?
-           AND o.scheduled_window >= ? AND o.success = 0
-           AND EXISTS (SELECT 1 FROM check_runs cr
-             WHERE cr.id = o.check_run_id AND cr.status IN ('complete', 'partial'))
-         ORDER BY o.scheduled_window DESC LIMIT 1`,
-      )
-      .all('monitor', 'us-east', '2026-09-16T00:00:00.000Z');
-    const recentPlan = ctx.sqlite
-      .prepare(
-        `EXPLAIN QUERY PLAN SELECT o.success FROM observations o
-         WHERE o.monitor_id = ? AND o.region_id = ? AND o.scheduled_window > ?
-           AND EXISTS (SELECT 1 FROM check_runs cr
-             WHERE cr.id = o.check_run_id AND cr.status IN ('complete', 'partial'))
-         ORDER BY o.scheduled_window DESC LIMIT 5`,
-      )
-      .all('monitor', 'us-east', '2026-09-16T10:00:00.000Z');
-    const detail = (rows: unknown[]) =>
-      (rows as { detail: string }[]).map((row) => row.detail).join('\n');
-
-    expect(detail(failedPlan)).toContain('observations_failed_run_region_idx');
-    expect(detail(recentPlan)).toContain(
-      'sqlite_autoindex_observations_2 (monitor_id=? AND region_id=? AND scheduled_window>?)',
+    await ctx.db.query('SET LOCAL enable_seqscan = off');
+    const failedPlan = await ctx.db.query<{ 'QUERY PLAN': string }>(
+      `EXPLAIN SELECT o.scheduled_window FROM ${ctx.db.table('observations')} o
+       WHERE o.monitor_id = $1 AND o.region_id = $2
+         AND o.scheduled_window >= $3 AND o.success = 0
+         AND EXISTS (SELECT 1 FROM ${ctx.db.table('check_runs')} cr
+           WHERE cr.id = o.check_run_id AND cr.status IN ('complete', 'partial'))
+       ORDER BY o.scheduled_window DESC LIMIT 1`,
+      ['monitor', 'us-east', '2026-09-16T00:00:00.000Z'],
     );
-    expect(detail(recentPlan)).not.toContain('USE TEMP B-TREE');
+    const recentPlan = await ctx.db.query<{ 'QUERY PLAN': string }>(
+      `EXPLAIN SELECT o.success FROM ${ctx.db.table('observations')} o
+       WHERE o.monitor_id = $1 AND o.region_id = $2 AND o.scheduled_window > $3
+         AND EXISTS (SELECT 1 FROM ${ctx.db.table('check_runs')} cr
+           WHERE cr.id = o.check_run_id AND cr.status IN ('complete', 'partial'))
+       ORDER BY o.scheduled_window DESC LIMIT 5`,
+      ['monitor', 'us-east', '2026-09-16T10:00:00.000Z'],
+    );
+    const detail = (rows: { 'QUERY PLAN': string }[]) =>
+      rows.map((row) => row['QUERY PLAN']).join('\n');
+
+    expect(detail(failedPlan.rows)).toContain('observations_failed_run_region_idx');
+    expect(detail(recentPlan.rows)).toContain('observations_monitor_region_window_unique');
+    expect(detail(recentPlan.rows)).not.toContain('Sort');
   });
 
   it('derives recovery from finalized observations after the latest failure', async () => {
     const ctx = await context();
-    const monitorId = seedMonitor(ctx.sqlite);
+    const monitorId = await seedMonitor(ctx.db);
 
     // Earlier observations, including those before today, cannot affect the
     // consecutive-success run after today's latest failure.
-    const oldRun = seedRun(ctx.sqlite, {
+    const oldRun = await seedRun(ctx.db, {
       monitorId,
       status: 'complete',
       windowStartedAt: '2026-09-15T23:59:00.000Z',
     });
-    seedObservation(ctx.sqlite, {
+    await seedObservation(ctx.db, {
       checkRunId: oldRun,
       monitorId,
       scheduledWindow: '2026-09-15T23:59:00.000Z',
       startedAt: '2026-09-15T23:59:05.000Z',
     });
-    addObservation(ctx, monitorId, 0, { success: false });
-    addObservation(ctx, monitorId, 1);
-    addObservation(ctx, monitorId, 2);
+    await addObservation(ctx, monitorId, 0, { success: false });
+    await addObservation(ctx, monitorId, 1);
+    await addObservation(ctx, monitorId, 2);
 
     const details = await monitorUptimeDetailsBulk(ctx.db, [monitorId], currentTime);
     expect(details.get(monitorId)).toMatchObject({
@@ -104,21 +101,21 @@ describe('recovery status reads', () => {
       affectedRegionIds: [],
     });
 
-    addObservation(ctx, monitorId, 3);
-    addObservation(ctx, monitorId, 4);
-    addObservation(ctx, monitorId, 5);
+    await addObservation(ctx, monitorId, 3);
+    await addObservation(ctx, monitorId, 4);
+    await addObservation(ctx, monitorId, 5);
     const recovered = await monitorUptimeDetailsBulk(ctx.db, [monitorId], currentTime);
     expect(recovered.get(monitorId)?.uptime.recoveryStatus).toBe('up');
   });
 
   it('ignores observations belonging to pending runs', async () => {
     const ctx = await context();
-    const monitorId = seedMonitor(ctx.sqlite);
-    addObservation(ctx, monitorId, 0, { success: false });
+    const monitorId = await seedMonitor(ctx.db);
+    await addObservation(ctx, monitorId, 0, { success: false });
     for (let minute = 1; minute <= 5; minute += 1) {
-      addObservation(ctx, monitorId, minute, { runStatus: 'pending' });
+      await addObservation(ctx, monitorId, minute, { runStatus: 'pending' });
     }
-    addObservation(ctx, monitorId, 6);
+    await addObservation(ctx, monitorId, 6);
 
     const details = await monitorUptimeDetailsBulk(ctx.db, [monitorId], currentTime);
     expect(details.get(monitorId)).toMatchObject({

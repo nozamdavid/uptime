@@ -1,10 +1,113 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll } from 'vitest';
 import { hashPassword } from '@uptime/cloudflare';
-import { createD1Adapter, createTestDatabase } from '@uptime/cloudflare/testing';
-import type { TestD1Database } from '@uptime/cloudflare/testing';
+import { type Database, type PostgresMigration, pgFirst } from '@uptime/cloudflare/postgres';
+import {
+  createPostgresTestDatabase,
+  loadPostgresMigrations,
+  type PostgresTestDatabase,
+} from '@uptime/cloudflare/testing/postgres';
 
 import { buildTestApp, defaultTestConfig, type TestApp } from './harness.js';
 
 export const TEST_PASSWORD = 'correct horse battery staple';
+
+export const TENANT_TABLES = [
+  'admins',
+  'sessions',
+  'badges',
+  'monitors',
+  'status_pages',
+  'status_page_groups',
+  'status_page_monitors',
+  'monitor_regions',
+  'check_runs',
+  'observations',
+  'network_diagnostics',
+  'notification_services',
+  'monitor_notification_services',
+  'monitor_notification_state',
+  'notification_deliveries',
+  'monitor_daily_uptime',
+  'jobs',
+  'report_publications',
+  'report_cache_revisions',
+  'report_latency_changes',
+  'monitor_report_refresh',
+  'monitor_latency_hourly',
+  'monitor_latency_dirty',
+  'monitor_latency_coverage',
+  'notification_history',
+  'workspace_metadata',
+  'verified_targets',
+] as const;
+
+export function resolveTestAdminUrl(): string {
+  if (process.env.POSTGRES_TEST_ADMIN_URL) {
+    return process.env.POSTGRES_TEST_ADMIN_URL;
+  }
+  const passwordFile = join(homedir(), '.config/uptime-postgresql/test-admin-password');
+  if (existsSync(passwordFile)) {
+    try {
+      const password = readFileSync(passwordFile, 'utf8').trim();
+      if (password) {
+        return `postgresql://uptime_test_admin:${encodeURIComponent(password)}@127.0.0.1:15432/uptime_migration_test`;
+      }
+    } catch {
+      // Fall through to error
+    }
+  }
+  throw new Error(
+    'POSTGRES_TEST_ADMIN_URL is required for PostgreSQL API tests. See docs/deployment/postgresql-test-access.md',
+  );
+}
+
+let cachedMigrations: PostgresMigration[] | null = null;
+
+async function getTenantMigrations(): Promise<PostgresMigration[]> {
+  if (!cachedMigrations) {
+    const migrationsDir = new URL(
+      '../../../../packages/cloudflare/src/postgres/migrations/tenant/',
+      import.meta.url,
+    );
+    cachedMigrations = await loadPostgresMigrations(migrationsDir);
+  }
+  return cachedMigrations;
+}
+
+let sharedPostgresDb: PostgresTestDatabase | null = null;
+let sharedPostgresDbPromise: Promise<PostgresTestDatabase> | null = null;
+
+export async function getOrCreateSharedTestDatabase(): Promise<PostgresTestDatabase> {
+  if (sharedPostgresDb) return sharedPostgresDb;
+  if (!sharedPostgresDbPromise) {
+    sharedPostgresDbPromise = (async () => {
+      const adminConnectionString = resolveTestAdminUrl();
+      const migrations = await getTenantMigrations();
+      return await createPostgresTestDatabase({
+        adminConnectionString,
+        migrations,
+        profile: 'full-hosted',
+        tables: TENANT_TABLES,
+      });
+    })();
+  }
+  sharedPostgresDb = await sharedPostgresDbPromise;
+  return sharedPostgresDb;
+}
+
+export async function closeSharedTestDatabase(): Promise<void> {
+  if (sharedPostgresDb) {
+    const toClose = sharedPostgresDb;
+    sharedPostgresDb = null;
+    sharedPostgresDbPromise = null;
+    await toClose.close();
+  }
+}
+
+afterAll(closeSharedTestDatabase, 120_000);
 
 export interface SeedOptions {
   regions?: string[];
@@ -12,33 +115,70 @@ export interface SeedOptions {
   config?: Parameters<typeof buildTestApp>[0]['config'];
   now?: () => Date;
   notificationFetch?: typeof fetch;
+  isolated?: boolean;
 }
 
 export interface TestContext {
   app: TestApp;
-  db: TestD1Database;
-  sqlite: ReturnType<typeof createTestDatabase>;
+  db: Database;
+  postgresDb: PostgresTestDatabase;
+  close: () => Promise<void>;
   passwordHash: string;
 }
 
-/** Seed the shared SQLite database and build a router bound to it. */
+/** Seed the PostgreSQL test database and build a router bound to it. */
 export async function createTestContext(options: SeedOptions = {}): Promise<TestContext> {
+  let postgresDb: PostgresTestDatabase;
+  let isDedicated = false;
+
+  if (options.isolated) {
+    const adminConnectionString = resolveTestAdminUrl();
+    const migrations = await getTenantMigrations();
+    postgresDb = await createPostgresTestDatabase({
+      adminConnectionString,
+      migrations,
+      profile: 'full-hosted',
+      tables: TENANT_TABLES,
+    });
+    isDedicated = true;
+  } else {
+    postgresDb = await getOrCreateSharedTestDatabase();
+  }
+
+  const db = postgresDb.db;
+
+  if (!isDedicated) {
+    const rootTables = ['admins', 'badges', 'status_pages', 'notification_services', 'jobs'];
+    const truncateSql = `TRUNCATE TABLE ${rootTables.map((t) => db.table(t)).join(', ')} CASCADE`;
+    await postgresDb.adminDb.query(truncateSql);
+  }
+
   const passwordHash = options.passwordHash ?? (await hashPassword(TEST_PASSWORD));
-  const sqlite = createTestDatabase();
-  const db = createD1Adapter(sqlite);
-  sqlite
-    .prepare(
-      `INSERT INTO admins (id, singleton_key, email, password_hash)
-       VALUES ('00000000-0000-4000-8000-000000000001', 1, ?, ?)`,
-    )
-    .run(defaultTestConfig.adminEmail, passwordHash);
+
+  await db.query(
+    `INSERT INTO ${db.table('admins')} (id, singleton_key, email, password_hash)
+     VALUES ($1, 1, $2, $3)`,
+    ['00000000-0000-4000-8000-000000000001', defaultTestConfig.adminEmail, passwordHash],
+  );
+
   const app = buildTestApp({
     db,
     config: { ...defaultTestConfig, adminPasswordHash: passwordHash, ...options.config },
     ...(options.now ? { now: options.now } : {}),
     ...(options.notificationFetch ? { notificationFetch: options.notificationFetch } : {}),
   });
-  return { app, db, sqlite, passwordHash };
+
+  return {
+    app,
+    db,
+    postgresDb,
+    close: async () => {
+      if (isDedicated) {
+        await postgresDb.close();
+      }
+    },
+    passwordHash,
+  };
 }
 
 export interface SeedMonitorInput {
@@ -56,27 +196,20 @@ export interface SeedMonitorInput {
   thresholds?: { green: number; lightGreen: number; orange: number };
   nextCheckAt?: string;
   createdAt?: string;
-  updatedAt?: string;
 }
 
-export function seedMonitor(
-  sqlite: ReturnType<typeof createTestDatabase>,
-  input: SeedMonitorInput = {},
-): string {
+export async function seedMonitor(db: Database, input: SeedMonitorInput = {}): Promise<string> {
   const id = input.id ?? '30000000-0000-4000-8000-000000000001';
   const timestamp = input.createdAt ?? '2026-09-16T10:00:00.000Z';
-  sqlite
-    .prepare(
-      `INSERT INTO monitors (id, name, url, interval_seconds, timeout_ms, enabled,
-         dns_diagnostics_enabled, is_public, public_slug, badge_id, uptime_thresholds,
-         outage_threshold, recovery_threshold, repeat_notification_minutes, next_check_at,
-         created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, 2, NULL, ?, ?, ?)`,
-    )
-    .run(
+  await db.query(
+    `INSERT INTO ${db.table('monitors')} (id, name, url, interval_seconds, timeout_ms, enabled,
+       dns_diagnostics_enabled, is_public, public_slug, badge_id, uptime_thresholds,
+       outage_threshold, recovery_threshold, next_check_at, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 3, 2, $12, $13, $14)`,
+    [
       id,
-      input.name ?? 'Example',
-      input.url ?? 'https://example.com',
+      input.name ?? 'Production API',
+      input.url ?? 'https://api.example.com/health',
       input.intervalSeconds ?? 300,
       input.timeoutMs ?? 10_000,
       input.enabled === false ? 0 : 1,
@@ -85,131 +218,144 @@ export function seedMonitor(
       input.publicSlug ?? null,
       input.badgeId ?? null,
       JSON.stringify(input.thresholds ?? { green: 99.5, lightGreen: 99, orange: 90 }),
-      input.nextCheckAt ?? '2026-09-16T11:00:00.000Z',
+      input.nextCheckAt ?? timestamp,
       timestamp,
-      input.updatedAt ?? timestamp,
+      timestamp,
+    ],
+  );
+
+  const regions = input.regions ?? ['us-east', 'eu-west'];
+  for (const regionId of regions) {
+    await db.query(
+      `INSERT INTO ${db.table('monitor_regions')} (monitor_id, region_id, created_at)
+       VALUES ($1, $2, $3)`,
+      [id, regionId, timestamp],
     );
-  for (const region of input.regions ?? ['us-east']) {
-    sqlite
-      .prepare('INSERT INTO monitor_regions (monitor_id, region_id) VALUES (?, ?)')
-      .run(id, region);
   }
   return id;
 }
 
-export function seedRun(
-  sqlite: ReturnType<typeof createTestDatabase>,
-  input: {
-    id?: string;
-    monitorId: string;
-    windowStartedAt?: string;
-    status?: 'pending' | 'complete' | 'partial';
-    expectedRegionCount?: number;
-    expectedRegions?: string[];
-    monitorUrl?: string;
-    timeoutMs?: number;
-    dnsDiagnosticsEnabled?: boolean;
-    deadlineAt?: string;
-  },
-): string {
+export interface SeedRunInput {
+  id?: string;
+  monitorId: string;
+  status?: string;
+  expectedRegionCount?: number;
+  expectedRegions?: string[];
+  windowStartedAt?: string;
+  deadlineAt?: string;
+  dnsDiagnosticsEnabled?: boolean;
+}
+
+export async function seedRun(db: Database, input: SeedRunInput): Promise<string> {
   const id = input.id ?? crypto.randomUUID();
-  sqlite
-    .prepare(
-      `INSERT INTO check_runs (id, monitor_id, window_started_at, status, expected_region_count,
-         expected_regions, monitor_url, timeout_ms, dns_diagnostics_enabled, deadline_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
+  const windowStartedAt = input.windowStartedAt ?? '2026-09-16T10:00:00.000Z';
+  const deadlineAt =
+    input.deadlineAt ?? new Date(Date.parse(windowStartedAt) + 60_000).toISOString();
+  await db.query(
+    `INSERT INTO ${db.table('check_runs')} (id, monitor_id, window_started_at, deadline_at, status, expected_region_count,
+       expected_regions, monitor_url, timeout_ms, dns_diagnostics_enabled, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'https://api.example.com/health', 10000, $8, $9)`,
+    [
       id,
       input.monitorId,
-      input.windowStartedAt ?? '2026-09-16T10:00:00.000Z',
+      windowStartedAt,
+      deadlineAt,
       input.status ?? 'pending',
-      input.expectedRegionCount ?? 1,
-      JSON.stringify(input.expectedRegions ?? ['us-east']),
-      input.monitorUrl ?? 'https://example.com',
-      input.timeoutMs ?? 10_000,
+      input.expectedRegionCount ?? 2,
+      JSON.stringify(input.expectedRegions ?? ['us-east', 'eu-west']),
       input.dnsDiagnosticsEnabled ? 1 : 0,
-      input.deadlineAt ?? '2026-09-16T10:30:00.000Z',
-    );
+      windowStartedAt,
+    ],
+  );
   return id;
 }
 
-export function seedObservation(
-  sqlite: ReturnType<typeof createTestDatabase>,
-  input: {
-    id?: string;
-    checkRunId: string;
-    monitorId: string;
-    regionId?: string;
-    scheduledWindow?: string;
-    status?: 'success' | 'http_failure' | 'network_failure';
-    success?: boolean;
-    httpStatus?: number | null;
-    responseMs?: number | null;
-    totalMs?: number | null;
-    errorCode?: string | null;
-    startedAt?: string;
-    completedAt?: string | null;
-  },
-): string {
+export interface SeedObservationInput {
+  id?: string;
+  checkRunId: string;
+  monitorId: string;
+  regionId?: string;
+  success?: boolean;
+  status?: string;
+  httpStatus?: number | null;
+  responseMs?: number | null;
+  scheduledWindow?: string;
+  startedAt?: string;
+  completedAt?: string;
+  totalMs?: number | null;
+  certificateDaysRemaining?: number | null;
+  endpointEvidence?: unknown;
+}
+
+export async function seedObservation(db: Database, input: SeedObservationInput): Promise<string> {
   const id = input.id ?? crypto.randomUUID();
-  const success =
-    input.success ?? (input.status !== 'http_failure' && input.status !== 'network_failure');
-  const scheduledWindow =
-    input.scheduledWindow ??
-    (
-      sqlite
-        .prepare('SELECT window_started_at FROM check_runs WHERE id = ?')
-        .get(input.checkRunId) as { window_started_at?: string } | undefined
-    )?.window_started_at ??
-    '2026-09-16T10:00:00.000Z';
-  sqlite
-    .prepare(
-      `INSERT INTO observations (id, check_run_id, monitor_id, region_id, scheduled_window, status,
-         success, http_status, response_ms, total_ms, error_code, started_at, completed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
+  let scheduledWindow = input.scheduledWindow;
+  if (!scheduledWindow) {
+    const run = await pgFirst<{ window_started_at: string }>(
+      db,
+      `SELECT window_started_at FROM ${db.table('check_runs')} WHERE id = $1`,
+      [input.checkRunId],
+    );
+    scheduledWindow = run?.window_started_at ?? '2026-09-16T10:00:00.000Z';
+  }
+  await db.query(
+    `INSERT INTO ${db.table('observations')} (id, check_run_id, monitor_id, region_id, scheduled_window, status,
+       success, http_status, response_ms, total_ms, error_code, started_at, completed_at, endpoint_evidence)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, $13)`,
+    [
       id,
       input.checkRunId,
       input.monitorId,
       input.regionId ?? 'us-east',
       scheduledWindow,
-      input.status ?? 'success',
-      success ? 1 : 0,
-      input.httpStatus ?? (success ? 200 : null),
-      input.responseMs ?? (success ? 100 : null),
-      input.totalMs ?? null,
-      input.errorCode ?? null,
+      input.status ?? (input.success === false ? 'http_failure' : 'success'),
+      input.success === false ? 0 : 1,
+      input.httpStatus ?? (input.success === false ? 500 : 200),
+      input.responseMs ?? 120,
+      input.totalMs ?? input.responseMs ?? 120,
       input.startedAt ?? '2026-09-16T10:00:05.000Z',
-      input.completedAt ?? '2026-09-16T10:00:06.000Z',
-    );
+      input.completedAt ??
+        new Date(Date.parse(input.startedAt ?? '2026-09-16T10:00:05.000Z') + 1000).toISOString(),
+      input.endpointEvidence ? JSON.stringify(input.endpointEvidence) : null,
+    ],
+  );
   return id;
 }
 
-/** Authenticate and return the session cookie header. */
+export async function request(
+  app: TestApp,
+  path: string,
+  options: {
+    method?: string;
+    body?: string;
+    cookie?: string;
+    headers?: Record<string, string>;
+  } = {},
+): Promise<Response> {
+  const headers = new Headers(options.headers);
+  if (options.body && !headers.has('content-type')) {
+    headers.set('content-type', 'application/json');
+  }
+  if (options.cookie) {
+    headers.set('cookie', options.cookie);
+  }
+  return app.fetch(
+    new Request(`https://api.internal${path}`, {
+      method: options.method ?? 'GET',
+      headers,
+      ...(options.body !== undefined ? { body: options.body } : {}),
+    }),
+  );
+}
+
 export async function login(
   app: TestApp,
   password = TEST_PASSWORD,
-): Promise<{ cookie: string; response: Response }> {
-  const response = await app.fetch(
-    new Request('https://api.test/api/auth/login', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ password }),
-    }),
-  );
-  const setCookie = response.headers.get('set-cookie') ?? '';
-  return { cookie: setCookie.split(';')[0] ?? '', response };
-}
-
-export function request(
-  app: TestApp,
-  path: string,
-  init: RequestInit & { cookie?: string } = {},
-): Promise<Response> {
-  const headers = new Headers(init.headers);
-  if (init.cookie) headers.set('cookie', init.cookie);
-  if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
-  return app.fetch(new Request(`https://api.test${path}`, { ...init, headers }));
+): Promise<{ response: Response; cookie: string }> {
+  const response = await request(app, '/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  });
+  const cookie = response.headers.get('set-cookie')?.split(';')[0] ?? '';
+  return { response, cookie };
 }

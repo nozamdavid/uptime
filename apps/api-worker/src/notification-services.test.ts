@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { pgFirst } from '@uptime/cloudflare/postgres';
 
 import { openProviderConfig, sealProviderConfig } from './credentials.js';
 import { createTestContext, login, request, type TestContext } from './testing/test-utils.js';
@@ -12,8 +13,8 @@ async function context(options: Parameters<typeof createTestContext>[0] = {}) {
   return ctx;
 }
 
-afterEach(() => {
-  for (const ctx of contexts.splice(0)) ctx.db.close();
+afterEach(async () => {
+  for (const ctx of contexts.splice(0)) await ctx.close();
   vi.restoreAllMocks();
 });
 
@@ -69,11 +70,12 @@ describe('notification services contract', () => {
     expect(JSON.stringify(service)).not.toContain('botToken');
     expect(JSON.stringify(service)).not.toContain('abcdefghijklmnopqrstuvwxyz');
 
-    const stored = ctx.sqlite.prepare('SELECT config FROM notification_services').get() as {
-      config: string;
-    };
-    expect(stored.config).not.toContain('abcdefghijklmnopqrstuvwxyz');
-    expect(stored.config).toContain('encrypted');
+    const stored = await pgFirst<{ config: string }>(
+      ctx.db,
+      `SELECT config FROM ${ctx.db.table('notification_services')}`,
+    );
+    expect(stored?.config).not.toContain('abcdefghijklmnopqrstuvwxyz');
+    expect(stored?.config).toContain('encrypted');
   });
 
   it('lists every provider with secrets redacted', async () => {
@@ -173,10 +175,12 @@ describe('notification services contract', () => {
     expect(updated.status).toBe(200);
     expect((await json(updated)).service.name).toBe('Primary Telegram');
 
-    const stored = ctx.sqlite
-      .prepare('SELECT config FROM notification_services WHERE id = ?')
-      .get(id) as { config: string };
-    const { config } = await openProviderConfig('c'.repeat(32), stored.config);
+    const stored = await pgFirst<{ config: string }>(
+      ctx.db,
+      `SELECT config FROM ${ctx.db.table('notification_services')} WHERE id = $1`,
+      [id],
+    );
+    const { config } = await openProviderConfig('c'.repeat(32), stored!.config);
     expect(config.botToken).toBe(telegram.config.botToken);
   });
 
@@ -198,11 +202,14 @@ describe('notification services contract', () => {
     expect(service.config).toEqual({ handle: 'ops.example.com' });
     expect(JSON.stringify(service)).not.toContain(appPassword);
     const id = service.id as string;
-    const stored = ctx.sqlite
-      .prepare('SELECT config FROM notification_services WHERE id = ?')
-      .get(id) as { config: string };
-    expect(stored.config).not.toContain(appPassword);
-    expect(stored.config).toContain('encrypted');
+
+    const stored = await pgFirst<{ config: string }>(
+      ctx.db,
+      `SELECT config FROM ${ctx.db.table('notification_services')} WHERE id = $1`,
+      [id],
+    );
+    expect(stored!.config).not.toContain(appPassword);
+    expect(stored!.config).toContain('encrypted');
 
     const updated = await request(ctx.app, `/api/notification-services/${id}`, {
       method: 'PATCH',
@@ -211,10 +218,12 @@ describe('notification services contract', () => {
     });
     expect(updated.status).toBe(200);
     expect((await json(updated)).service.config).toEqual({ handle: 'new.example.com' });
-    const saved = ctx.sqlite
-      .prepare('SELECT config FROM notification_services WHERE id = ?')
-      .get(id) as { config: string };
-    const { config } = await openProviderConfig('c'.repeat(32), saved.config);
+    const saved = await pgFirst<{ config: string }>(
+      ctx.db,
+      `SELECT config FROM ${ctx.db.table('notification_services')} WHERE id = $1`,
+      [id],
+    );
+    const { config } = await openProviderConfig('c'.repeat(32), saved!.config);
     expect(config).toEqual({ handle: 'new.example.com', appPassword });
   });
 
@@ -359,10 +368,12 @@ describe('notification services contract', () => {
       collection: 'app.bsky.feed.post',
       record: { $type: 'app.bsky.feed.post' },
     });
-    const history = ctx.sqlite
-      .prepare('SELECT external_url FROM notification_history WHERE notification_service_id = ?')
-      .get(id) as { external_url: string | null };
-    expect(history.external_url).toBe('https://bsky.app/profile/did:plc:operations/post/123');
+    const history = await pgFirst<{ external_url: string | null }>(
+      ctx.db,
+      `SELECT external_url FROM ${ctx.db.table('notification_history')} WHERE notification_service_id = $1`,
+      [id],
+    );
+    expect(history?.external_url).toBe('https://bsky.app/profile/did:plc:operations/post/123');
   });
 
   it('documents SMTP as unsupported in the Workers runtime', async () => {
@@ -378,6 +389,8 @@ describe('notification services contract', () => {
           host: 'smtp.example.com',
           port: 587,
           security: 'starttls',
+          username: 'uptime',
+          password: 'smtp-secret',
           from: 'a@example.com',
           to: ['b@example.com'],
         },

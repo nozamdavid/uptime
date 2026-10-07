@@ -1,0 +1,49 @@
+.theme-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: var(--space-4);
+}
+
+.theme-control {
+  flex: none;
+}
+
+.theme-control svg {
+  width: var(--space-4);
+  height: var(--space-4);
+  color: var(--ink-soft);
+}
+
+.admin-theme-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 1200px;
+  margin-inline: auto;
+  padding: var(--space-4) var(--space-8) 0;
+}
+
+.public-status-page__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.public-workspace:not(.public-status-workspace):not(.public-monitor-workspace) > .theme-toolbar {
+  padding: var(--space-4);
+}
+
+@media (pointer: coarse) {
+  .theme-control {
+    width: var(--control-touch);
+  }
+}
+
+@media (max-width: 899.98px) {
+  .admin-theme-toolbar {
+    padding-inline: var(--space-4);
+  }
+}

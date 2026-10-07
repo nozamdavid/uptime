@@ -1,0 +1,28 @@
+# Staging Pages project using the hosted gateway pattern (equivalent to deploy/cloudflare/hosted/pages.wrangler.toml).
+# In this architecture:
+#   - API routes all traffic to the hosted API Worker (uptime-staging-oauth-api)
+#   - IMPORTED_API routes legacy public monitoring and status-pages routes to uptime-staging-api
+#   - IMPORTED_REPORTER routes live monitor snapshots to uptime-staging-reporter
+#   - IMPORTED_REPORTS routes public cohorts from uptime-staging-reports
+name = "uptime-staging"
+compatibility_date = "2026-08-30"
+compatibility_flags = ["global_fetch_strictly_public"]
+# Copy this template to dist/staging/pages-deploy/wrangler.toml before Pages deploy.
+# The hosted _worker.js and Vite assets, including _headers, belong in ./web.
+pages_build_output_dir = "./web"
+
+[[services]]
+binding = "API"
+service = "uptime-staging-oauth-api"
+
+[[services]]
+binding = "IMPORTED_API"
+service = "uptime-staging-api"
+
+[[services]]
+binding = "IMPORTED_REPORTER"
+service = "uptime-staging-reporter"
+
+[[r2_buckets]]
+binding = "IMPORTED_REPORTS"
+bucket_name = "uptime-staging-reports"

@@ -1,9 +1,19 @@
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { api } from './api.js';
+import { api, isImportedWorkspaceKind } from './api.js';
 import type { ProductSession } from './api.js';
-import { SlotAssignment } from './slot-assignment.js';
 import { AppLink } from './app-link.js';
+import { SlotAssignment } from './slot-assignment.js';
+import { WorkspaceSettingsMembers } from './workspace-settings-members.js';
+import { OperatorHealthPanel } from './operator-health-panel.js';
+import { OperatorTierCatalog } from './operator-tier-catalog.js';
+import { WorkspaceLimitsEditor, workspaceRegionNames } from './operator-quota-editor.js';
+import { WorkspaceBillingPanel } from './workspace-billing-panel.js';
+import { WorkspaceCustomDomainsPanel } from './workspace-custom-domains-panel.js';
+import { formatBudgetForecast, formatWorkspaceDatabaseMetrics } from './format-usage.js';
+import { fontOptions, readFontPreference, saveFontPreference } from './font-choice.js';
+import { Select } from './select.js';
+import './admin-views.css';
 
 export const ProductSessionContext = createContext<ProductSession | null>(null);
 export function useProductSession() {
@@ -40,6 +50,9 @@ export function LandingPage() {
         <a className="brand" href="/">
           Uptime
         </a>
+        <a className="brand" href="/pricing">
+          Pricing
+        </a>
         <span className="mono-label">COMING SOON</span>
       </header>
       <section className="landing__hero">
@@ -62,54 +75,90 @@ export function LandingPage() {
         <details className="landing__disclosure">
           <summary>What we store</summary>
           <p>
-            Your verified AT Protocol DID, handle, and signup date, for this interest check only.
-            The list is visible to the service owner. Joining is free, creates no monitoring
-            workspace, and does not guarantee a launch date or early access.
+            Sign in requires only identification — we do not ask for repo or account write access.
+            We store your handle, DID, and workspace configuration so we know who created monitors.
+            Tokens are encrypted at rest and never shared. We do not sell data or run ads.
           </p>
         </details>
       </section>
-      <footer className="landing__footer">
-        <span>
-          Built by <a href="https://bsky.app/profile/noz.am">@noz.am</a>
-        </span>
-        <a href="/operator">Operator</a>
+      <footer className="landing__foot">
+        <p>
+          An experimental project by{' '}
+          <a href="https://bsky.app/profile/noz.am" target="_blank" rel="noopener noreferrer">
+            @noz.am
+          </a>
+        </p>
       </footer>
     </main>
   );
 }
 
+export function InterestSignupPage() {
+  return (
+    <main className="landing landing--signup">
+      <header className="landing__nav">
+        <a className="brand" href="/">
+          Uptime
+        </a>
+        <a className="brand" href="/pricing">
+          Pricing
+        </a>
+        <span className="mono-label">EARLY ACCESS</span>
+      </header>
+      <section className="landing__hero">
+        <h1>Join the interest list.</h1>
+        <p className="landing__lede">
+          We’re rolling out hosted monitoring gradually. Leave your AT Protocol handle to get early
+          access when capacity opens.
+        </p>
+        <InterestForm />
+      </section>
+    </main>
+  );
+}
+
+function normalizeInterestHandle(value: string) {
+  return value.trim().replace(/^@+/, '').toLowerCase();
+}
+
 export function InterestForm() {
   const [handle, setHandle] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(() =>
-    typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('auth_error')
-      ? 'AT Protocol sign-in was not completed. Please try again.'
-      : '',
-  );
+  const [error, setError] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+
   async function submit(event: FormEvent) {
     event.preventDefault();
+    const normalized = normalizeInterestHandle(handle);
+    if (!normalized) {
+      setError('Enter your AT Protocol handle');
+      return;
+    }
     setBusy(true);
     setError('');
     try {
-      const result = await api.startAtProto(handle.trim(), '/?interest=joined');
-      if (result.authorizationUrl) window.location.assign(result.authorizationUrl);
+      const returnPath = '/?interest=joined';
+      const { authorizationUrl } = await api.startAtProto(normalized, returnPath);
+      setSubmitted(true);
+      window.location.assign(authorizationUrl);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not start signup');
-    } finally {
+      setError(reason instanceof Error ? reason.message : 'Could not reach authorization server');
       setBusy(false);
     }
   }
+
   return (
-    <form className="auth-card" onSubmit={submit} noValidate>
-      <label className="field" htmlFor="interest-handle">
-        <span>AT Protocol handle</span>
+    <form className="landing__form" onSubmit={submit}>
+      <label className="field">
+        <span className="sr-only">AT Protocol handle</span>
         <input
           id="interest-handle"
-          value={handle}
-          onChange={(event) => setHandle(event.target.value)}
-          placeholder="you.bsky.social"
+          type="text"
           autoComplete="username"
-          required
+          placeholder="handle.bsky.social"
+          value={handle}
+          disabled={busy || submitted}
+          onChange={(event) => setHandle(event.target.value)}
         />
       </label>
       {error && (
@@ -117,27 +166,14 @@ export function InterestForm() {
           {error}
         </p>
       )}
-      <button className="button button--primary" disabled={busy || !handle.trim()}>
+      <button
+        type="submit"
+        className="button button--primary"
+        disabled={busy || submitted || !handle.trim()}
+      >
         {busy ? 'Connecting…' : "I'm interested!"}
       </button>
     </form>
-  );
-}
-
-export function InterestSignupPage() {
-  return (
-    <main className="auth-page">
-      <a className="brand auth-page__brand" href="/">
-        Uptime
-      </a>
-      <p className="mono-label">COMING SOON</p>
-      <h1>Join the interest list.</h1>
-      <p>We’ll use your AT Protocol identity only. No password or posting permission.</p>
-      <InterestForm />
-      <p className="auth-card__switch">
-        <a href="/">Back to home</a>
-      </p>
-    </main>
   );
 }
 
@@ -146,55 +182,58 @@ export function AuthPage({
   onAuthenticated,
 }: {
   mode: 'login' | 'signup';
-  onAuthenticated: () => void;
+  onAuthenticated?: () => void;
 }) {
   const [handle, setHandle] = useState('');
-  const [error, setError] = useState(() => {
-    const authError =
-      typeof window === 'undefined'
-        ? ''
-        : new URLSearchParams(window.location.search).get('auth_error');
-    return authError
-      ? 'AT Protocol sign-in was not completed. Check the handle and try again.'
-      : '';
-  });
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
   const isSignup = mode === 'signup';
+
   async function submit(event: FormEvent) {
     event.preventDefault();
+    const normalized = normalizeInterestHandle(handle);
+    if (!normalized) {
+      setError('Enter your AT Protocol handle');
+      return;
+    }
     setBusy(true);
     setError('');
     try {
-      const result = await api.startAtProto(handle.trim());
-      if (result.authorizationUrl) window.location.assign(result.authorizationUrl);
-      else onAuthenticated();
+      const { authorizationUrl } = await api.startAtProto(normalized);
+      window.location.assign(authorizationUrl);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not start AT Protocol login');
-    } finally {
+      setError(reason instanceof Error ? reason.message : 'Could not start AT Protocol sign in');
       setBusy(false);
     }
   }
+
   return (
-    <main className="auth-page">
-      <a className="brand auth-page__brand" href="/">
-        Uptime
-      </a>
-      <form className="auth-card" onSubmit={submit} noValidate>
-        <p className="mono-label">{isSignup ? 'CREATE YOUR FREE WORKSPACE' : 'WELCOME BACK'}</p>
-        <h1>{isSignup ? 'Start with your AT Protocol handle.' : 'Log in with AT Protocol.'}</h1>
-        <p>
+    <main className="auth-screen">
+      <header className="landing__nav">
+        <a className="brand" href="/">
+          Uptime
+        </a>
+        <a className="brand" href="/pricing">
+          Pricing
+        </a>
+      </header>
+      <form className="auth-card" onSubmit={submit}>
+        <h1>{isSignup ? 'Create your workspace' : 'Sign in'}</h1>
+        <p className="auth-card__lede">
           {isSignup
-            ? 'Your first successful login creates a free workspace automatically.'
-            : 'Continue with the identity you use on the AT Protocol.'}
+            ? 'Free hosted uptime monitoring. Enter your AT Protocol handle to get started.'
+            : 'Sign in to access your monitored endpoints.'}
         </p>
-        <label className="field" htmlFor="atproto-handle">
+        <label className="field">
           <span>Handle</span>
           <input
             id="atproto-handle"
-            value={handle}
-            onChange={(event) => setHandle(event.target.value)}
-            placeholder="you.bsky.social"
+            type="text"
             autoComplete="username"
+            placeholder="handle.bsky.social"
+            value={handle}
+            disabled={busy}
+            onChange={(event) => setHandle(event.target.value)}
             required
           />
         </label>
@@ -223,28 +262,26 @@ export function AuthPage({
 
 export function SettingsPage() {
   const session = useProductSession();
-  const importedStaging = session?.workspace?.kind === 'staging_import';
-  const [usage, setUsage] = useState<Awaited<ReturnType<typeof api.usage>> | null>(null);
+  const [fontFamily, setFontFamily] = useState(readFontPreference);
+  const importedKind = session?.workspace?.kind;
+  const importedWorkspace = isImportedWorkspaceKind(importedKind);
   const [members, setMembers] = useState<Awaited<ReturnType<typeof api.workspaceMembers>> | null>(
     null,
   );
-  const [inviteDid, setInviteDid] = useState('');
-  const [inviteRole, setInviteRole] = useState<'maintainer' | 'viewer'>('viewer');
-  const [message, setMessage] = useState('');
   const [deletionQueued, setDeletionQueued] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [inviteHandled, setInviteHandled] = useState(false);
   const [error, setError] = useState('');
+
   useEffect(() => {
-    Promise.all([api.usage(), api.workspaceMembers()])
-      .then(([nextUsage, nextMembers]) => {
-        setUsage(nextUsage);
-        setMembers(nextMembers);
-      })
+    api
+      .workspaceMembers()
+      .then(setMembers)
       .catch((reason) =>
         setError(reason instanceof Error ? reason.message : 'Could not load workspace settings'),
       );
   }, []);
+
   useEffect(() => {
     const invitationId =
       typeof window === 'undefined'
@@ -264,20 +301,9 @@ export function SettingsPage() {
         setError(reason instanceof Error ? reason.message : 'Could not accept invitation'),
       );
   }, [inviteHandled]);
+
   const canManage = session?.role === 'owner';
-  async function invite(event: FormEvent) {
-    event.preventDefault();
-    setMessage('');
-    try {
-      await api.inviteWorkspaceMember(inviteDid.trim(), inviteRole);
-      setInviteDid('');
-      setMessage('Invitation sent.');
-      const next = await api.workspaceMembers();
-      setMembers(next);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not invite member');
-    }
-  }
+
   async function downloadExport() {
     try {
       const payload = await api.exportWorkspace();
@@ -292,6 +318,7 @@ export function SettingsPage() {
       setError(reason instanceof Error ? reason.message : 'Could not export workspace');
     }
   }
+
   async function deleteWorkspace() {
     try {
       await api.deleteWorkspace();
@@ -301,6 +328,7 @@ export function SettingsPage() {
       setError(reason instanceof Error ? reason.message : 'Could not queue workspace deletion');
     }
   }
+
   return (
     <section className="settings-page settings-page--account">
       <div className="page-head">
@@ -314,120 +342,64 @@ export function SettingsPage() {
           {error}
         </p>
       )}
-      <div className="settings-card">
+      <div className="settings-card settings-card--account">
         <h2>{session?.workspace?.name ?? 'Workspace'}</h2>
-        <p>
-          Signed in as <strong>{session?.user?.handle ?? 'AT Protocol account'}</strong>
-        </p>
-        {session?.user?.did && <p className="tnum">{session.user.did}</p>}
-        <p>Role: {session?.role ?? 'owner'}</p>
-      </div>
-      <div className="settings-card">
-        <h2>{importedStaging ? 'Imported staging monitors' : 'Free plan'}</h2>
-        {usage && importedStaging ? (
-          <>
-            <p>
-              {usage.usage.monitors} monitors · {usage.usage.statusPages} status pages ·{' '}
-              {usage.usage.notificationServices} notification services
-            </p>
-            <p className="settings-note">
-              This workspace keeps the existing staging checks and history. Its limits and retention
-              follow the imported staging system.
-            </p>
-          </>
-        ) : usage && usage.limits ? (
-          <p>
-            {usage.usage.monitors} / {usage.limits.monitors} monitors · {usage.usage.statusPages} /{' '}
-            {usage.limits.statusPages} status pages · {usage.usage.notificationServices} /{' '}
-            {usage.limits.notificationServices} notification services
-          </p>
-        ) : (
-          <p role="status">Loading usage…</p>
-        )}
-        {!importedStaging && (
-          <p className="settings-note">
-            Includes 5 minute checks, up to 3 regions, 24 hours of detailed history, and 30 days of
-            daily history.
-          </p>
-        )}
-      </div>
-      <div className="settings-card">
-        <h2>Members</h2>
-        {members ? (
-          <div className="member-list">
-            {members.members.map((member) => (
-              <div className="member-row" key={member.did}>
-                <span>
-                  <strong>{member.handle}</strong>
-                  <small className="tnum">{member.did}</small>
-                </span>
-                <span>
-                  {member.role}
-                  {canManage && member.role !== 'owner' && (
-                    <button
-                      className="button button--quiet"
-                      onClick={() =>
-                        void api
-                          .removeWorkspaceMember(member.did)
-                          .then(() => api.workspaceMembers())
-                          .then(setMembers)
-                      }
-                    >
-                      Remove
-                    </button>
-                  )}
-                </span>
-              </div>
-            ))}
-            {members.invitations.map((invitation) => (
-              <div className="member-row" key={invitation.id}>
-                <span>
-                  Invitation to <span className="tnum">{invitation.inviteeDid}</span>
-                </span>
-                <span>
-                  {invitation.role} · expires in 7 days{' '}
-                  <AppLink href={`/settings?invite=${encodeURIComponent(invitation.id)}`}>
-                    Share accept link
-                  </AppLink>
-                </span>
-              </div>
-            ))}
+        <dl className="settings-facts">
+          <div>
+            <dt>Signed in as</dt>
+            <dd>{session?.user?.handle ?? 'AT Protocol account'}</dd>
           </div>
-        ) : (
-          <p role="status">Loading members…</p>
-        )}
-        {canManage && (
-          <form className="member-invite" onSubmit={invite}>
-            <label className="field">
-              <span>Invite DID</span>
-              <input
-                value={inviteDid}
-                onChange={(event) => setInviteDid(event.target.value)}
-                placeholder="did:plc:…"
-                required
-              />
-            </label>
-            <label className="field">
-              <span>Role</span>
-              <select
-                value={inviteRole}
-                onChange={(event) => setInviteRole(event.target.value as 'maintainer' | 'viewer')}
-              >
-                <option value="viewer">Viewer</option>
-                <option value="maintainer">Maintainer</option>
-              </select>
-            </label>
-            <button className="button button--quiet" disabled={!inviteDid.trim()}>
-              Invite member
-            </button>
-          </form>
-        )}
-        {message && <p role="status">{message}</p>}
+          {session?.user?.did && (
+            <div>
+              <dt>Account ID</dt>
+              <dd className="tnum">{session.user.did}</dd>
+            </div>
+          )}
+          <div>
+            <dt>Role</dt>
+            <dd>{session?.role ?? 'owner'}</dd>
+          </div>
+        </dl>
       </div>
+
+      <div className="settings-card">
+        <h2>Appearance</h2>
+        <label htmlFor="settings-font-family">Font</label>
+        <Select
+          id="settings-font-family"
+          options={fontOptions}
+          value={fontFamily}
+          onChange={(value) => {
+            setFontFamily(value);
+            saveFontPreference(value);
+          }}
+        />
+        <p className="ut-muted">Your font choice is saved in this browser.</p>
+      </div>
+
+      <WorkspaceBillingPanel
+        workspaceId={session?.workspace?.id}
+        canManage={canManage}
+        importedWorkspace={importedWorkspace}
+        importedKind={importedKind}
+      />
+
+      <WorkspaceCustomDomainsPanel
+        workspaceId={session?.workspace?.id}
+        canManage={canManage}
+        importedWorkspace={importedWorkspace}
+      />
+
+      <WorkspaceSettingsMembers
+        canManage={canManage}
+        members={members}
+        onMembersChanged={setMembers}
+      />
+
       <div className="settings-card settings-card--actions">
         <h2>Workspace data</h2>
         <p>
-          {importedStaging
+          {importedWorkspace
             ? 'Download a JSON copy of your workspace.'
             : 'Download a JSON copy of your workspace or permanently delete it.'}
         </p>
@@ -442,7 +414,7 @@ export function SettingsPage() {
                 <button className="button button--quiet" onClick={() => void downloadExport()}>
                   Download export
                 </button>
-                {!importedStaging && (
+                {!importedWorkspace && (
                   <button className="button button--danger" onClick={() => setDeleteOpen(true)}>
                     Delete workspace
                   </button>
@@ -480,27 +452,40 @@ export function OperatorPage() {
     null,
   );
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
   const [controlError, setControlError] = useState('');
   const [savingControls, setSavingControls] = useState(false);
-  const [pendingWorkspaceId, setPendingWorkspaceId] = useState<string | null>(null);
+  const [workspaceActions, setWorkspaceActions] = useState<
+    Record<string, { pending: boolean; error?: string }>
+  >({});
+
+  const loadOperatorData = useCallback(() => {
+    setLoading(true);
+    setError('');
+    void Promise.all([api.operatorWorkspaces(), api.operatorSlots(), api.operatorInterest()])
+      .then(([workspaces, inventory, interestList]) => {
+        setData(workspaces);
+        setSlots(inventory);
+        setInterest(interestList);
+      })
+      .catch((reason) =>
+        setError(reason instanceof Error ? reason.message : 'Could not load workspaces'),
+      )
+      .finally(() => setLoading(false));
+  }, []);
+
   useEffect(() => {
-    if (session?.isOperator)
-      Promise.all([api.operatorWorkspaces(), api.operatorSlots(), api.operatorInterest()])
-        .then(([workspaces, inventory, interestList]) => {
-          setData(workspaces);
-          setSlots(inventory);
-          setInterest(interestList);
-        })
-        .catch((reason) =>
-          setError(reason instanceof Error ? reason.message : 'Could not load workspaces'),
-        );
-  }, [session?.isOperator]);
-  if (!session?.isOperator)
+    if (session?.isOperator) loadOperatorData();
+  }, [loadOperatorData, session?.isOperator]);
+
+  if (!session?.isOperator) {
     return (
       <section className="state state--error" role="alert">
         <p>Operator access required.</p>
       </section>
     );
+  }
+
   return (
     <section className="settings-page operator-page">
       <div className="page-head">
@@ -510,23 +495,33 @@ export function OperatorPage() {
         </div>
       </div>
       {error && (
-        <p className="field-error" role="alert">
-          {error}
-        </p>
+        <>
+          <p className="field-error" role="alert">
+            {error}
+          </p>
+          <button
+            type="button"
+            className="button button--quiet"
+            disabled={loading}
+            onClick={loadOperatorData}
+          >
+            {loading ? 'Loading…' : 'Retry loading workspaces'}
+          </button>
+        </>
       )}
       {!data || !slots || !interest ? (
-        <p role="status">Loading workspaces…</p>
+        <p role="status">{loading ? 'Loading workspaces…' : 'Workspace data is unavailable.'}</p>
       ) : (
         <>
           <article className="settings-card operator-budget">
             <h2>Admission and budget</h2>
             <p className="operator-budget__summary">
-              Forecast $
-              {(
-                data.budget.forecastUsd ??
-                (data.budget.baseUsd ?? 0) + (data.budget.externalMonthlyCostUsd ?? 0)
-              ).toFixed(2)}
-              /mo · ceiling ${data.budget.ceilingUsd.toFixed(2)}
+              {data.budget.forecastUsd !== null && data.budget.forecastUsd !== undefined ? (
+                <>Forecast {formatBudgetForecast(data.budget)}</>
+              ) : (
+                <>Forecast: Unknown / unavailable</>
+              )}
+              {' · ceiling $' + data.budget.ceilingUsd.toFixed(2)}
             </p>
             <p className="operator-budget__coverage">
               Coverage: {data.budget.coverage ?? 'Coverage details are pending.'} Forecast is an
@@ -557,17 +552,18 @@ export function OperatorPage() {
                   .finally(() => setSavingControls(false));
               }}
             >
-              <label className="operator-controls__admission">
+              <label className="operator-controls__admission ut-field">
                 <input
                   type="checkbox"
                   name="admissionOpen"
-                  defaultChecked={data.budget.admissionOpen ?? true}
+                  defaultChecked={Boolean(data.budget.admissionOpen)}
                 />
-                <span>Admission {data.budget.admissionOpen === false ? 'closed' : 'open'}</span>
+                <span>Admission {data.budget.admissionOpen ? 'open' : 'closed'}</span>
               </label>
-              <label>
-                External monthly cost (USD)
+              <label className="operator-controls__cost ut-field">
+                <span className="ut-field__label">External monthly cost (USD)</span>
                 <input
+                  className="ut-input ut-input--mono"
                   name="externalMonthlyCostUsd"
                   type="number"
                   min="0"
@@ -585,101 +581,124 @@ export function OperatorPage() {
               </p>
             )}
           </article>
+
           <article className="settings-card operator-budget">
             <h2>Interest list · {interest.total}</h2>
             {interest.signups.length === 0 ? (
               <p>No signups yet.</p>
             ) : (
-              <details className="operator-interest">
-                <summary>View {interest.signups.length} recent signups</summary>
-                <div className="operator-list">
-                  {interest.signups.map((signup) => (
-                    <div className="operator-row" key={signup.did}>
-                      <div>
-                        <strong>@{signup.handle}</strong>
-                        <small>{signup.did}</small>
-                      </div>
-                      <small>{new Date(signup.createdAt).toLocaleDateString()}</small>
+              <ul className="operator-list">
+                {interest.signups.map((signup) => (
+                  <li key={signup.did} className="operator-row">
+                    <div>
+                      <strong>@{signup.handle}</strong>
+                      <p className="tnum">{signup.did}</p>
                     </div>
-                  ))}
-                </div>
-              </details>
+                    <small>joined {new Date(signup.createdAt).toLocaleDateString()}</small>
+                  </li>
+                ))}
+              </ul>
             )}
           </article>
-          <article className="settings-card operator-budget operator-capacity">
-            <h2>Capacity pool</h2>
-            <p>
-              {slots.availableSlots} available · {slots.assignedSlots} assigned · {slots.heldSlots}{' '}
-              held · {slots.quarantinedSlots} quarantined
-            </p>
-            <p className="operator-budget__coverage">
-              {slots.configuredSlots} configured Cloudflare database slots. This controls the
-              configured pool; deployment precreates and migrates its databases. The last available
-              database stays reserved for testing.
-            </p>
-            <form
-              className="operator-controls"
-              onSubmit={(event) => {
-                event.preventDefault();
-                const form = new FormData(event.currentTarget);
-                setSavingControls(true);
-                setControlError('');
-                void api
-                  .updateOperatorSlots(Number(form.get('maxWorkspaces') ?? slots.maxWorkspaces))
-                  .then(setSlots)
-                  .catch((reason) =>
-                    setControlError(
-                      reason instanceof Error ? reason.message : 'Could not update capacity limit',
-                    ),
-                  )
-                  .finally(() => setSavingControls(false));
-              }}
-            >
-              <label>
-                Public workspace limit
-                <input
-                  name="maxWorkspaces"
-                  type="number"
-                  min="1"
-                  max="10"
-                  defaultValue={slots.maxWorkspaces}
-                  disabled={savingControls}
-                />
-              </label>
-              <button className="button button--quiet" disabled={savingControls}>
-                {savingControls ? 'Saving…' : 'Save limit'}
-              </button>
-            </form>
-            <details className="operator-capacity-details">
-              <summary>Manage {slots.configuredSlots} database slots</summary>
-              <div className="operator-list operator-slot-list">
+
+          <article className="settings-card operator-budget">
+            <details className="operator-collapsible">
+              <summary>
+                <span className="operator-collapsible__title">
+                  <strong>Available database slots</strong>
+                </span>
+                <span className="operator-slots-badge">
+                  {slots.availableSlots} of {slots.configuredSlots} available
+                </span>
+              </summary>
+              <p className="operator-budget__summary">
+                {slots.availableSlots} available · {slots.assignedSlots} assigned ·{' '}
+                {slots.heldSlots} held · {slots.quarantinedSlots} quarantined
+              </p>
+              <form
+                className="operator-controls"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (savingControls) return;
+                  const maximum = Number(new FormData(event.currentTarget).get('maxWorkspaces'));
+                  if (!Number.isInteger(maximum) || maximum < 0 || maximum > 10) {
+                    setControlError('Capacity must be a whole number from 0 to 10.');
+                    return;
+                  }
+                  setControlError('');
+                  setSavingControls(true);
+                  void api
+                    .updateOperatorSlots(maximum)
+                    .then(setSlots)
+                    .catch((reason) =>
+                      setControlError(
+                        reason instanceof Error ? reason.message : 'Could not update capacity',
+                      ),
+                    )
+                    .finally(() => setSavingControls(false));
+                }}
+              >
+                <label className="operator-controls__capacity ut-field">
+                  <span className="ut-field__label">Maximum active workspaces</span>
+                  <input
+                    className="ut-input ut-input--mono"
+                    name="maxWorkspaces"
+                    type="number"
+                    min="0"
+                    max="10"
+                    required
+                    defaultValue={slots.maxWorkspaces}
+                    disabled={savingControls}
+                  />
+                </label>
+                <button className="button button--quiet" disabled={savingControls}>
+                  {savingControls ? 'Saving…' : 'Save capacity'}
+                </button>
+              </form>
+              <p className="operator-budget__coverage">
+                Managed slot inventory across target regions. Pre-provisioned databases allow
+                immediate assignment without deploy-time provisioning.
+              </p>
+              <div className="operator-slots-grid">
                 {slots.slots.map((slot) => (
-                  <div className="operator-row" key={slot.bindingName}>
-                    <div>
-                      <strong>
-                        {slot.kind === 'staging_import'
-                          ? 'Imported staging monitors'
-                          : slot.bindingName}
-                      </strong>
-                      <small>
-                        {slot.status === 'assigned'
-                          ? `Assigned to ${slot.ownerHandle ?? slot.workspaceId ?? 'workspace'}`
-                          : slot.status === 'deleting'
-                            ? 'Deleting'
-                            : slot.admissionEnabled
-                              ? 'Available'
-                              : 'Held'}
-                      </small>
+                  <div
+                    key={slot.bindingName}
+                    className={`operator-slot-card ${slot.status === 'assigned' ? 'is-assigned' : ''}`}
+                  >
+                    <div className="operator-slot-card__identity">
+                      <div className="operator-slot-card__name">
+                        <strong>
+                          {slot.kind === 'legacy_import'
+                            ? 'Imported production monitors'
+                            : slot.kind === 'staging_import'
+                              ? 'Imported staging monitors'
+                              : slot.bindingName}
+                        </strong>
+                      </div>
+                      <div className="operator-slot-card__status">
+                        <small>
+                          {slot.status === 'assigned'
+                            ? `Assigned to ${slot.ownerHandle ?? slot.workspaceId ?? 'workspace'}`
+                            : slot.status === 'deleting'
+                              ? 'Deleting'
+                              : slot.status === 'quarantined'
+                                ? 'Quarantined'
+                                : slot.admissionEnabled
+                                  ? 'Available'
+                                  : 'Held'}
+                        </small>
+                      </div>
                     </div>
-                    {slot.kind !== 'staging_import' &&
+                    {!isImportedWorkspaceKind(slot.kind) &&
                       slot.status === 'available' &&
                       slot.workspaceId === null && (
                         <button
                           className="button button--quiet"
                           disabled={savingControls}
                           onClick={() => {
-                            setSavingControls(true);
+                            if (savingControls) return;
                             setControlError('');
+                            setSavingControls(true);
                             void api
                               .setSlotAdmission(slot.bindingName, !slot.admissionEnabled)
                               .then(setSlots)
@@ -687,7 +706,7 @@ export function OperatorPage() {
                                 setControlError(
                                   reason instanceof Error
                                     ? reason.message
-                                    : 'Could not update slot admission',
+                                    : 'Could not change slot admission',
                                 ),
                               )
                               .finally(() => setSavingControls(false));
@@ -699,10 +718,8 @@ export function OperatorPage() {
                     {slot.status === 'available' && slot.workspaceId === null && (
                       <SlotAssignment
                         bindingName={slot.bindingName}
-                        imported={slot.kind === 'staging_import'}
-                        signups={interest.signups.filter(
-                          (signup) => signup.did !== session?.user?.did,
-                        )}
+                        imported={isImportedWorkspaceKind(slot.kind)}
+                        signups={interest.signups}
                         onAssigned={async () => {
                           const [inventory, workspaces] = await Promise.all([
                             api.operatorSlots(),
@@ -718,6 +735,13 @@ export function OperatorPage() {
               </div>
             </details>
           </article>
+
+          <article className="settings-card">
+            <OperatorHealthPanel knownWorkspaces={data.workspaces} />
+          </article>
+
+          <OperatorTierCatalog availableRegions={data.availableRegions} />
+
           <div className="operator-list operator-workspaces">
             {data.workspaces?.map((workspace) => {
               const canSuspend =
@@ -734,67 +758,216 @@ export function OperatorPage() {
                     </p>
                     <small>
                       {workspace.monitorCount.toLocaleString()} monitors ·{' '}
-                      {workspace.rowsRead.toLocaleString()} rows read ·{' '}
-                      {workspace.rowsWritten.toLocaleString()} rows written ·{' '}
-                      {(workspace.storageBytes / 1_048_576).toLocaleString(undefined, {
-                        maximumFractionDigits: 2,
-                      })}{' '}
-                      MiB · last seen{' '}
+                      {formatWorkspaceDatabaseMetrics(workspace)} · last seen{' '}
                       {workspace.lastSeenAt
                         ? new Date(workspace.lastSeenAt).toLocaleString()
                         : 'never'}
                     </small>
+                    {workspace.limits ? (
+                      <p className="operator-workspace-limits">
+                        Limit: {workspace.limits.monitors.toLocaleString()} saved monitors · up to{' '}
+                        {workspace.limits.regions} regions per monitor · allowed:{' '}
+                        {workspaceRegionNames(workspace.limits.allowedRegionIds)}
+                      </p>
+                    ) : (
+                      <p className="operator-workspace-limits">
+                        Hosted limit editing is unavailable for this workspace's import or
+                        provisioning state.
+                      </p>
+                    )}
                   </div>
-                  {canSuspend && (
-                    <button
-                      className="button button--quiet"
-                      disabled={pendingWorkspaceId === workspace.id}
-                      onClick={() => {
-                        setPendingWorkspaceId(workspace.id);
-                        setControlError('');
-                        void api
-                          .setWorkspaceState(
-                            workspace.id,
-                            nextState,
-                            nextState === 'suspended' ? 'Operator action' : 'Operator restored',
-                          )
-                          .then(() => api.operatorSlots())
-                          .then((inventory) => {
-                            setSlots(inventory);
-                            setData((current) =>
-                              current
-                                ? {
-                                    ...current,
-                                    workspaces: current.workspaces?.map((item) =>
-                                      item.id === workspace.id
-                                        ? { ...item, state: nextState }
-                                        : item,
-                                    ),
-                                  }
-                                : current,
-                            );
-                          })
-                          .catch((reason) =>
-                            setControlError(
-                              reason instanceof Error
-                                ? reason.message
-                                : 'Could not update workspace',
-                            ),
-                          )
-                          .finally(() => setPendingWorkspaceId(null));
-                      }}
+                  <div className="operator-row__actions">
+                    <AppLink
+                      className="button button--secondary"
+                      href={`/operator/workspaces/${encodeURIComponent(workspace.id)}`}
                     >
-                      {workspace.state === 'active'
-                        ? 'Suspend'
-                        : workspace.state === 'suspended'
-                          ? 'Resume'
-                          : 'Activate'}
-                    </button>
-                  )}
+                      Edit workspace
+                    </AppLink>
+                    {canSuspend && (
+                      <>
+                        <button
+                          className="button button--quiet"
+                          disabled={workspaceActions[workspace.id]?.pending}
+                          onClick={() => {
+                            if (workspaceActions[workspace.id]?.pending) return;
+                            setWorkspaceActions((current) => ({
+                              ...current,
+                              [workspace.id]: { pending: true },
+                            }));
+                            void api
+                              .setWorkspaceState(
+                                workspace.id,
+                                nextState,
+                                nextState === 'suspended' ? 'Operator action' : 'Operator restored',
+                              )
+                              .then(() => api.operatorSlots())
+                              .then((inventory) => {
+                                setSlots(inventory);
+                                setData((current) =>
+                                  current
+                                    ? {
+                                        ...current,
+                                        workspaces: current.workspaces?.map((item) =>
+                                          item.id === workspace.id
+                                            ? { ...item, state: nextState }
+                                            : item,
+                                        ),
+                                      }
+                                    : current,
+                                );
+                              })
+                              .catch((reason) =>
+                                setWorkspaceActions((current) => ({
+                                  ...current,
+                                  [workspace.id]: {
+                                    pending: false,
+                                    error:
+                                      reason instanceof Error
+                                        ? reason.message
+                                        : 'Could not update workspace',
+                                  },
+                                })),
+                              )
+                              .finally(() =>
+                                setWorkspaceActions((current) => ({
+                                  ...current,
+                                  [workspace.id]: { ...current[workspace.id], pending: false },
+                                })),
+                              );
+                          }}
+                        >
+                          {workspace.state === 'active'
+                            ? 'Suspend'
+                            : workspace.state === 'suspended'
+                              ? 'Resume'
+                              : 'Activate'}
+                        </button>
+                        {workspaceActions[workspace.id]?.pending && (
+                          <p role="status">
+                            {nextState === 'suspended'
+                              ? 'Suspending'
+                              : workspace.state === 'suspended'
+                                ? 'Resuming'
+                                : 'Activating'}{' '}
+                            workspace…
+                          </p>
+                        )}
+                        {workspaceActions[workspace.id]?.error && (
+                          <p role="alert" className="field-error">
+                            {workspaceActions[workspace.id]?.error}
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
                 </article>
               );
             })}
           </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+export function OperatorWorkspaceEditPage({ workspaceId }: { workspaceId: string }) {
+  const session = useProductSession();
+  const [data, setData] = useState<Awaited<ReturnType<typeof api.operatorWorkspaces>> | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [reload, setReload] = useState(0);
+
+  useEffect(() => {
+    if (!session?.isOperator) return;
+    let active = true;
+    setLoading(true);
+    setError('');
+    void api
+      .operatorWorkspaces()
+      .then((result) => {
+        if (active) setData(result);
+      })
+      .catch((reason) => {
+        if (active)
+          setError(reason instanceof Error ? reason.message : 'Could not load workspace.');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [session?.isOperator, workspaceId, reload]);
+
+  if (!session?.isOperator) {
+    return (
+      <section className="state state--error" role="alert">
+        <p>Operator access required.</p>
+      </section>
+    );
+  }
+
+  const workspace = data?.workspaces?.find((item) => item.id === workspaceId);
+
+  return (
+    <section className="settings-page operator-workspace-edit">
+      <AppLink className="button button--quiet" href="/operator">
+        Back to workspaces
+      </AppLink>
+      <div className="page-head">
+        <div>
+          <p className="mono-label">Operator</p>
+          <h1>{workspace?.name ?? 'Edit workspace'}</h1>
+        </div>
+      </div>
+      {loading ? (
+        <p role="status">Loading workspace…</p>
+      ) : error ? (
+        <div className="state state--error" role="alert">
+          <p>Could not load workspace: {error}</p>
+          <button className="button button--quiet" onClick={() => setReload((value) => value + 1)}>
+            Retry
+          </button>
+        </div>
+      ) : !workspace ? (
+        <p role="alert">
+          Workspace not found. Return to the workspace list and choose another workspace.
+        </p>
+      ) : (
+        <>
+          <article className="settings-card operator-workspace-edit__summary">
+            <h2>Workspace</h2>
+            <p>{workspace.ownerHandle} · {workspace.ownerDid}</p>
+            <p>Status: {workspace.state} · {workspace.monitorCount.toLocaleString()} monitors</p>
+          </article>
+          {workspace.limits ? (
+            <article className="settings-card operator-workspace-edit__limits">
+              <h2>Limits</h2>
+              <WorkspaceLimitsEditor
+                workspace={workspace}
+                availableRegions={data?.availableRegions ?? []}
+                onSaved={(limits) =>
+                  setData((current) =>
+                    current
+                      ? {
+                          ...current,
+                          workspaces: current.workspaces.map((item) =>
+                            item.id === workspaceId ? { ...item, limits } : item,
+                          ),
+                        }
+                      : current,
+                  )
+                }
+              />
+              <AppLink className="button button--quiet" href="/operator">
+                Cancel and return to workspaces
+              </AppLink>
+            </article>
+          ) : (
+            <p>
+              Hosted limit editing is unavailable for this workspace's import or provisioning state.
+            </p>
+          )}
         </>
       )}
     </section>

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { hashPassword } from '@uptime/cloudflare';
 
+import { pruneExpiredSessions } from './auth.js';
 import {
   createTestContext,
   login,
@@ -8,8 +10,6 @@ import {
   TEST_PASSWORD,
   type TestContext,
 } from './testing/test-utils.js';
-import { hashPassword } from '@uptime/cloudflare';
-import { pruneExpiredSessions } from './auth.js';
 
 const json = (response: Response): Promise<any> => response.json();
 
@@ -21,8 +21,8 @@ async function context() {
   return ctx;
 }
 
-afterEach(() => {
-  for (const ctx of contexts.splice(0)) ctx.db.close();
+afterEach(async () => {
+  for (const ctx of contexts.splice(0)) await ctx.close();
 });
 
 describe('auth routes', () => {
@@ -104,19 +104,18 @@ describe('auth routes', () => {
 
   it('bounds opportunistic expired-session cleanup', async () => {
     const ctx = await context();
-    const insert = ctx.sqlite.prepare(
-      `INSERT INTO sessions (id, admin_id, token_hash, expires_at, created_at, last_seen_at)
-       VALUES (?, '00000000-0000-4000-8000-000000000001', ?, ?, ?, ?)`,
+    const timestamp = '2026-09-01T00:00:00.000Z';
+    await ctx.db.query(
+      `INSERT INTO ${ctx.db.table('sessions')} (id, admin_id, token_hash, expires_at, created_at, last_seen_at)
+       SELECT 'expired-' || i, '00000000-0000-4000-8000-000000000001', 'hash-' || i, $1, $1, $1
+       FROM generate_series(0, 249) AS i`,
+      [timestamp],
     );
-    for (let index = 0; index < 250; index += 1) {
-      const timestamp = '2026-09-01T00:00:00.000Z';
-      insert.run(`expired-${index}`, `hash-${index}`, timestamp, timestamp, timestamp);
-    }
     await pruneExpiredSessions(ctx.db, new Date('2026-09-16T12:00:00.000Z'));
-    const remaining = ctx.sqlite.prepare('SELECT count(*) AS count FROM sessions').get() as {
-      count: number;
-    };
-    expect(remaining.count).toBe(150);
+    const remaining = await ctx.db.query<{ count: string }>(
+      `SELECT count(*) AS count FROM ${ctx.db.table('sessions')}`,
+    );
+    expect(Number(remaining.rows[0]!.count)).toBe(150);
   });
 });
 
@@ -160,7 +159,7 @@ describe('health and regions', () => {
 describe('monitor listing', () => {
   it('lists monitors with regions, status and target checks', async () => {
     const ctx = await context();
-    seedMonitor(ctx.sqlite, { regions: ['us-east', 'eu-west'] });
+    await seedMonitor(ctx.db, { regions: ['us-east', 'eu-west'] });
     const { cookie } = await login(ctx.app);
     const response = await request(ctx.app, '/api/monitors', { cookie });
     expect(response.status).toBe(200);

@@ -83,6 +83,7 @@ export interface StatusPageRow {
   id: string;
   title: string;
   public_slug: string | null;
+  font_family: import('@uptime/contracts').StatusPageFontFamily;
   monitor_count?: number;
   created_at: string;
   updated_at: string;
