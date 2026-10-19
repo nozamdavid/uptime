@@ -1,11 +1,13 @@
 import { createPublicOnlyFetch } from '@uptime/api-worker/node-bindings';
+import { withPostgresRuntime } from '@uptime/cloudflare/postgres';
 
 import {
   loadSchedulerRuntime,
   safeConfigMessage,
   type SchedulerRuntime,
 } from './node-scheduler-env.js';
-import { createMinuteScheduler, createSchedulerTick } from './node-scheduler.js';
+import { createMinuteScheduler, createSchedulerTick, describeError } from './node-scheduler.js';
+import { releaseStaleLeases } from './tenant-dispatch.js';
 
 /** Single-line JSON events. Fields must never carry secrets or request data. */
 const log = (event: string, fields: Record<string, unknown> = {}) =>
@@ -26,7 +28,7 @@ globalThis.fetch = createPublicOnlyFetch();
 const { config, env } = runtime;
 const scheduler = createMinuteScheduler({
   enabled: config.enabled,
-  tick: createSchedulerTick(env, log),
+  tick: createSchedulerTick(env, log, { url: config.heartbeatUrl, file: config.heartbeatFile }),
   log,
 });
 
@@ -50,4 +52,12 @@ process.on('unhandledRejection', (reason) =>
 );
 
 log('scheduler_configured', { enabled: config.enabled, environment: env.ENVIRONMENT ?? null });
+if (config.enabled) {
+  try {
+    const count = await withPostgresRuntime(env, (control) => releaseStaleLeases(control));
+    log('stale_leases_released', { count });
+  } catch (error) {
+    log('stale_lease_release_failed', describeError(error));
+  }
+}
 scheduler.start();

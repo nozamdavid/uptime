@@ -186,7 +186,7 @@ describe('native coordinator persistence', () => {
       await tx.query(statements[0]!.sql, statements[0]!.values);
       pending = observe(other, 'latency-run-three', 'latency-native', thirdWindow, 120);
       let blocked = false;
-      for (let attempt = 0; attempt < 10; attempt += 1) {
+      for (let attempt = 0; attempt < 50; attempt += 1) {
         if (
           (
             await fixture.adminDb.query<{ count: number }>(
@@ -198,6 +198,7 @@ describe('native coordinator persistence', () => {
           blocked = true;
           break;
         }
+        await new Promise((resolve) => setTimeout(resolve, 50));
       }
       expect(blocked).toBe(true);
       for (const statement of statements.slice(1)) await tx.query(statement.sql, statement.values);
@@ -284,7 +285,7 @@ describe('native coordinator persistence', () => {
         await observe(tx, 'early-two', 'latency-early', secondWindow, 100);
         rebuilding = backfillLatencyDay(other, 'latency-early', '2026-10-05');
         let blocked = false;
-        for (let attempt = 0; attempt < 10; attempt += 1) {
+        for (let attempt = 0; attempt < 50; attempt += 1) {
           if (
             (
               await fixture.adminDb.query<{ count: number }>(
@@ -296,6 +297,7 @@ describe('native coordinator persistence', () => {
             blocked = true;
             break;
           }
+          await new Promise((resolve) => setTimeout(resolve, 50));
         }
         expect(
           blocked,

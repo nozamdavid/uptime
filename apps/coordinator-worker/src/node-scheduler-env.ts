@@ -9,6 +9,8 @@ export interface SchedulerConfig {
   /** False validates configuration and then stays idle. */
   enabled: boolean;
   shutdownGraceMs: number;
+  heartbeatUrl?: string;
+  heartbeatFile?: string;
 }
 
 export interface SchedulerRuntime {
@@ -20,6 +22,8 @@ export interface SchedulerRuntime {
 const adapterKeys = [
   'SCHEDULER_ENABLED',
   'SCHEDULER_SHUTDOWN_GRACE_SECONDS',
+  'SCHEDULER_HEARTBEAT_URL',
+  'SCHEDULER_HEARTBEAT_FILE',
   'POSTGRES_URL',
   'POSTGRES_RUNTIME_CATALOG_FILE',
   'R2_ACCESS_KEY_ID',
@@ -76,6 +80,17 @@ export function safeConfigMessage(error: unknown): string {
  */
 export function loadSchedulerRuntime(source: NodeJS.ProcessEnv): SchedulerRuntime {
   const enabled = boolean(source, 'SCHEDULER_ENABLED');
+  const heartbeatUrl = source.SCHEDULER_HEARTBEAT_URL;
+  if (heartbeatUrl !== undefined) {
+    try {
+      if (new URL(heartbeatUrl).protocol !== 'https:') throw new Error();
+    } catch {
+      throw new Error('SCHEDULER_HEARTBEAT_URL must be an https URL');
+    }
+  }
+  const heartbeatFile = source.SCHEDULER_HEARTBEAT_FILE;
+  if (heartbeatFile !== undefined && heartbeatFile.trim() === '')
+    throw new Error('SCHEDULER_HEARTBEAT_FILE must be a non-empty path');
 
   const connectionString = required(source, 'POSTGRES_URL');
   if (!/^postgres(?:ql)?:\/\//.test(connectionString))
@@ -116,6 +131,8 @@ export function loadSchedulerRuntime(source: NodeJS.ProcessEnv): SchedulerRuntim
     env: env as unknown as CoordinatorEnv,
     config: {
       enabled,
+      ...(heartbeatUrl === undefined ? {} : { heartbeatUrl }),
+      ...(heartbeatFile === undefined ? {} : { heartbeatFile }),
       shutdownGraceMs: integer(source, 'SCHEDULER_SHUTDOWN_GRACE_SECONDS', 25, 1, 120) * 1_000,
     },
   };

@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createMinuteScheduler, createTenantJobQueue, describeError } from './node-scheduler.js';
+import {
+  createMinuteScheduler,
+  createTenantJobQueue,
+  describeError,
+  sendHeartbeat,
+} from './node-scheduler.js';
 import type { TenantJob } from './tenant-dispatch.js';
 
 const job: TenantJob = {
@@ -20,6 +25,15 @@ function deferred() {
 }
 
 describe('tenant job queue', () => {
+  it('rejects when a tenant job times out', async () => {
+    const queue = createTenantJobQueue({
+      run: () => new Promise<void>(() => undefined),
+      timeoutMs: 20,
+      log: vi.fn(),
+    });
+    await expect(queue.send(job)).rejects.toThrow('Tenant job timed out');
+  });
+
   it('resolves only after the job has finished', async () => {
     const work = deferred();
     const run = vi.fn(() => work.promise);
@@ -78,6 +92,35 @@ describe('tenant job queue', () => {
     expect(describeError(Object.assign(new Error('x'), { code: 'bad code with spaces' }))).toEqual({
       name: 'Error',
     });
+  });
+});
+
+describe('scheduler heartbeat', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('pings the success and failure URLs', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response());
+    vi.stubGlobal('fetch', fetch);
+    const heartbeat = { url: 'https://heartbeat.example/check' };
+    await sendHeartbeat(heartbeat, true, vi.fn());
+    await sendHeartbeat(heartbeat, false, vi.fn());
+    expect(fetch).toHaveBeenNthCalledWith(1, heartbeat.url, {
+      method: 'GET',
+      signal: expect.any(AbortSignal),
+    });
+    expect(fetch).toHaveBeenNthCalledWith(2, heartbeat.url + '/fail', {
+      method: 'GET',
+      signal: expect.any(AbortSignal),
+    });
+  });
+
+  it('logs a rejected ping without throwing', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unreachable')));
+    const log = vi.fn();
+    await expect(
+      sendHeartbeat({ url: 'https://heartbeat.example/check' }, true, log),
+    ).resolves.toBeUndefined();
+    expect(log).toHaveBeenCalledWith('heartbeat_ping_failed', { name: 'Error' });
   });
 });
 

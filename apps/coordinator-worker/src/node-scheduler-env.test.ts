@@ -23,6 +23,16 @@ const valid = {
 } satisfies NodeJS.ProcessEnv;
 
 describe('scheduler configuration', () => {
+  it('requires HTTPS for a configured heartbeat URL', () => {
+    expect(() =>
+      loadSchedulerRuntime({ ...valid, SCHEDULER_HEARTBEAT_URL: 'http://example.com' }),
+    ).toThrow('SCHEDULER_HEARTBEAT_URL must be an https URL');
+    expect(
+      loadSchedulerRuntime({ ...valid, SCHEDULER_HEARTBEAT_URL: 'https://example.com' }).config
+        .heartbeatUrl,
+    ).toBe('https://example.com');
+  });
+
   it('loads a complete environment without inventing budget evidence', () => {
     const { config, env } = loadSchedulerRuntime(valid);
     expect(config).toEqual({ enabled: false, shutdownGraceMs: 25_000 });

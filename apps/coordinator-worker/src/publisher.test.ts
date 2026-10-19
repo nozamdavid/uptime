@@ -22,7 +22,6 @@ import {
   seedRound,
   useTenantDatabase,
 } from './testing-postgres.js';
-import type { MonitorRefreshParams } from './on-demand-monitor.js';
 import { runReportJob } from './report-job.js';
 
 const now = new Date('2026-09-20T12:00:00.000Z');
@@ -177,10 +176,8 @@ describe('scheduled status-page publication', () => {
       `INSERT INTO ${db.table('status_page_monitors')} (status_page_id, group_id, monitor_id, position) VALUES ('second', 'second-group', $1, 0)`,
       [ids[1]!],
     );
-    const create = vi.fn(async (_options: { id: string; params: MonitorRefreshParams }) => ({}));
-    const workflow = { create } as unknown as Workflow<MonitorRefreshParams>;
     const reports = new FakeR2();
-    const settings = { ...config(db, reports), monitorRefresh: workflow };
+    const settings = config(db, reports);
     const publicationTime = new Date(now.getTime() + 6 * 60_000);
     expect(await publishDueReports(settings, publicationTime, log)).toMatchObject({
       published: 3,
@@ -192,51 +189,32 @@ describe('scheduled status-page publication', () => {
     expect(members[3]!.days.at(-1)!.uptimePercentage).toBeLessThan(100);
     expect(members[7]).toMatchObject({ status: 'unknown', recoveryStatus: null });
     expect(members[6]).toMatchObject({ status: 'down', recoveryStatus: 'down' });
-    expect(create).not.toHaveBeenCalled();
     expect(await count(db, 'monitor_report_refresh')).toBe(0);
     expect([...reports.store.keys()].some((key) => key.startsWith('public/monitor-refresh/'))).toBe(
       false,
     );
     await publishDueReports(settings, new Date(publicationTime.getTime() + 60_000), log);
-    expect(create).not.toHaveBeenCalled();
   });
 
   it('does not start incident work when the conditional cohort commit fails', async () => {
     const { db } = makeDatabase();
     await seedPage(db, 2);
-    const create = vi.fn();
     const reports = new FakeR2();
     const put = reports.put.bind(reports);
     vi.spyOn(reports, 'put').mockImplementation((key, value, options) =>
       key === reportCohortPointerKey ? Promise.resolve(null) : put(key, value, options),
     );
-    await expect(
-      publishDueReports(
-        {
-          ...config(db, reports),
-          monitorRefresh: { create } as unknown as Workflow<MonitorRefreshParams>,
-        },
-        now,
-        log,
-      ),
-    ).rejects.toThrow('Report cohort pointer changed');
-    expect(create).not.toHaveBeenCalled();
+    await expect(publishDueReports(config(db, reports), now, log)).rejects.toThrow(
+      'Report cohort pointer changed',
+    );
     expect(await count(db, 'monitor_report_refresh')).toBe(0);
   });
 
   it('publishes without contacting the retired monitor Workflow service', async () => {
     const { db } = makeDatabase();
     await seedPage(db, 2);
-    const create = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('Workflow unavailable'))
-      .mockResolvedValue({});
-    const get = vi.fn().mockRejectedValue(new Error('instance absent'));
     const reports = new FakeR2();
-    const settings = {
-      ...config(db, reports),
-      monitorRefresh: { create, get } as unknown as Workflow<MonitorRefreshParams>,
-    };
+    const settings = config(db, reports);
     expect(await publishDueReports(settings, now, log)).toMatchObject({
       published: 2,
       failed: 0,
@@ -245,8 +223,6 @@ describe('scheduled status-page publication', () => {
       published: 2,
       failed: 0,
     });
-    expect(create).not.toHaveBeenCalled();
-    expect(get).not.toHaveBeenCalled();
     expect(await count(db, 'monitor_report_refresh')).toBe(0);
   });
 
@@ -273,17 +249,13 @@ describe('scheduled status-page publication', () => {
       db,
       `INSERT INTO ${db.table('jobs')} (name, lease_token, lease_until) VALUES ('reports', 'budget-lease', '2099-01-01T00:00:00.000Z')`,
     );
-    const create = vi.fn(async () => ({}));
     const reports = new FakeR2();
-    const result = await runReportJob(
-      {
-        ...config(db, reports),
-        monitorRefresh: { create } as unknown as Workflow<MonitorRefreshParams>,
-      },
-      { log, now: () => now, jobLeaseToken: 'budget-lease' },
-    );
+    const result = await runReportJob(config(db, reports), {
+      log,
+      now: () => now,
+      jobLeaseToken: 'budget-lease',
+    });
     expect(result).toMatchObject({ published: 37, failed: 0 });
-    expect(create).not.toHaveBeenCalled();
     expect(
       Object.values(result.queryWork).reduce((total, work) => total + work.statements, 0),
     ).toBeLessThanOrEqual(100);

@@ -115,6 +115,7 @@ describe('coordinator PostgreSQL report snapshots', () => {
       },
     ]);
     expect(s.latency.aggregateStats).toEqual({
+      p50Ms: 120,
       averageResponseMs: 120,
       maximumResponseMs: 120,
       maximumResponseRegionId: 'us-east',

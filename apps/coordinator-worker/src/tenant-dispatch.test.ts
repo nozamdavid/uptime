@@ -5,6 +5,7 @@ import {
   dispatchDueTenants,
   enforceFreePolicy,
   recordWorkspaceUsage,
+  releaseStaleLeases,
   runTenantJob,
   type TenantDispatchEnv,
 } from './tenant-dispatch.js';
@@ -103,6 +104,25 @@ async function outbox(workspaceId: string, at = timestamp) {
 }
 
 describe('hosted tenant policy and metering', () => {
+  it('clears stale execution leases at startup', async () => {
+    const workspaceId = '00000000-0000-4000-8000-000000000010';
+    await runtime.assign(0, workspaceId, 'did:plc:stale-lease');
+    const db = runtime.control.db;
+    await db.query(
+      `UPDATE ${db.table('workspaces')} SET execution_lease_token = $1, execution_lease_until = $2 WHERE id = $3`,
+      [crypto.randomUUID(), '2099-01-01T00:00:00.000Z', workspaceId],
+    );
+    expect(await releaseStaleLeases(db)).toBe(1);
+    expect(
+      await first(
+        db,
+        `SELECT execution_lease_token, execution_lease_until FROM ${db.table('workspaces')} WHERE id = $1`,
+        [workspaceId],
+      ),
+    ).toEqual({ execution_lease_token: null, execution_lease_until: null });
+    expect(await releaseStaleLeases(db)).toBe(0);
+  });
+
   it('does not run a scheduled tick when the saved policy names a removed region', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(now);

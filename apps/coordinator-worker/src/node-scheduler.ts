@@ -1,3 +1,5 @@
+import { writeFile } from 'node:fs/promises';
+
 import { withPostgresRuntime } from '@uptime/cloudflare/postgres';
 
 import type { CoordinatorEnv } from './env.js';
@@ -11,6 +13,7 @@ import {
 export type SchedulerLog = (event: string, fields?: Record<string, unknown>) => void;
 
 const minuteMs = 60_000;
+export const tenantJobTimeoutMs = 5 * 60_000;
 
 /** Messages thrown by this scheduler and `runTenantJob`; they carry no data. */
 const knownFailureReasons: ReadonlySet<string> = new Set([
@@ -19,6 +22,7 @@ const knownFailureReasons: ReadonlySet<string> = new Set([
   'Tenant execution lease was replaced',
   'Scheduler is stopping',
   'Invalid tenant job',
+  'Tenant job timed out',
 ]);
 
 /**
@@ -51,6 +55,7 @@ export function createTenantJobQueue(options: {
   run: (job: TenantJob) => Promise<void>;
   /** Returns false once shutdown has begun, so unstarted jobs stay pending. */
   accepting?: () => boolean;
+  timeoutMs?: number;
   log: SchedulerLog;
 }): TenantJobQueue {
   return {
@@ -63,8 +68,17 @@ export function createTenantJobQueue(options: {
         ...fields,
         maintenanceOnly: job.maintenanceOnly === true,
       });
+      let timer: NodeJS.Timeout | undefined;
       try {
-        await options.run(job);
+        await Promise.race([
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('Tenant job timed out')),
+              options.timeoutMs ?? tenantJobTimeoutMs,
+            );
+          }),
+          options.run(job),
+        ]);
       } catch (error) {
         options.log('tenant_job_failed', {
           ...fields,
@@ -72,10 +86,36 @@ export function createTenantJobQueue(options: {
           ...describeError(error),
         });
         throw error;
+      } finally {
+        clearTimeout(timer);
       }
       options.log('tenant_job_completed', { ...fields, durationMs: Date.now() - startedAt });
     },
   };
+}
+
+export async function sendHeartbeat(
+  heartbeat: { url?: string | undefined; file?: string | undefined } | undefined,
+  ok: boolean,
+  log: SchedulerLog,
+): Promise<void> {
+  if (heartbeat?.file) {
+    try {
+      await writeFile(heartbeat.file, new Date().toISOString());
+    } catch (error) {
+      log('heartbeat_file_failed', describeError(error));
+    }
+  }
+  if (heartbeat?.url) {
+    try {
+      await fetch(ok ? heartbeat.url : heartbeat.url + '/fail', {
+        method: 'GET',
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (error) {
+      log('heartbeat_ping_failed', describeError(error));
+    }
+  }
 }
 
 /**
@@ -86,6 +126,7 @@ export function createTenantJobQueue(options: {
 export function createSchedulerTick(
   env: CoordinatorEnv,
   log: SchedulerLog,
+  heartbeat?: { url?: string | undefined; file?: string | undefined },
 ): (minute: Date, signal: AbortSignal) => Promise<void> {
   return async (minute, signal) => {
     const queue = createTenantJobQueue({
@@ -96,14 +137,21 @@ export function createSchedulerTick(
           runTenantJob({ ...env, controlDb: control, catalog }, job),
         ),
     });
-    const result = await withPostgresRuntime(env, (control, catalog) =>
-      dispatchDueTenants(
-        { ...env, controlDb: control, catalog, TENANT_JOBS: queue as unknown as Queue<TenantJob> },
-        // The minute stamp keeps each workspace's next_dispatch_at on the boundary despite timer jitter.
-        minute,
-      ),
-    );
+    let result;
+    try {
+      result = await withPostgresRuntime(env, (control, catalog) =>
+        dispatchDueTenants(
+          { ...env, controlDb: control, catalog, TENANT_JOBS: queue },
+          // The minute stamp keeps each workspace's next_dispatch_at on the boundary despite timer jitter.
+          minute,
+        ),
+      );
+    } catch (error) {
+      await sendHeartbeat({ url: heartbeat?.url }, false, log);
+      throw error;
+    }
     log('scheduler_dispatch', result);
+    await sendHeartbeat(heartbeat, result.failed === 0, log);
   };
 }
 

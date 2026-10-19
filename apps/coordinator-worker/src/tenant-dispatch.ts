@@ -19,7 +19,17 @@ import {
 } from '@uptime/cloudflare/postgres';
 import { runCoordinatorTick } from './coordinator.js';
 import { parseCoordinatorEnv, type CoordinatorConfig, type CoordinatorEnv } from './env.js';
-import { runReportSchedule } from './index.js';
+import { runReportSchedule } from './schedule.js';
+
+export const tenantLeaseMs = 6 * 60_000;
+
+export async function releaseStaleLeases(control: Database): Promise<number> {
+  const result = await control.query(
+    `UPDATE ${control.table('workspaces')} SET execution_lease_token = NULL, execution_lease_until = NULL
+     WHERE execution_lease_token IS NOT NULL`,
+  );
+  return result.rowCount ?? 0;
+}
 
 export interface TenantJob {
   readonly workspaceId: string;
@@ -227,17 +237,25 @@ export async function dispatchDueTenants(env: TenantDispatchEnv, now = new Date(
      WHERE w.state = 'deleting' ORDER BY w.updated_at LIMIT 5`,
   );
   for (const workspace of deleting) {
-    const source = env.catalog.sources.find(
-      (entry) => entry.sourceDatabaseId === workspace.source_database_id,
-    );
-    if (workspace.source_database_id && !source)
-      throw new Error('Deleting workspace source is outside the trusted catalog');
-    if (source && source.profile !== 'full-hosted') continue;
-    await purgeWorkspaceData(
-      { ...env, controlDb: control, catalog: env.catalog.sources },
-      workspace.id,
-      now,
-    );
+    try {
+      const source = env.catalog.sources.find(
+        (entry) => entry.sourceDatabaseId === workspace.source_database_id,
+      );
+      if (workspace.source_database_id && !source)
+        throw new Error('Deleting workspace source is outside the trusted catalog');
+      if (source && source.profile !== 'full-hosted') continue;
+      await purgeWorkspaceData(
+        { ...env, controlDb: control, catalog: env.catalog.sources },
+        workspace.id,
+        now,
+      );
+    } catch (error) {
+      console.error({
+        event: 'workspace_purge_failed',
+        workspaceId: workspace.id,
+        name: error instanceof Error ? error.name : 'unknown',
+      });
+    }
   }
   const budgetOff = budgetEnforcementDisabled(env);
   const allowed = await budgetAllowsWork(control, now, configuredBudgetUsage(env), budgetOff);
@@ -327,7 +345,7 @@ export async function runTenantJob(
      WHERE id = $4 AND state = 'active' AND (execution_lease_until IS NULL OR execution_lease_until <= $3) RETURNING id`,
     [
       token,
-      new Date(now.getTime() + 16 * 60_000).toISOString(),
+      new Date(now.getTime() + tenantLeaseMs).toISOString(),
       now.toISOString(),
       job.workspaceId,
     ],
@@ -368,11 +386,19 @@ export async function runTenantJob(
       ? null
       : await resolveEffectiveEntitlements(control, job.workspaceId, parsed.enabledRegionIds);
     const config = effective ? enforceFreePolicy(parsed, effective.entitlements) : parsed;
-    await db.query(
-      `DELETE FROM ${db.table('monitor_daily_uptime')} WHERE (monitor_id, day) IN
-       (SELECT monitor_id, day FROM ${db.table('monitor_daily_uptime')} WHERE day < $1 LIMIT 100)`,
-      [new Date(now.getTime() - 30 * 86_400_000).toISOString().slice(0, 10)],
-    );
+    try {
+      await db.query(
+        `DELETE FROM ${db.table('monitor_daily_uptime')} WHERE (monitor_id, day) IN
+         (SELECT monitor_id, day FROM ${db.table('monitor_daily_uptime')} WHERE day < $1 LIMIT 100)`,
+        [new Date(now.getTime() - 90 * 86_400_000).toISOString().slice(0, 10)],
+      );
+    } catch (error) {
+      console.error({
+        event: 'daily_uptime_cleanup_failed',
+        workspaceId: job.workspaceId,
+        name: error instanceof Error ? error.name : 'unknown',
+      });
+    }
     if (effective) {
       await syncTierEntitlements(db, effective);
       const state = await tierSchedulingState(db);
@@ -382,9 +408,17 @@ export async function runTenantJob(
     await runCoordinatorTick(
       config,
       { fetch: globalThis.fetch.bind(globalThis), log: console },
-      { maintenanceOnly },
+      { maintenanceOnly, publishReports: false },
     );
-    await runReportSchedule(config, now, maintenanceOnly || config.reportScheduleDisabled);
+    try {
+      await runReportSchedule(config, now, maintenanceOnly || config.reportScheduleDisabled);
+    } catch (error) {
+      console.error({
+        event: 'report_schedule_failed',
+        workspaceId: job.workspaceId,
+        name: error instanceof Error ? error.name : 'unknown',
+      });
+    }
     await db.transaction(async (tx) => {
       // Qualified control SQL on the pinned tenant transaction avoids queueing behind itself.
       const owner = await pgFirst<{ execution_lease_token: string }>(
