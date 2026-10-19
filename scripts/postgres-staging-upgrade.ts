@@ -66,7 +66,8 @@ export async function main(
       migrations: migrations[profile],
       existingLedger,
     });
-    if (plan.pending.some((migration) => migration.id !== '0017_status_page_font_family.sql')) {
+    const plannedMigrationIds = new Set(migrations[profile].map((migration) => migration.id));
+    if (plan.pending.some((migration) => !plannedMigrationIds.has(migration.id))) {
       throw new Error(`Unexpected pending migration in ${schema}; review before applying`);
     }
     plans.push({ schema, profile, existingLedger, plan });

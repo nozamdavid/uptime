@@ -4,9 +4,24 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: uptime-test
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -19,18 +34,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: pnpm typecheck
+      - name: Set up Postgres test database
+        run: |
+          grep -v uptime_staging deploy/postgresql/vps/init-uptime-test.sql | docker exec -i "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "ALTER ROLE uptime_test_admin PASSWORD 'uptimetestadmin'"
       - run: pnpm test
+        env:
+          POSTGRES_TEST_ADMIN_URL: postgresql://uptime_test_admin:uptimetestadmin@localhost:5432/uptime_migration_test
       - run: pnpm generate:wrangler -- --check
-      - run: node --test deploy/cloudflare/hosted/gateway.test.mjs
       - run: pnpm --filter @uptime/web build
-      - run: pnpm --filter @uptime/api-worker exec wrangler deploy --config ../../deploy/cloudflare/hosted/api.wrangler.toml --dry-run
-      - run: pnpm --filter @uptime/coordinator-worker exec wrangler deploy --config ../../deploy/cloudflare/hosted/coordinator.wrangler.toml --dry-run
       - run: scripts/tests/deploy-workers.sh
-      - run: scripts/tests/deploy-app-workers.sh
-      - run: scripts/tests/provision-tenant-pool.sh
-      - run: scripts/tests/deploy-hosted-workers.sh
-      - run: scripts/tests/bootstrap-operator-workspace.sh
-      - run: node --test deploy/cloudflare/staging/pages/gateway.test.mjs
       - run: scripts/tests/reset-admin.sh
       - name: Validate Docker Compose
         env:

@@ -1,9 +1,7 @@
 # Staging VPS Canonical Deployment Guide & Runbook (Host 217.217.227.164)
 
 > [!IMPORTANT]
-> **STAGING ONLY**: This runbook applies exclusively to the **staging** environment.
-> Production operates 100% on Cloudflare Workers, Cloudflare D1 databases, R2 storage, and Pages. Production has **not** migrated to the VPS.
-> For production deployment instructions, see [deploy/cloudflare/README.md](../../cloudflare/README.md) and [docs/deployment/free-hosted.md](../../../docs/deployment/free-hosted.md).
+> This runbook covers the **staging** environment. Production runs the same stack (Node API, scheduler, PostgreSQL 18) on its own VPS; see [docs/deployment/free-hosted.md](../../../docs/deployment/free-hosted.md). Cloudflare only hosts the regional probe Workers; see [deploy/cloudflare/README.md](../../cloudflare/README.md).
 
 This document is the canonical operational guide for running the Uptime staging API and scheduler on Debian 12 VPS `217.217.227.164` (alias `ssh vps`), co-located with PostgreSQL 18.
 
@@ -18,17 +16,13 @@ graph TD
   end
 
   subgraph Cloudflare Edge
-    Pages["Cloudflare Pages (uptime-staging.pages.dev)"]
-    Gateway["Pages Edge Gateway (_worker.js)"]
-    ProxyWorker["VPC Proxy Worker (uptime-staging-oauth-api)"]
-    VPCBinding["VPC Service Binding (STAGING_NODE_API)"]
-    TunnelEdge["Cloudflare Tunnel Edge"]
     Probes["Regional Probe Fleet (uptime-staging-hosted-probe-*)"]
     R2["R2 Reports Bucket (uptime-staging-reports)"]
   end
 
   subgraph VPS 217.217.227.164
-    Cloudflared["cloudflared (Tunnel 73f04432-...)"]
+    RProxy["Reverse proxy
+    serves built web UI, forwards /api and /oauth"]
     NodeAPI["Node 24 API (Docker: uptime-staging-node-api)
     127.0.0.1:3001"]
     NodeScheduler["Node 24 Scheduler (Docker: uptime-staging-node-scheduler)
@@ -39,13 +33,8 @@ graph TD
     0.0.0.0: 80, 443, 21820, 51820 (UNTOUCHED)"]
   end
 
-  Browser -->|HTTPS| Pages
-  Pages --> Gateway
-  Gateway -->|Service Binding| ProxyWorker
-  ProxyWorker -->|STAGING_NODE_API.fetch()| VPCBinding
-  VPCBinding -->|Encrypted QUIC| TunnelEdge
-  TunnelEdge --> Cloudflared
-  Cloudflared -->|HTTP Loopback| NodeAPI
+  Browser -->|HTTPS| RProxy
+  RProxy -->|HTTP Loopback| NodeAPI
   NodeAPI -->|Local Loopback TCP| PG
   NodeScheduler -->|Local Loopback TCP| PG
   NodeScheduler -->|Signed HTTPS Batches| Probes
@@ -60,26 +49,78 @@ graph TD
   - `uptime_staging_worker`: Runtime least-privilege role used by API and scheduler.
 - **Node 24 API (`uptime-staging-node-api`)**:
   - Pre-bundled ESM service listening on `127.0.0.1:3001` via `network_mode: host`.
-  - Zero public ports exposed. Never expose the authenticated Node API directly on the public IP.
+  - Never expose the authenticated Node API directly on the public IP; reach it through the reverse proxy.
 - **Node 24 Scheduler (`uptime-staging-node-scheduler`)**:
   - Single minute dispatcher running via `network_mode: host`. Opens no listening ports.
   - Dispatches due workspaces serially at minute boundaries by querying PostgreSQL `uptime_staging`.
   - Sends signed batches (`PROBE_SIGNING_SECRET`) over outbound HTTPS to Cloudflare regional probe Workers.
-- **Fenced Cloudflare Coordinator**:
-  - The legacy Cloudflare coordinator Worker (`uptime-staging-hosted-coordinator`) is retired and fenced with [drain-entry.ts](../../cloudflare/staging/hosted-coordinator/drain-entry.ts), empty crons `crons = []`, and queue consumers deleted.
-  - **CRITICAL**: Never run both schedulers simultaneously.
+  - **CRITICAL**: Never run two schedulers simultaneously.
 - **Strict Pangolin Isolation**:
   - Host ports `80`, `443` (TCP/UDP), `21820`, `51820` (UDP) are strictly owned by Pangolin (`/opt/pangolin`). Do not touch or modify Pangolin containers or ports.
-- **Cloudflare Edge Ingress**:
-  - Cloudflare Pages serves the frontend UI and routes `/api/*` and `/oauth/*` via worker service binding to `uptime-staging-oauth-api`.
-  - `uptime-staging-oauth-api` (configured in [deploy/cloudflare/staging/vps-api-proxy/wrangler.toml](../../cloudflare/staging/vps-api-proxy/wrangler.toml)) forwards requests through Cloudflare Tunnel `73f04432-509a-4aed-87fb-b94f67bbe41d` to VPS loopback `127.0.0.1:3001`.
-- **R2 Storage & Custom Domains**:
-  - R2 bucket `uptime-staging-reports` remains active. The scheduler writes reports using the S3-compatible API; the Node API reads reports. Custom status domain routing remains on Cloudflare.
+- **R2 Storage**:
+  - R2 bucket `uptime-staging-reports` remains active. The scheduler writes reports using the S3-compatible API; the Node API reads reports.
 - **Staging Budget Policy**:
   - Staging intentionally runs with `BUDGET_ENFORCEMENT_DISABLED=true` in [docker-compose.yml](docker-compose.yml) on both API and scheduler containers.
-  - Manual fleet and workspace pauses, quotas, plan limits, and capacity checks remain strictly enforced. Production defaults remain fully enforced. Cloudflare analytics read tokens remain a deferred TODO.
+  - Manual fleet and workspace pauses, quotas, plan limits, and capacity checks remain strictly enforced. Production defaults remain fully enforced.
 
----
+### Web UI and Security Headers
+The VPS reverse proxy serves the web UI built with `pnpm --filter @uptime/web build` (output in `apps/web/dist`) and forwards `/api`, `/oauth`, and `/reports` to the API on `127.0.0.1:3001`. It must set these response headers on every response:
+
+```
+X-Content-Type-Options: nosniff
+Referrer-Policy: strict-origin-when-cross-origin
+X-Frame-Options: DENY
+Permissions-Policy: geolocation=(), microphone=(), camera=()
+Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'
+```
+
+Cache rules for static files:
+
+| Path | Cache-Control |
+| --- | --- |
+| `/assets/*` | `public, max-age=31536000, immutable` |
+| `/` and `/index.html` | `public, max-age=0, must-revalidate` |
+| `/favicon.ico` | `public, max-age=86400` |
+
+Unknown non-API paths fall back to `/index.html` so client-side routes load.
+
+Staging runs this as an nginx container ([web/docker-compose.yml](web/docker-compose.yml), [web/nginx.conf.template](web/nginx.conf.template)) in `/opt/uptime-staging-web`. It binds `172.18.0.1:8081` (the `pangolin_frontend` bridge gateway) and adds the gateway token on API paths. Pangolin's Traefik routes `uptime.noz.am` to it through a router in `/opt/pangolin/config/traefik/dynamic_config.yml`, and `uptime.noz.am` is an unproxied `A` record to the VPS.
+
+## Launch hardening (2026-10-18)
+
+### Database timeouts
+The `uptime_staging_worker` role has database-specific settings in `uptime_staging`: `statement_timeout = '45s'` and `idle_in_transaction_session_timeout = '120s'`. PostgreSQL cancels runaway runtime queries so one slow query cannot hold a tenant job and block checks. The server-wide `statement_timeout = 0` in [uptime-staging.conf](../../postgresql/vps/uptime-staging.conf) remains for the owner and migration role.
+
+### Backups and restore
+The installed `/usr/local/bin/uptime-staging-backup.sh` runs nightly at 03:00 UTC through `uptime-staging-backup.service` and `.timer` as `postgres`. It writes dated dumps to `/var/backups/postgresql/uptime_staging-<UTC stamp>.dump`, verifies each with `pg_restore --list`, writes `uptime_staging-globals-<stamp>.sql` with `pg_dumpall --globals-only` (roles and role settings), points `uptime_staging-latest.dump` at the newest dump, and deletes dated files older than 14 days. The restore script and units are tracked in [deploy/postgresql/vps](../../postgresql/vps/uptime-staging-backup.sh).
+
+After a successful dump, `ExecStartPost` runs [uptime-staging-offsite.sh](../../postgresql/vps/uptime-staging-offsite.sh) as root. It archives the existing `api.env`, `scheduler.env`, `gateway-token`, `catalog.json`, and `docker-compose.yml` from `/opt/uptime-staging`, plus `/opt/uptime-staging-web/nginx.conf.template`, into `/var/backups/uptime-staging-config/config-<UTC stamp>.tar.gz`. This directory is mode `0700`; local config archives are kept for 14 days. rclone copies database dumps, globals SQL, and config archives from the last 48 hours to `gdrive-crypt:postgres` and `gdrive-crypt:config`, with 30-day remote retention. The root-owned `gdrive-crypt` remote encrypts contents and names over `gdrive:uptime-backups` on Google Drive. The operator holds the crypt passwords outside the VPS; those passwords are required to read the backups, including after loss of the VPS.
+
+To retrieve a dump from Drive on a host with `gdrive-crypt` configured, run `rclone copy gdrive-crypt:postgres/<file> /tmp/restore/`. Check it with `pg_restore --list /tmp/restore/<file>`, then follow the scratch restore below using `/tmp/restore/<file>` as the dump path. Retrieve the corresponding globals SQL from the same remote when roles and role settings are needed.
+
+A restore into scratch database `uptime_restore_test` was tested on 2026-10-18 with:
+
+```bash
+pg_restore --no-owner --no-privileges -j 2 -d uptime_restore_test /var/backups/postgresql/uptime_staging-latest.dump
+```
+
+Row counts matched the live database at dump time.
+
+### Web edge
+The nginx configuration in [web/nginx.conf.template](web/nginx.conf.template) clears client-supplied `CF-Connecting-IP`; this host is not behind Cloudflare, so the API uses the rightmost `X-Forwarded-For` entry set by Traefik. nginx sends `Strict-Transport-Security: max-age=31536000`. Its config is mounted as a single file. After re-rendering `nginx.conf`, restart the container from `/opt/uptime-staging-web` with `docker compose restart uptime-staging-web`; `nginx -s reload` does not see a file replaced by `mv`.
+
+### API rate limits and health
+Shared global request budgets (`login:global`, `callback:global`, `public:global`, `private:global`) were removed. Per-client budgets remain: login 5 per 10 minutes per IP, callback 30 per minute per IP, public 60 per minute per IP, and signed-in requests 600 per minute per user. `http://127.0.0.1:3001/health` returns 200 only when the control database responds; otherwise it returns 503.
+
+### Billing
+Staging `api.env` has `BILLING_MODE=disabled`. The live product catalog is revision 2 with `billingMode: "disabled"`, saved 2026-10-18 with reason `Launch copy; disable mock billing`. Checkout and the mock plan switcher are off.
+
+### Scheduler health
+The scheduler container sets `SCHEDULER_HEARTBEAT_FILE=/tmp/uptime-scheduler-heartbeat`; its Docker healthcheck fails when the file is older than 3 minutes. Optional `SCHEDULER_HEARTBEAT_URL` must use HTTPS and pings an external dead-man's-switch service after each dispatch pass, with `/fail` appended when any job failed. Tenant jobs time out after 5 minutes, workspace leases last 6 minutes, and stale leases are cleared when the scheduler starts. Report publishing failures are logged as `report_schedule_failed` and do not fail the tenant job.
+
+### Open items
+- Configure `SCHEDULER_HEARTBEAT_URL` for an external dead-man's-switch service.
+
 
 ## 2. Directory Layout & Credentials Management
 
@@ -106,20 +147,19 @@ graph TD
   - `/opt/uptime-staging/api.env`: Permissions must be `0600`. Contains `POSTGRES_URL`, `API_GATEWAY_TOKEN`, `SESSION_SECRET`, `CREDENTIAL_ENCRYPTION_SECRET`, `OAUTH_STORAGE_SECRET`.
   - `/opt/uptime-staging/scheduler.env`: Permissions must be `0600`. Contains `POSTGRES_URL`, `PROBE_SIGNING_SECRET`, `CREDENTIAL_ENCRYPTION_SECRET`, and R2 credentials.
   - `~/.config/uptime-postgresql/staging-worker-password`: Operator file storing the `uptime_staging_worker` password.
-  - `deploy/cloudflare/staging/hosted.secrets.env`: Local operator secrets file (mode `0600`).
 - Safe transfer: Transfer secrets directly via SSH stdin or scp into mode `0600` destination files.
 
 ---
 
 ## 3. Database Schema, Bootstrap & Boundaries
 
-Staging starts from native PostgreSQL 18 with **zero D1 data import**. Operator `@noz.am` (`did:plc:lmkzmvv6sdxntwtyxpg7fqqq`) is seeded directly.
+Staging starts from native PostgreSQL 18 with no data import. Operator `@noz.am` (`did:plc:lmkzmvv6sdxntwtyxpg7fqqq`) is seeded directly.
 
 ### Bootstrap & Migration Tooling
 The initial schema and operator seed come from [`scripts/postgres-staging-bootstrap.ts`](../../../scripts/postgres-staging-bootstrap.ts). It is an operator-only initial bootstrap. It is not a general migration command for a populated staging database:
 
 - It refuses to seed when `control.users` holds any user other than the operator.
-- It expects exactly 9 `control` and 17 `full-hosted` migrations and 13 hosted catalog sources, so a new migration needs a reviewed change to the script first.
+- It expects exactly 9 `control` migrations, the `full-hosted` migration count listed by `plan.ts` (currently 18), and 13 hosted catalog sources.
 - It connects to the VPS through `ssh vps` and `psql`, so run it from an operator workstation.
 
 To run the script in read-only verification mode from the repository root, use `@uptime/api`'s declared `tsx` runner:
@@ -175,8 +215,8 @@ Replace `<OPERATOR_WORKSPACE_UUID>` with the operator workspace ID. The schedule
 For rollback, restore the recorded API and scheduler image tags in Compose and recreate those services with the same command above. Keep the added column and ledger entry in place: older bundles ignore them. A database restore would discard writes since the backup and needs a separate rehearsed recovery decision; do not drop or restore the live database as a routine code rollback.
 
 ### Backup & Restore
-- Tracked configuration: `deploy/postgresql/vps/uptime-staging-backup.timer` (daily 03:00 UTC) triggers `uptime-staging-backup.service`, a oneshot `pg_dump -Fc` that replaces `/var/backups/postgresql/uptime_staging-latest.dump`.
-- The repository does not prove the units are installed or that a dump exists. Check on the VPS before relying on it:
+- Tracked configuration: [backup script](../../postgresql/vps/uptime-staging-backup.sh), [service](../../postgresql/vps/uptime-staging-backup.service), and [timer](../../postgresql/vps/uptime-staging-backup.timer). The installed timer runs daily at 03:00 UTC and maintains the latest symlink plus dated database and globals files as described in [Launch hardening](#launch-hardening-2026-10-18).
+- Check the installed timer and available files on the VPS:
   ```bash
   ssh vps "systemctl list-timers uptime-staging-backup.timer; systemctl status uptime-staging-backup.service; ls -l /var/backups/postgresql/"
   ```
@@ -246,7 +286,7 @@ ssh vps "cd /opt/uptime-staging-scheduler-artifact && docker build -t uptime-sta
 Keep the previous tag and image ID in your deploy notes.
 
 ### Step 4: Check Configuration
-Confirm `/opt/uptime-staging/scheduler.env` exists (mode `0600`) with `SCHEDULER_ENABLED=true`, and that the Cloudflare coordinator cron is removed (section 6). Never run two schedulers.
+Confirm `/opt/uptime-staging/scheduler.env` exists (mode `0600`) with `SCHEDULER_ENABLED=true`. Never run two schedulers.
 
 ### Step 5: Point Compose at the New Tag and Recreate the Scheduler
 Edit only the `image:` line of `uptime-staging-node-scheduler` in `/opt/uptime-staging/docker-compose.yml`, then:
@@ -257,31 +297,9 @@ The API container is not touched. This works on its own, with no prior API deplo
 
 ---
 
-## 6. Cloudflare Worker Deployments (Proxy & Fence)
+## 6. Probe Worker Deployments
 
-Staging uses Cloudflare Workers for the VPC ingress proxy and the fenced coordinator.
-
-### VPC API Proxy Worker
-Deploy the proxy Worker under `uptime-staging-oauth-api`:
-```bash
-pnpm --filter @uptime/api-worker exec wrangler deploy \
-  --config ../../deploy/cloudflare/staging/vps-api-proxy/wrangler.toml
-```
-Or via script:
-```bash
-scripts/deploy-hosted-workers.sh --environment staging --target api
-```
-
-### Fenced Coordinator
-Deploy the coordinator fence (preserves `drain-entry.ts`, empty crons, no queue consumer):
-```bash
-pnpm --filter @uptime/coordinator-worker exec wrangler deploy \
-  --config ../../deploy/cloudflare/staging/hosted-coordinator/wrangler.toml
-```
-Or via script:
-```bash
-scripts/deploy-hosted-workers.sh --environment staging --target coordinator
-```
+Staging probes run on Cloudflare Workers. Deploy them with `scripts/deploy-workers.sh --environment staging`; see the [staging probe guide](../../cloudflare/staging/README.md).
 
 ---
 
@@ -304,7 +322,7 @@ curl -i http://127.0.0.1:3001/health
 curl -i http://127.0.0.1:3001/api/interest/session
 # Expected: HTTP/1.1 403 Forbidden
 ```
-Then load the staging site through Cloudflare Pages in an existing authenticated browser session and confirm the app loads and API calls succeed. Do not put the gateway token on a command line.
+Then load the staging site through the reverse proxy in an existing authenticated browser session and confirm the app loads and API calls succeed. Do not put the gateway token on a command line.
 
 ### 3. Verify Scheduler Execution
 ```bash
@@ -322,7 +340,7 @@ A sent outbox row or a completed tick does not prove monitoring works. Confirm n
 ### Troubleshooting Common Issues
 - `invalid_configuration`: The scheduler exits 1 on startup if an environment variable is missing or malformed. Inspect logs to see the named variable.
 - `report_pending` / `503`: The Node API report route queries R2. If credentials or report pointer objects are missing, `report_pending` is returned.
-- `imported_unavailable`: Requests for legacy imported workspaces return 503 on Node API; imported routes continue to resolve through legacy Cloudflare Workers.
+- `imported_unavailable`: Requests for legacy imported workspaces return 503 on the Node API.
 - Budget bypass verification:
   ```bash
   ssh vps "docker exec uptime-staging-node-api printenv BUDGET_ENFORCEMENT_DISABLED"
@@ -341,14 +359,8 @@ ssh vps "cd /opt/uptime-staging && docker compose up -d --no-build --no-deps upt
 ```
 To pause dispatch without rolling back, run `docker compose stop uptime-staging-node-scheduler`, or set `SCHEDULER_ENABLED=false` in `scheduler.env` and recreate the container.
 
-**Returning to Cloudflare is a separate migration, not a rollback step.** The fenced coordinator's `scheduled` handler in `drain-entry.ts` is a no-op, so re-adding the cron or queue consumer does nothing on its own. It needs a reviewed runtime and queue config, producers, drain, and leases paused, and verified proof that the VPS scheduler is stopped and nothing overlaps before any Cloudflare scheduler starts.
-
 ### API Rollback
-1. Roll back the VPS API by setting the `uptime-staging-node-api` `image:` line back to the recorded previous tag, then:
-   ```bash
-   ssh vps "cd /opt/uptime-staging && docker compose up -d --no-build --no-deps uptime-staging-node-api"
-   ```
-2. For the Cloudflare proxy Worker, redeploy the current proxy config (section 6), or use `wrangler rollback` only to a version known to be a VPS proxy build. Rolling back to an arbitrary older `uptime-staging-oauth-api` version can restore the retired Worker runtime and its cron.
-   ```bash
-   pnpm --filter @uptime/api-worker exec wrangler rollback <KNOWN_PROXY_VERSION_ID> --name uptime-staging-oauth-api
-   ```
+Roll back the VPS API by setting the `uptime-staging-node-api` `image:` line back to the recorded previous tag, then:
+```bash
+ssh vps "cd /opt/uptime-staging && docker compose up -d --no-build --no-deps uptime-staging-node-api"
+```

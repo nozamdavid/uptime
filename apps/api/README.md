@@ -7,7 +7,7 @@ and standalone PostgreSQL deployments.
 > [!NOTE]
 > **API Implementation Scope**:
 > - `@uptime/api` (`apps/api`): The Fastify-based standalone application.
-> - `@uptime/api-worker` (`apps/api-worker`): The unified multi-tenant API codebase used in hosted deployments. In production, it deploys to Cloudflare Workers with D1. In staging, it compiles to a Node 24 ESM bundle (`pnpm --filter @uptime/api-worker build:node`) running in Docker container `uptime-staging-node-api` on VPS `217.217.227.164` backed by PostgreSQL 18.
+> - `@uptime/api-worker` (`apps/api-worker`): The unified multi-tenant API codebase used in hosted deployments. It runs on Node 24 and PostgreSQL 18 only, compiled to an ESM bundle (`pnpm --filter @uptime/api-worker build:node`). In staging it runs in Docker container `uptime-staging-node-api` on VPS `217.217.227.164`.
 > - For staging VPS operations, see the canonical [VPS staging runbook](../../deploy/vps/staging/README.md).
 
 ## Configuration

@@ -1,0 +1,19 @@
+# nginx for the web UI and API forwarding. Host networking so it reaches the API on
+# 127.0.0.1:3001; it binds only the pangolin_frontend bridge gateway (172.18.0.1:8081).
+# Layout on the VPS (/opt/uptime-staging-web):
+#   dist/        built web UI (apps/web/dist, built with VITE_REPORTS_BASE_URL=/reports)
+#   nginx.conf   nginx.conf.template with __GATEWAY_TOKEN__ replaced (chmod 0600)
+services:
+  uptime-staging-web:
+    container_name: uptime-staging-web
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./dist:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    logging:
+      driver: 'json-file'
+      options:
+        max-size: '20m'
+        max-file: '5'

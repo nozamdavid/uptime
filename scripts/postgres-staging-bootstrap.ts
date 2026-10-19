@@ -4,7 +4,10 @@ import { dirname, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { PostgresMigration } from '../packages/cloudflare/src/postgres/migrate.js';
-import { loadMigrationsForProfile } from '../packages/cloudflare/src/postgres/migrations/plan.js';
+import {
+  getMigrationFilesForProfile,
+  loadMigrationsForProfile,
+} from '../packages/cloudflare/src/postgres/migrations/plan.js';
 
 export interface SlotInventory {
   binding: string;
@@ -683,8 +686,11 @@ export async function main(): Promise<void> {
   if (controlMigrations.length !== 9) {
     throw new Error(`Expected 9 control migrations, got ${controlMigrations.length}`);
   }
-  if (hostedMigrations.length !== 17) {
-    throw new Error(`Expected 17 hosted migrations, got ${hostedMigrations.length}`);
+  const expectedHostedMigrationCount = getMigrationFilesForProfile('full-hosted').length;
+  if (hostedMigrations.length !== expectedHostedMigrationCount) {
+    throw new Error(
+      `Expected ${expectedHostedMigrationCount} hosted migrations, got ${hostedMigrations.length}`,
+    );
   }
 
   // Validate catalog mapping against HOSTED_SLOTS

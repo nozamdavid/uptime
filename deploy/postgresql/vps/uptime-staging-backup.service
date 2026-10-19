@@ -8,8 +8,9 @@ Type=oneshot
 User=postgres
 Group=postgres
 UMask=0077
-ExecStart=/usr/bin/pg_dump -d uptime_staging -Fc -f /var/backups/postgresql/uptime_staging.dump.tmp
-ExecStartPost=/bin/mv /var/backups/postgresql/uptime_staging.dump.tmp /var/backups/postgresql/uptime_staging-latest.dump
+# Installed from deploy/postgresql/vps/uptime-staging-backup.sh.
+ExecStart=/usr/local/bin/uptime-staging-backup.sh
+ExecStartPost=+/usr/local/bin/uptime-staging-offsite.sh
 
 [Install]
 WantedBy=multi-user.target

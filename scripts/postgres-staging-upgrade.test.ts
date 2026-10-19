@@ -21,12 +21,11 @@ function psql(sql: string): string {
 
 describe('staging font upgrade on disposable PostgreSQL 18', () => {
   it('preserves populated rows and ledger, applies defaults, and reruns without DDL', async () => {
-    const hosted = (await loadMigrationsForProfile('full-hosted')).filter(
-      (m) => m.id !== '0017_status_page_font_family.sql',
-    );
-    const legacy = (await loadMigrationsForProfile('legacy-staging')).filter(
-      (m) => m.id !== '0017_status_page_font_family.sql',
-    );
+    const hostedPlan = await loadMigrationsForProfile('full-hosted');
+    const legacyPlan = await loadMigrationsForProfile('legacy-staging');
+    const pendingMigrationId = hostedPlan.at(-1)!.id;
+    const hosted = hostedPlan.slice(0, -1);
+    const legacy = legacyPlan.filter((m) => m.id !== pendingMigrationId);
     psql(
       'CREATE ROLE uptime_staging_owner; GRANT CREATE ON DATABASE postgres TO uptime_staging_owner;',
     );
@@ -59,7 +58,7 @@ INSERT INTO "${schema}"."_postgres_migrations" VALUES ${ledgerRows};`);
         ).toContain('Keep me | josefin-sans');
         expect(
           psql(
-            `SELECT count(*) FROM "${schema}"."_postgres_migrations" WHERE id = '0017_status_page_font_family.sql';`,
+            `SELECT count(*) FROM "${schema}"."_postgres_migrations" WHERE id = '${pendingMigrationId}';`,
           ),
         ).toMatch(/\b1\b/);
       }

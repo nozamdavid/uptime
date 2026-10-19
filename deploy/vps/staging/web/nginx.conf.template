@@ -1,0 +1,78 @@
+# Serves the web UI and forwards API paths to the Node API on 127.0.0.1:3001.
+# Render with the gateway token substituted for __GATEWAY_TOKEN__ (see docker-compose.yml).
+# Listens on the Docker bridge gateway so Traefik (Pangolin) can reach it; nothing is public.
+map $http_x_forwarded_for $client_ip {
+  "~(?<ip>[^, ]+)$" $ip;
+  default $remote_addr;
+}
+
+limit_req_zone $client_ip zone=api:10m rate=20r/s;
+limit_conn_zone $client_ip zone=conn:10m;
+
+server {
+  listen 172.18.0.1:8081;
+  server_name _;
+
+  root /usr/share/nginx/html;
+  index index.html;
+
+  gzip on;
+  gzip_types text/css application/javascript application/json image/svg+xml;
+  gzip_min_length 1024;
+
+  # Each location below repeats these, since a location's add_header replaces the server's.
+  add_header Strict-Transport-Security "max-age=31536000" always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+  add_header X-Frame-Options "DENY" always;
+  add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+  add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'" always;
+
+  location ~ ^/(api|reports|oauth)(/|$) {
+    limit_req zone=api burst=60 nodelay;
+    limit_conn conn 30;
+    limit_req_status 429;
+    limit_conn_status 429;
+    proxy_pass http://127.0.0.1:3001;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    # Traefik sets X-Forwarded-For; the API uses its rightmost entry as the client.
+    proxy_set_header X-Forwarded-For $http_x_forwarded_for;
+    # This host is not behind Cloudflare, so a client-sent CF-Connecting-IP is forged.
+    proxy_set_header CF-Connecting-IP "";
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header Accept-Encoding "";
+    proxy_set_header x-uptime-gateway-token "__GATEWAY_TOKEN__";
+    proxy_read_timeout 75s;
+    # The API sets its own security headers; keep ours off its responses.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+  }
+
+  location /assets/ {
+    add_header Cache-Control "public, max-age=31536000, immutable" always;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'" always;
+    try_files $uri =404;
+  }
+
+  location = /favicon.ico {
+    add_header Cache-Control "public, max-age=86400" always;
+    try_files $uri =404;
+  }
+
+  location / {
+    add_header Cache-Control "public, max-age=0, must-revalidate" always;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'" always;
+    try_files $uri /index.html;
+  }
+}
