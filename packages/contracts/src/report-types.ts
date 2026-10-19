@@ -32,6 +32,8 @@ export interface AggregateLatencyPoint {
 
 export interface AggregateLatencyStats {
   averageResponseMs: number | null;
+  /** Median of successful responses across all regions; absent in older payloads. */
+  p50Ms?: number | null;
   maximumResponseMs: number | null;
   maximumResponseRegionId: RegionId | null;
   minimumResponseMs: number | null;
@@ -58,6 +60,16 @@ export interface UptimeDay {
   date: string;
   uptimePercentage: number | null;
   averageResponseMs: number | null;
+}
+
+export interface MonitorMetrics {
+  days: UptimeDay[];
+  uptime24h: number | null;
+  p50Ms: number | null;
+}
+
+export interface MonitorMetricsResponse {
+  metrics: Record<string, MonitorMetrics>;
 }
 
 export interface MonitorUptimeData {

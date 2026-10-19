@@ -5,6 +5,7 @@ import {
   type MonitorSummary,
   type Observation,
   type MonitorUptimeData,
+  type MonitorMetricsResponse,
   type StatusPageReportSnapshot,
   type StatusPageReportSnapshotMonitor,
   endpointEvidenceSchema,
@@ -445,18 +446,21 @@ async function observedMissingDays(
        SELECT (elem->>'monitorId')::text AS monitor_id, (elem->>'day')::text AS day
        FROM json_array_elements($1::json) AS elem
      )
-     SELECT missing.monitor_id, missing.day AS day,
-       COUNT(*)::integer AS received_count,
-       COALESCE(SUM(CASE WHEN o.success = 1 THEN 1 ELSE 0 END), 0)::integer AS success_count,
-       AVG(CASE WHEN o.success = 1 AND o.response_ms IS NOT NULL THEN o.response_ms END)::double precision AS average_response_ms
+     SELECT missing.monitor_id, missing.day AS day, agg.received_count,
+       agg.success_count, agg.average_response_ms
      FROM missing
-     JOIN ${db.table('check_runs')} cr
-       ON cr.monitor_id = missing.monitor_id
-       AND cr.window_started_at >= missing.day || 'T00:00:00.000Z'
-       AND cr.window_started_at < (missing.day::date + 1)::text || 'T00:00:00.000Z'
-       AND cr.status IN ('complete', 'partial')
-     JOIN ${db.table('observations')} o ON o.check_run_id = cr.id
-     GROUP BY missing.monitor_id, missing.day`,
+     CROSS JOIN LATERAL (
+       SELECT COUNT(*)::integer AS received_count,
+         COALESCE(SUM(CASE WHEN o.success = 1 THEN 1 ELSE 0 END), 0)::integer AS success_count,
+         AVG(CASE WHEN o.success = 1 AND o.response_ms IS NOT NULL THEN o.response_ms END)::double precision AS average_response_ms
+       FROM ${db.table('check_runs')} cr
+       JOIN ${db.table('observations')} o ON o.check_run_id = cr.id
+       WHERE cr.monitor_id = missing.monitor_id
+         AND cr.window_started_at >= missing.day || 'T00:00:00.000Z'
+         AND cr.window_started_at < (missing.day::date + 1)::text || 'T00:00:00.000Z'
+         AND cr.status IN ('complete', 'partial')
+       HAVING COUNT(*) > 0
+     ) agg`,
     [JSON.stringify(missing)],
   );
   return new Map(rows.map((row) => [`${row.monitor_id}:${row.day}`, row]));
@@ -866,9 +870,44 @@ export async function publicStatusPagePayload(
 // Latency
 // ---------------------------------------------------------------------------
 
-/**
- * Build the bounded latency payload for a requested range.
- */
+/** Bulk list metrics using the same uptime and latency calculations as monitor details. */
+export async function monitorMetricsPayload(
+  db: Database,
+  monitorIds: readonly string[],
+  currentTime: Date,
+): Promise<MonitorMetricsResponse> {
+  if (monitorIds.length === 0) return { metrics: {} };
+  const uptime = await monitorUptimeDetailsBulk(db, monitorIds, currentTime);
+  const rows = await pgAll<LatencyObservationRow & { monitor_id: string }>(
+    db,
+    `SELECT monitor_id, region_id, success, started_at, id,
+       COALESCE(response_ms, CASE WHEN error_code = 'timeout' THEN total_ms END) AS value
+     FROM ${db.table('observations')}
+     WHERE monitor_id = ANY($1::text[]) AND started_at >= $2`,
+    [monitorIds, new Date(currentTime.getTime() - ranges['24h']).toISOString()],
+  );
+  const rowsByMonitor = new Map<string, LatencyObservationRow[]>();
+  for (const row of rows) {
+    const observations = rowsByMonitor.get(row.monitor_id) ?? [];
+    observations.push(row);
+    rowsByMonitor.set(row.monitor_id, observations);
+  }
+  return {
+    metrics: Object.fromEntries(monitorIds.map((id) => {
+      // Empty configured regions only omits zero-sample stats; totals are identical.
+      const latency = calculateLatency(rowsByMonitor.get(id) ?? [], [], '24h');
+      const samples = latency.stats.reduce((sum, stat) => sum + stat.sampleCount, 0);
+      const successes = latency.stats.reduce((sum, stat) => sum + stat.successCount, 0);
+      return [id, {
+        days: uptime.get(id)!.uptime.days.slice(-7),
+        uptime24h: samples === 0 ? null : (successes / samples) * 100,
+        p50Ms: latency.aggregateStats.p50Ms,
+      }];
+    })),
+  };
+}
+
+/** Build the bounded latency payload for a requested range. */
 export async function latencyPayload(
   db: Database,
   monitorId: string,

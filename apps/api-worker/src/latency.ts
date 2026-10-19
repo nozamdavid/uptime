@@ -184,11 +184,20 @@ export function createLatencyAccumulator(range: RangeKey) {
           p99Ms: percentile(sorted, 99),
         };
       });
+    // Merge every region's response histogram so the median is exact across regions.
+    const merged = new Map<number, number>();
+    for (const stat of perRegion.values()) {
+      for (const [value, frequency] of stat.values) {
+        merged.set(value, (merged.get(value) ?? 0) + frequency);
+      }
+    }
+    const mergedSorted = [...merged].sort(([left], [right]) => left - right);
     return {
       points,
       stats,
       aggregatePoints,
       aggregateStats: {
+        p50Ms: percentile(mergedSorted, 50),
         averageResponseMs: average(
           [...perRegion.values()]
             .map((stat) => {

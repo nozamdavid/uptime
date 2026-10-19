@@ -52,6 +52,7 @@ import {
   monitorSelect,
   monitorSummary,
   monitorSummaries,
+  monitorMetricsPayload,
   monitorUptimePayload,
   nextBoundary,
   notificationServicesExist,
@@ -686,6 +687,16 @@ export function createApiRouter(deps: AppDependencies = {}): Router<AppEnv> {
       throw new HttpErrorLike(404, 'not_found', 'One or more monitors were not found');
     }
     return json({ updatedCount: updated.length });
+  });
+
+  router.add('GET', '/api/monitors/metrics', async (c) => {
+    await requireAdmin(c);
+    z.object({ range: z.literal('24h').default('24h') }).parse(queryObject(c.url));
+    const monitors = await pgAll<{ id: string }>(
+      c.env.db,
+      `SELECT id FROM ${c.env.db.table('monitors')}`,
+    );
+    return json(await monitorMetricsPayload(c.env.db, monitors.map(({ id }) => id), now()));
   });
 
   router.add('GET', '/api/monitors/:id', async (c) => {

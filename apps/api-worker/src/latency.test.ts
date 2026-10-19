@@ -64,6 +64,8 @@ describe('shared latency calculation', () => {
       },
     ]);
     expect(latency.aggregateStats).toEqual({
+      // Median of 10, 30 and 100 across all regions.
+      p50Ms: 30,
       averageResponseMs: 60,
       maximumResponseMs: 100,
       maximumResponseRegionId: 'us-west',

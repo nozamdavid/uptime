@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import type { MonitorMetricsResponse } from '@uptime/contracts';
 import type { monitorSummary, latencyPayload, monitorUptimePayload } from './queries.js';
 
 import {
@@ -6,6 +7,7 @@ import {
   login,
   request,
   seedObservation,
+  seedMonitor,
   seedRun,
   type TestContext,
 } from './testing/test-utils.js';
@@ -30,6 +32,48 @@ afterEach(async () => {
 });
 
 describe('native postgres api integration', () => {
+  it('returns isolated bulk metrics for every monitor with seven days of history', async () => {
+    const ctx = await context();
+    const { cookie } = await login(ctx.app);
+    const first = await seedMonitor(ctx.db);
+    const second = await seedMonitor(ctx.db, { id: crypto.randomUUID() });
+    const empty = await seedMonitor(ctx.db, { id: crypto.randomUUID() });
+    for (const [monitorId, responseMs, success] of [
+      [first, 55, true],
+      [second, 900, false],
+    ] as const) {
+      const checkRunId = await seedRun(ctx.db, {
+        monitorId,
+        status: 'complete',
+        windowStartedAt: '2026-10-05T11:00:00.000Z',
+      });
+      await seedObservation(ctx.db, {
+        checkRunId, monitorId, responseMs, success,
+        startedAt: '2026-10-05T11:00:05.000Z',
+      });
+    }
+    const response = await request(ctx.app, '/api/monitors/metrics?range=24h', { cookie });
+    expect(response.status).toBe(200);
+    const { metrics } = await json<MonitorMetricsResponse>(response);
+    expect(Object.keys(metrics).sort()).toEqual([first, second, empty].sort());
+    expect(metrics[first]).toMatchObject({ uptime24h: 100, p50Ms: 55 });
+    expect(metrics[second]).toMatchObject({ uptime24h: 0, p50Ms: 900 });
+    expect(metrics[empty]).toMatchObject({ uptime24h: null, p50Ms: null });
+    for (const monitorId of [first, second, empty]) {
+      expect(metrics[monitorId]!.days).toHaveLength(7);
+      const uptimeResponse = await request(ctx.app, `/api/monitors/${monitorId}/uptime`, { cookie });
+      const { uptime } = await json<{ uptime: Awaited<ReturnType<typeof monitorUptimePayload>> }>(uptimeResponse);
+      expect(metrics[monitorId]!.days).toEqual(uptime.days.slice(-7));
+      const latencyResponse = await request(ctx.app, `/api/monitors/${monitorId}/latency?range=24h`, { cookie });
+      const latency = await json<Awaited<ReturnType<typeof latencyPayload>>>(latencyResponse);
+      expect(metrics[monitorId]!.p50Ms).toBe(latency.aggregateStats.p50Ms);
+    }
+    expect(metrics[first]!.days.at(-1)!.uptimePercentage).toBe(100);
+    expect(metrics[second]!.days.at(-1)!.uptimePercentage).toBe(0);
+    const invalid = await request(ctx.app, '/api/monitors/metrics?range=7d', { cookie });
+    expect(invalid.status).toBe(400);
+  });
+
   it('executes monitor lifecycle, observations, and rollup status against PostgreSQL', async () => {
     const ctx = await context();
     const { cookie } = await login(ctx.app);
