@@ -1,5 +1,5 @@
 /**
- * AES-GCM credential encryption for provider configuration stored in D1.
+ * AES-GCM credential encryption for provider configuration stored in PostgreSQL.
  *
  * The encryption key is derived from `CREDENTIAL_ENCRYPTION_SECRET`, a Worker
  * secret that never reaches the database. Stored values are an opaque envelope

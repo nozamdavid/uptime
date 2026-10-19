@@ -67,11 +67,17 @@ export function isForbiddenIpv4Literal(host: string): boolean {
  * True when a value is a forbidden IPv6 literal: unspecified, loopback,
  * unique-local (fc00::/7), link-local (fe80::/10), multicast (ff00::/8),
  * discard (100::/64), documentation (2001:db8::/32), benchmarking
- * (2001:2::/48), or IPv4-mapped (rejected in any form). False for anything else.
+ * (2001:2::/48), NAT64, 6to4, Teredo, IPv4-compatible, or IPv4-mapped
+ * (rejected in any form). False for anything else.
  */
 export function isForbiddenIpv6Literal(host: string): boolean {
-  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase();
+  let normalized = host.replace(/^\[|\]$/g, '').toLowerCase();
   if (!normalized.includes(':')) return false;
+  try {
+    normalized = new URL(`http://[${normalized}]/`).hostname.slice(1, -1);
+  } catch {
+    return false;
+  }
   return (
     normalized === '::' ||
     normalized === '::1' ||
@@ -82,6 +88,11 @@ export function isForbiddenIpv6Literal(host: string): boolean {
     normalized.startsWith('2001:db8') ||
     normalized.startsWith('2001:2:') ||
     normalized.startsWith('100:') ||
+    /^64:ff9b::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})?)?$/.test(normalized) ||
+    normalized.startsWith('64:ff9b:1:') ||
+    normalized.startsWith('2002:') ||
+    /^2001:(?:0:|:)/.test(normalized) ||
+    /^::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})?)?$/.test(normalized) ||
     normalized.startsWith('::ffff:')
   );
 }

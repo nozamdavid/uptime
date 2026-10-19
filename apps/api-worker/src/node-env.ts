@@ -136,12 +136,13 @@ export function loadNodeRuntime(source: NodeJS.ProcessEnv): NodeRuntime {
     if (isIP(entry) === 0) throw new Error('API_TRUSTED_PROXIES must list IP addresses');
 
   const gatewayToken = source.API_GATEWAY_TOKEN ? source.API_GATEWAY_TOKEN : null;
+  if ((environment === 'staging' || environment === 'production') && gatewayToken === null)
+    throw new Error('API_GATEWAY_TOKEN is required');
   if (gatewayToken !== null && gatewayToken.length < 32)
     throw new Error('API_GATEWAY_TOKEN must be at least 32 characters');
 
   const env: CloudflareEnv = {
     ...passthrough(source),
-    DB: undefined as never,
     POSTGRES: { connectionString },
     POSTGRES_RUNTIME_CATALOG: catalog,
   };

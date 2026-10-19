@@ -270,6 +270,17 @@ async function probe(
           nextTarget = validateTarget(
             new URL(response.headers.get('location')!, target).toString(),
           );
+          if (nextTarget.protocol !== 'https:' || (nextTarget.port && nextTarget.port !== '443'))
+            throw new Error('redirect_blocked');
+        } catch (error) {
+          return failure(request, 'invalid_response', String(error), startedAt, env, {
+            responseMs,
+            totalMs: Date.now() - started,
+            placement: runtime.placement ?? null,
+            colo: runtime.colo ?? null,
+            finalUrl: target.toString(),
+            redirectCount: redirects,
+          });
         } finally {
           await response.body?.cancel().catch(() => undefined);
         }

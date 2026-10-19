@@ -16,7 +16,12 @@ const json = (response: Response): Promise<any> => response.json();
 const now = () => new Date('2026-09-16T12:00:00.000Z');
 
 async function context() {
-  const ctx = await createTestContext({ now });
+  // The monitor request cache is process-wide and keyed by secret, schema and monitor id, so
+  // each test needs its own secret to avoid reading another test's cached payload.
+  const ctx = await createTestContext({
+    now,
+    config: { sessionSecret: `${crypto.randomUUID()}${crypto.randomUUID()}` },
+  });
   contexts.push(ctx);
   return ctx;
 }

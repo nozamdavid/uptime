@@ -1,5 +1,6 @@
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { gunzipSync } from 'node:zlib';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -66,6 +67,42 @@ function send(
     req.end();
   });
 }
+
+describe('node adapter compression', () => {
+  const payload = JSON.stringify({ rows: 'x'.repeat(5000) });
+  const handler = async () =>
+    new Response(payload, { headers: { 'content-type': 'application/json' } });
+
+  it('gzips JSON bodies for clients that accept gzip', async () => {
+    const { port } = await start({ handler });
+    const response = await new Promise<{ encoding: unknown; body: string }>((resolve, reject) => {
+      httpRequest(
+        { port, host: '127.0.0.1', path: '/x', headers: { 'accept-encoding': 'gzip' } },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () =>
+            resolve({
+              encoding: res.headers['content-encoding'],
+              body: gunzipSync(Buffer.concat(chunks)).toString(),
+            }),
+          );
+        },
+      )
+        .on('error', reject)
+        .end();
+    });
+    expect(response.encoding).toBe('gzip');
+    expect(response.body).toBe(payload);
+  });
+
+  it('leaves bodies uncompressed without an accept-encoding header', async () => {
+    const { port } = await start({ handler });
+    const response = await send(port, { path: '/x' });
+    expect(response.headers['content-encoding']).toBeUndefined();
+    expect(response.body).toBe(payload);
+  });
+});
 
 describe('node adapter', () => {
   it('builds the URL from the public origin and ignores Host', async () => {

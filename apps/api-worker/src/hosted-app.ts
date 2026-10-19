@@ -67,7 +67,6 @@ import {
 import { assertPublicHttpUrl, UrlPolicyError } from './security.js';
 import { interestList, interestReturnPath, interestSignup, recordInterest } from './interest.js';
 import { operatorHealth } from './operator-health.js';
-import { getCloudflareUsageReport } from './cloudflare-usage.js';
 import {
   acceptWorkspaceInvitation,
   createWorkspaceInvitation,
@@ -86,7 +85,7 @@ export const hostedLimits = {
   statusPages: 1,
   notificationServices: 3,
   rawRetentionDays: 1,
-  dailyRetentionDays: 30,
+  dailyRetentionDays: 90,
 };
 type Role = 'owner' | 'maintainer' | 'viewer';
 interface Workspace {
@@ -257,7 +256,15 @@ export async function hostedRuntimeFetch(
       if (path === '/oauth/client-metadata.json' && request.method === 'GET')
         response = auth.metadata();
       else if (path === '/oauth/jwks.json' && request.method === 'GET') response = auth.jwks();
-      else if (path === '/health' && request.method === 'GET') response = json({ status: 'ok' });
+      else if (path === '/health' && request.method === 'GET') {
+        // Healthy only when the control database answers.
+        try {
+          await control.query('SELECT 1');
+          response = json({ status: 'ok' });
+        } catch {
+          response = json({ status: 'database_unavailable' }, { status: 503 });
+        }
+      }
       else if (path === '/api/plans' && request.method === 'GET') {
         await consumeBudget(control, `plans:${clientAddress(request)}`, 60, 60);
         const catalog = await readProductCatalog(control, config.enabledRegionIds);
@@ -273,7 +280,6 @@ export async function hostedRuntimeFetch(
         });
       } else if (path.startsWith('/api/public/custom-status/')) {
         await consumeBudget(control, `custom-status:${clientAddress(request)}`, 60, 60);
-        await consumeBudget(control, 'public:global', 20_000, 86_400);
         response = await handleCustomDomainPublic(request, env, async (target) => {
           const reportUrl = new URL(
             `/reports/public/status-pages/${encodeURIComponent(target.publicSlug)}.json`,
@@ -298,20 +304,18 @@ export async function hostedRuntimeFetch(
           return snapshot;
         });
       } else if (path === '/api/auth/atproto/start' && request.method === 'POST') {
+        // Per-client budgets only: a shared global cap lets one client lock everyone out.
         await consumeBudget(control, `login:${clientAddress(request)}`, 5, 600);
-        await consumeBudget(control, 'login:global', 1000, 86_400);
         response = await auth.start(request);
         context.waitUntil(auth.prune().catch(() => undefined));
       } else if (path === '/api/auth/atproto/callback' && request.method === 'GET') {
         await consumeBudget(control, `callback:${clientAddress(request)}`, 30, 60);
-        await consumeBudget(control, 'callback:global', 1000, 86_400);
         response = await auth.callback(request);
         context.waitUntil(auth.prune().catch(() => undefined));
       } else if (path === '/api/auth/logout' && request.method === 'POST')
         response = await auth.logout(request);
       else if (path === '/api/interest/session' && request.method === 'GET') {
         await consumeBudget(control, `interest:${clientAddress(request)}`, 60, 60);
-        await consumeBudget(control, 'public:global', 20_000, 86_400);
         const principal = await auth.principal(request);
         response = json({
           signup: principal ? await interestSignup(control, principal.did) : null,
@@ -358,8 +362,11 @@ export async function hostedRuntimeFetch(
         if (!['GET', 'HEAD'].includes(request.method))
           throw new HttpErrorLike(405, 'method_not_allowed', 'Read only endpoint');
         await consumeBudget(control, `public:${clientAddress(request)}`, 60, 60);
-        await consumeBudget(control, 'public:global', 20_000, 86_400);
-        const workspaceId = uuid.parse(url.searchParams.get('workspace'));
+        const requestedWorkspace = url.searchParams.get('workspace');
+        const workspaceId =
+          requestedWorkspace === null
+            ? await defaultPublicWorkspaceId(env, control)
+            : uuid.parse(requestedWorkspace);
         const db = await activeDatabase(env, workspaceId);
         const imported = await isImportedWorkspace(env, workspaceId);
         if (!imported) await enforceHostedRequest(request, db, undefined, config.enabledRegionIds);
@@ -372,7 +379,9 @@ export async function hostedRuntimeFetch(
       } else {
         const principal = await auth.principal(request);
         if (!principal) throw new HttpErrorLike(401, 'unauthorized', 'Sign in with AT Protocol');
-        await consumeBudget(control, `user:${principal.did}`, 120, 60);
+        // The monitor list loads one detail request per visible row, so large
+        // workspaces need well over 100 requests a minute while browsing.
+        await consumeBudget(control, `user:${principal.did}`, 600, 60);
         const user = await first<{ state: string }>(
           control,
           `SELECT state FROM ${control.table('users')} WHERE did = $1`,
@@ -544,7 +553,6 @@ export async function hostedRuntimeFetch(
               throw new HttpErrorLike(404, 'not_found', 'Use AT Protocol login');
             if (mutation(request) && selected.role === 'viewer')
               throw new HttpErrorLike(403, 'forbidden', 'Viewer access is read only');
-            await consumeBudget(control, 'private:global', 20_000, 86_400);
             const db = await activeDatabase(env, selected.id);
             const notificationTest = path.match(/^\/api\/notification-services\/([^/]+)\/test$/);
             if (notificationTest && request.method === 'POST') {
@@ -752,6 +760,22 @@ function reservedSlotNames(env: CloudflareEnv): readonly string[] {
 function isReservedSlot(env: CloudflareEnv, bindingName: string | undefined) {
   return reservedSlotNames(env).includes(bindingName ?? '');
 }
+// Public links without a `workspace` parameter resolve to the oldest active operator workspace.
+async function defaultPublicWorkspaceId(env: CloudflareEnv, control: Database) {
+  const dids = operatorDids(env);
+  const workspace = dids.length
+    ? await first<{ id: string }>(
+        control,
+        `SELECT id FROM ${control.table('workspaces')}
+         WHERE state = 'active' AND owner_did = ANY($1::text[])
+         ORDER BY created_at ASC LIMIT 1`,
+        [dids],
+      )
+    : null;
+  if (!workspace) throw new HttpErrorLike(404, 'not_found', 'Workspace was not found');
+  return workspace.id;
+}
+
 async function activeDatabase(env: HostedRuntimeEnv, id: string) {
   const workspace = await first<Workspace>(
     env.controlDb,
@@ -1234,7 +1258,6 @@ export async function budgetSummary(
     baseUsd: null,
     externalMonthlyCostUsd: Number(settings?.external_monthly_cost_usd ?? 0),
     forecastUsd,
-    cloudflareCostUsd,
     observedAt,
     enforcementDisabled,
     // The admission setting still applies. Only the cost forecast condition is skipped.
@@ -1507,14 +1530,6 @@ async function operatorRequest(
       ),
     );
   }
-  if (path === '/api/operator/cloudflare-usage' && request.method === 'GET')
-    return json(
-      await getCloudflareUsageReport({
-        ...(typeof env.CLOUDFLARE_ACCOUNT_ID === 'string'
-          ? { accountId: env.CLOUDFLARE_ACCOUNT_ID }
-          : {}),
-      }),
-    );
   if (path === '/api/operator/health' && request.method === 'GET')
     return json(await operatorHealth(env, new URL(request.url), await budgetSummary(control, env)));
   const scheduling = path.match(/^\/api\/operator(?:\/workspaces\/([^/]+))?\/scheduling$/);
@@ -1826,18 +1841,10 @@ async function operatorRequest(
     return json(await slotInventory(env));
   }
   if (path === '/api/operator/workspaces' && request.method === 'GET') {
-    const rows = await all<
-      Workspace & {
-        owner_handle: string;
-        rows_read: number;
-        rows_written: number;
-        storage_bytes: number;
-      }
-    >(
+    const rows = await all<Workspace & { owner_handle: string }>(
       control,
-      `SELECT w.*, u.handle AS owner_handle, COALESCE(SUM(d.rows_read),0) AS rows_read, COALESCE(SUM(d.rows_written),0) AS rows_written, COALESCE(MAX(d.storage_bytes),0) AS storage_bytes
-       FROM ${control.table('workspaces')} w JOIN ${control.table('users')} u ON u.did = w.owner_did LEFT JOIN ${control.table('workspace_usage_daily')} d ON d.workspace_id = w.id AND d.day >= $1 GROUP BY w.id,u.handle ORDER BY w.created_at DESC LIMIT 100`,
-      [new Date().toISOString().slice(0, 7) + '-01'],
+      `SELECT w.*, u.handle AS owner_handle
+       FROM ${control.table('workspaces')} w JOIN ${control.table('users')} u ON u.did = w.owner_did ORDER BY w.created_at DESC LIMIT 100`,
     );
     const configuredRegionIds = parseApiEnv(env).enabledRegionIds;
     return json({
@@ -1854,11 +1861,6 @@ async function operatorRequest(
           rowsRead: null,
           rowsWritten: null,
           storageBytes: null,
-          historicalD1Usage: {
-            rowsRead: Number(row.rows_read),
-            rowsWritten: Number(row.rows_written),
-            storageBytes: Number(row.storage_bytes),
-          },
           lastSeenAt: row.last_seen_at,
         })),
       ),

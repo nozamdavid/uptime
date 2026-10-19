@@ -310,7 +310,10 @@ export function createAtprotoAuth(dependencies: AtprotoAuthDependencies) {
           `DELETE FROM ${dependencies.db.table('atproto_login_sessions')} WHERE token_hash = $1`,
           [tokenHash],
         );
-        if (session?.did && client.revoke) await client.revoke(session.did).catch(() => undefined);
+        if (session?.did) {
+          if (client.revoke) await client.revoke(session.did).catch(() => undefined);
+          await stores.sessionStore.del(session.did);
+        }
       }
       const headers = new Headers({ 'cache-control': 'no-store' });
       headers.append('set-cookie', clearLoginCookie(SESSION_COOKIE, config));
@@ -334,6 +337,18 @@ export function createAtprotoAuth(dependencies: AtprotoAuthDependencies) {
          WHERE token_hash IN (
            SELECT token_hash FROM ${dependencies.db.table('atproto_login_sessions')}
            WHERE expires_at <= $1 LIMIT 100
+         )`,
+        [timestamp],
+      );
+      await pgRun(
+        dependencies.db,
+        `DELETE FROM ${dependencies.db.table('atproto_oauth_sessions')} AS oauth
+         WHERE did IN (
+           SELECT did FROM ${dependencies.db.table('atproto_oauth_sessions')} AS candidate
+           WHERE NOT EXISTS (
+             SELECT 1 FROM ${dependencies.db.table('atproto_login_sessions')} AS login
+             WHERE login.did = candidate.did AND login.expires_at > $1
+           ) LIMIT 100
          )`,
         [timestamp],
       );

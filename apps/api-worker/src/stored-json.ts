@@ -1,6 +1,6 @@
 import { HttpErrorLike } from './http.js';
 
-/** Decode a JSON column that may already be a parsed value (D1/migration rows). */
+/** Decode a JSON column that may already be a parsed value (PostgreSQL/migration rows). */
 export function decodeStoredJson(value: unknown): { ok: true; value: unknown } | { ok: false } {
   if (typeof value !== 'string') return { ok: true, value };
   try {

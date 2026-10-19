@@ -292,6 +292,50 @@ describe('probe worker request guard', () => {
     );
   });
 
+  it.each([
+    ['http://example.com:22/', false],
+    ['https://example.com:8443/', false],
+    ['https://example.com/next', true],
+  ])('enforces redirect policy for %s', async (location, allowed) => {
+    const cancel = vi.fn();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(new ReadableStream<Uint8Array>({ cancel }), {
+          status: 302,
+          headers: { location },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('ok'));
+    vi.stubGlobal('fetch', fetchMock);
+    const issuedAt = new Date().toISOString();
+    const response = await worker.fetch(
+      signedRequest({
+        checkRunId: crypto.randomUUID(),
+        monitorId: crypto.randomUUID(),
+        windowStartedAt: issuedAt,
+        regionId: 'us-east',
+        url: 'https://example.com/start',
+        timeoutMs: 1_000,
+        method: 'GET',
+        maxRedirects: 5,
+        maxBodyBytes: 65_536,
+        requestId: crypto.randomUUID(),
+        issuedAt,
+      }),
+      env,
+      context,
+    );
+    expect(await response.json()).toMatchObject(
+      allowed
+        ? { success: true, finalUrl: location }
+        : { success: false, errorCode: 'invalid_response', errorDetail: 'Error: redirect_blocked' },
+    );
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(allowed ? 2 : 1);
+    if (allowed) expect(fetchMock.mock.calls[1]?.[0]).toBe(location);
+  });
+
   it('cancels redirect bodies before following the next hop', async () => {
     const cancel = vi.fn();
     const redirectBody = new ReadableStream<Uint8Array>({ cancel });

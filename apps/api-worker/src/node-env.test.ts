@@ -15,6 +15,7 @@ const base = {
   CREDENTIAL_ENCRYPTION_SECRET: 'c'.repeat(32),
   OAUTH_STORAGE_SECRET: 'o'.repeat(32),
   ENVIRONMENT: 'staging',
+  API_GATEWAY_TOKEN: 'g'.repeat(32),
 };
 
 describe('node runtime configuration', () => {
@@ -28,7 +29,7 @@ describe('node runtime configuration', () => {
       host: '127.0.0.1',
       port: 8787,
       maxBodyBytes: 1_048_576,
-      gatewayToken: null,
+      gatewayToken: base.API_GATEWAY_TOKEN,
       reconcileIntervalMs: 60_000,
     });
     expect(config.trustedProxies.size).toBe(0);
@@ -60,6 +61,26 @@ describe('node runtime configuration', () => {
       return;
     }
     throw new Error('expected a failure');
+  });
+
+  it.each(['staging', 'production'])('requires a gateway token in %s', (environment) => {
+    for (const token of [undefined, '', 'secret-too-short']) {
+      expect(() =>
+        loadNodeRuntime({ ...base, ENVIRONMENT: environment, API_GATEWAY_TOKEN: token }),
+      ).toThrow(/API_GATEWAY_TOKEN (is required|must be at least 32 characters)/);
+    }
+    expect(loadNodeRuntime({ ...base, ENVIRONMENT: environment }).config.gatewayToken).toBe(
+      base.API_GATEWAY_TOKEN,
+    );
+  });
+
+  it.each(['development', 'test'])('allows an absent gateway token in %s', (environment) => {
+    for (const token of [undefined, '']) {
+      expect(
+        loadNodeRuntime({ ...base, ENVIRONMENT: environment, API_GATEWAY_TOKEN: token }).config
+          .gatewayToken,
+      ).toBeNull();
+    }
   });
 
   it('builds an R2 bucket only when every credential is present', () => {

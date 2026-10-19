@@ -113,6 +113,81 @@ describe('AT Protocol OAuth authentication', { timeout: 60_000 }, () => {
     expect(stored?.token_hash).not.toBe(sessionCookie);
   });
 
+  it('deletes the stored OAuth token set on logout even when revocation fails', async () => {
+    const fake = fakeClient();
+    fake.client.revoke = vi.fn().mockRejectedValue(new Error('revocation unavailable'));
+    const auth = createAuth(fixture.db, fake.client);
+    const start = await auth.start(
+      new Request('https://api.example.com/api/auth/atproto/start', {
+        method: 'POST',
+        body: JSON.stringify({ handle: 'alice.bsky.social' }),
+      }),
+    );
+    const callback = await auth.callback(
+      new Request('https://api.example.com/api/auth/atproto/callback', {
+        headers: { cookie: `uptime_atproto_login=${cookieValue(start.headers.get('set-cookie'))}` },
+      }),
+    );
+    const sessionCookie = cookieValue(
+      callback.headers.get('set-cookie')?.split(', ').at(-1) ?? null,
+    );
+    await fixture.db.query(
+      `INSERT INTO ${fixture.db.table('atproto_oauth_sessions')} (did, encrypted_payload, updated_at)
+       VALUES ($1, $2, $3)`,
+      ['did:plc:alice', 'encrypted-token-set', new Date().toISOString()],
+    );
+    const request = new Request('https://api.example.com/api/auth/logout', {
+      headers: { cookie: `uptime_atproto_session=${sessionCookie}` },
+    });
+    expect((await auth.logout(request)).status).toBe(204);
+    expect(fake.client.revoke).toHaveBeenCalledWith('did:plc:alice');
+    expect(await auth.principal(request)).toBeNull();
+    expect(
+      await pgFirst(
+        fixture.db,
+        `SELECT did FROM ${fixture.db.table('atproto_oauth_sessions')} WHERE did = $1`,
+        ['did:plc:alice'],
+      ),
+    ).toBeNull();
+  });
+
+  it('prunes expired and orphaned OAuth token sets while retaining active sessions', async () => {
+    const timestamp = new Date().toISOString();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+    const future = new Date(Date.now() + 60_000).toISOString();
+    for (const name of ['expired', 'orphaned', 'active']) {
+      await fixture.db.query(
+        `INSERT INTO ${fixture.db.table('atproto_oauth_sessions')} (did, encrypted_payload, updated_at)
+         VALUES ($1, $2, $3)`,
+        [`did:plc:prune-${name}`, 'encrypted-token-set', timestamp],
+      );
+    }
+    for (const [name, expiresAt] of [
+      ['expired', expired],
+      ['active', future],
+      ['active', expired],
+    ]) {
+      await fixture.db.query(
+        `INSERT INTO ${fixture.db.table('atproto_login_sessions')}
+         (token_hash, did, handle, expires_at, created_at, last_seen_at)
+         VALUES ($1, $2, $3, $4, $5, $5)`,
+        [
+          `prune-${name}-${expiresAt}`,
+          `did:plc:prune-${name}`,
+          'alice.bsky.social',
+          expiresAt,
+          timestamp,
+        ],
+      );
+    }
+    await createAuth(fixture.db, fakeClient().client).prune();
+    const remaining = await fixture.db.query<{ did: string }>(
+      `SELECT did FROM ${fixture.db.table('atproto_oauth_sessions')} WHERE did LIKE $1`,
+      ['did:plc:prune-%'],
+    );
+    expect(remaining.rows).toEqual([{ did: 'did:plc:prune-active' }]);
+  });
+
   it('rejects a missing or tampered browser binding before it creates a session', async () => {
     const fake = fakeClient();
     const auth = createAuth(fixture.db, fake.client);
@@ -214,11 +289,8 @@ describe('AT Protocol OAuth authentication', { timeout: 60_000 }, () => {
   });
 
   it('generates an extractable DPoP key so its private JWK survives the callback', async () => {
-    const generated = {} as WebcryptoKey;
-    const spy = vi.spyOn(WebcryptoKey, 'generate').mockResolvedValue(generated);
-    await expect(workersOAuthRuntime.createKey(['ES256'])).resolves.toBe(generated);
-    expect(spy).toHaveBeenCalledWith(['ES256'], undefined, { extractable: true });
-    spy.mockRestore();
+    const generated = await workersOAuthRuntime.createKey(['ES256']);
+    expect(generated.privateJwk).toMatchObject({ kty: 'EC', crv: 'P-256', d: expect.any(String) });
   });
 
   it('runs SDK handle discovery, DPoP key creation, PKCE, encrypted state persistence, and PAR', async () => {

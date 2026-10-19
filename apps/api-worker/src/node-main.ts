@@ -1,4 +1,4 @@
-import { reconcileScheduled } from './index.js';
+import { reconcileScheduled } from './reconcile.js';
 import { createPublicOnlyFetch } from './node-bindings.js';
 import { loadNodeRuntime, type NodeRuntime } from './node-env.js';
 import { createNodeServer } from './node-server.js';

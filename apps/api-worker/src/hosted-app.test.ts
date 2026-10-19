@@ -22,7 +22,7 @@ import { seedControlUser, seedControlWorkspace } from './testing/control-fixture
 
 import { consumeBudget, ensureWorkspace, hostedFetch } from './hosted-app.js';
 import { recordInterest } from './interest.js';
-import worker from './index.js';
+import { reconcileScheduled } from './reconcile.js';
 
 let fixture: Awaited<ReturnType<typeof createRuntimeFixture>>;
 let usedTenants = new Set<number>();
@@ -121,13 +121,7 @@ describe('hosted control plane', { timeout: 300_000 }, () => {
     await context.control.query(
       `UPDATE ${context.control.table('workspace_billing')} SET period_end=0,due_at=0`,
     );
-    const pending: Promise<unknown>[] = [];
-    await worker.scheduled({} as ScheduledController, context.env, {
-      waitUntil: (promise: Promise<unknown>) => {
-        pending.push(promise);
-      },
-    } as unknown as ExecutionContext);
-    await Promise.all(pending);
+    await reconcileScheduled(context.env);
     expect(
       (
         await context.control.query(
@@ -700,11 +694,6 @@ describe('hosted control plane', { timeout: 300_000 }, () => {
     const id = ((await session.json()) as { workspace: { id: string } }).workspace.id;
     expect((await fetchHosted(context, '/api/operator/health', owner.cookie)).status).toBe(403);
     expect(
-      (await fetchHosted(context, '/api/operator/cloudflare-usage', owner.cookie)).status,
-    ).toBe(403);
-    const usage = await fetchHosted(context, '/api/operator/cloudflare-usage', operator.cookie);
-    expect(await usage.json()).toMatchObject({ status: 'unknown', isWithinAllowance: null });
-    expect(
       (
         await fetchHosted(
           context,
@@ -769,500 +758,7 @@ describe('hosted control plane', { timeout: 300_000 }, () => {
       workspaces: [{ workspaceId: id, scheduling: { paused: true }, error: null }],
     });
   });
-  it('assigns the imported fleet without free metadata, proxies authorized edits, and protects its history', async () => {
-    const context = await createHostedContext();
-    const imported = await addTenant(
-      context,
-      'STAGING_IMPORTED_DB',
-      stagingImportedDatabaseId,
-      'legacy-staging',
-    );
-    await imported.query(
-      `INSERT INTO ${imported.table('monitors')}(id,name,url,interval_seconds,timeout_ms,enabled,next_check_at)
-       SELECT '00000000-0000-4000-8000-' || lpad(i::text,12,'0'), 'Imported ' || i,
-              'https://example.com',60,20000,1,$1
-       FROM generate_series(0,106) AS series(i)`,
-      [now()],
-    );
-    await imported.query(
-      `UPDATE ${imported.table('monitors')} SET is_public=1,public_slug='imported' WHERE id=$1`,
-      ['00000000-0000-4000-8000-000000000000'],
-    );
-    await imported.query(
-      `INSERT INTO ${imported.table('monitor_regions')}(monitor_id,region_id) VALUES($1,$2)`,
-      ['00000000-0000-4000-8000-000000000000', 'us-east'],
-    );
-    await imported.query(
-      `INSERT INTO ${imported.table('status_pages')}(id,title,public_slug) VALUES($1,$2,$3)`,
-      ['11111111-1111-4111-8111-111111111114', 'Imported services', 'services'],
-    );
-    Object.assign(context.env, {
-      ENVIRONMENT: 'staging',
-      INTEREST_CHECK_ONLY: 'true',
-    });
-    await context.control.query(
-      `INSERT INTO ${context.control.table('tenant_slot_controls')}(binding_name,admission_enabled) VALUES('STAGING_IMPORTED_DB',0)`,
-    );
-    const operator = await authenticatedCookie(
-      context.control,
-      'did:plc:lmkzmvv6sdxntwtyxpg7fqqq',
-      'noz.am',
-    );
-    const owner = await authenticatedCookie(
-      context.control,
-      'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb',
-      'import.test',
-    );
-    await recordInterest(context.controlDb, { did: owner.did, handle: 'import.test' });
-    const legacyEnv = {
-      ...context.env,
-      POSTGRES_SOURCE_DATABASE_ID: stagingImportedDatabaseId,
-      ENVIRONMENT: 'staging',
-      ADMIN_EMAIL: 'admin@example.com',
-      ADMIN_PASSWORD_HASH: await hashPassword('test-password-only'),
-      SESSION_SECRET: 'l'.repeat(32),
-      CREDENTIAL_ENCRYPTION_SECRET: 'original-secret'.repeat(4),
-      REGIONS_LIST: 'eu-west,us-east,asia',
-      WEB_ORIGIN: 'https://api.example.com',
-      OAUTH: {
-        fetch: (request: Request) =>
-          hostedFetch(request, context.env, {
-            waitUntil: () => undefined,
-          } as unknown as ExecutionContext),
-      },
-    };
-    Object.assign(context.env, {
-      IMPORTED_API: {
-        fetch: (request: Request) =>
-          worker.fetch(request, legacyEnv, {
-            waitUntil: () => undefined,
-          } as unknown as ExecutionContext),
-      },
-      IMPORTED_REPORTER: {
-        fetch: async () => new Response('report', { status: 200 }),
-      },
-    });
-    const assign = () =>
-      fetchHosted(
-        context,
-        '/api/operator/slots/STAGING_IMPORTED_DB/assignment',
-        operator.cookie,
-        {},
-        { method: 'POST', body: JSON.stringify({ ownerDid: owner.did }) },
-      );
-    const response = await assign();
-    expect(response.status, JSON.stringify(await response.clone().json())).toBe(200);
-    const workspaceId = ((await response.json()) as { workspaceId: string }).workspaceId;
-    const unsupportedLimits = await fetchHosted(
-      context,
-      `/api/operator/workspaces/${workspaceId}/limits`,
-      operator.cookie,
-      {},
-      {
-        method: 'PATCH',
-        body: JSON.stringify({ monitors: 10, regions: 1, allowedRegionIds: ['eu-west'] }),
-      },
-    );
-    expect(unsupportedLimits.status).toBe(409);
-    expect(await unsupportedLimits.json()).toMatchObject({ error: { code: 'limits_unsupported' } });
-    expect((await assign()).status).toBe(200);
-    expect(
-      (
-        await imported.query(
-          `SELECT count(*)::integer AS n FROM pg_catalog.pg_tables WHERE schemaname=$1 AND tablename='workspace_metadata'`,
-          [imported.schema],
-        )
-      ).rows[0],
-    ).toEqual({
-      n: 0,
-    });
-    expect(
-      await (await fetchHosted(context, '/api/auth/session', owner.cookie)).json(),
-    ).toMatchObject({
-      workspace: { kind: 'staging_import' },
-      usage: { monitors: 107, statusPages: 1 },
-      limits: null,
-    });
-    const monitors = await fetchHosted(context, '/api/monitors', owner.cookie);
-    expect(monitors.status).toBe(200);
-    expect(((await monitors.json()) as { monitors: unknown[] }).monitors).toHaveLength(107);
-    const keys: string[] = [];
-    Object.assign(context.env, {
-      REPORTS: {
-        get: async (key: string) => {
-          keys.push(key);
-          return {
-            json: async () =>
-              key === 'public/cohort.json'
-                ? { generation: '123' }
-                : {
-                    statusPages: [
-                      { id: '11111111-1111-4111-8111-111111111114', publicSlug: 'services' },
-                    ],
-                  },
-          };
-        },
-      } as unknown as R2Bucket,
-    });
-    const monitorReport = await fetchHosted(
-      context,
-      `/reports/public/monitors/imported.json?workspace=${workspaceId}`,
-      '',
-    );
-    expect(monitorReport.status).toBe(200);
-    expect(await monitorReport.json()).toMatchObject({
-      schemaVersion: '1',
-      latencyByRange: { '1h': {}, '24h': {}, '7d': {}, '30d': {} },
-    });
-    const index = await fetchHosted(
-      context,
-      `/reports/public/status-pages.json?workspace=${workspaceId}`,
-      '',
-    );
-    expect(index.status).toBe(200);
-    expect(keys).toEqual(['public/cohort.json', 'public/cohorts/123/status-pages.json']);
-    const update = await fetchHosted(
-      context,
-      '/api/monitors/00000000-0000-4000-8000-000000000000',
-      owner.cookie,
-      {},
-      { method: 'PATCH', body: JSON.stringify({ name: 'Updated imported monitor' }) },
-    );
-    expect(update.status, JSON.stringify(await update.clone().json())).toBe(200);
-    expect(
-      (
-        await imported.query(
-          `SELECT name,interval_seconds,timeout_ms FROM ${imported.table('monitors')} WHERE id=$1`,
-          ['00000000-0000-4000-8000-000000000000'],
-        )
-      ).rows[0],
-    ).toEqual({ name: 'Updated imported monitor', interval_seconds: 60, timeout_ms: 20000 });
-    expect(
-      (await fetchHosted(context, '/api/workspace', owner.cookie, {}, { method: 'DELETE' })).status,
-    ).toBe(409);
-    expect(
-      (await imported.query(`SELECT count(*)::integer AS n FROM ${imported.table('monitors')}`))
-        .rows[0],
-    ).toEqual({ n: 107 });
-    expect(
-      (
-        await context.control.query(
-          `SELECT state FROM ${context.control.table('workspaces')} WHERE id=$1`,
-          [workspaceId],
-        )
-      ).rows[0],
-    ).toEqual({ state: 'active' });
-    await expect(
-      purgeWorkspaceData(
-        { controlDb: context.controlDb, catalog: context.env.catalog.sources },
-        workspaceId,
-      ),
-    ).rejects.toThrow('cannot be purged');
-    const stranger = await authenticatedCookie(
-      context.control,
-      'did:plc:cccccccccccccccccccccccc',
-      'stranger.test',
-    );
-    expect(
-      (
-        await fetchHosted(context, '/api/auth/imported-identity', stranger.cookie, {
-          'x-uptime-workspace': workspaceId,
-        })
-      ).status,
-    ).toBe(403);
-    expect(
-      (
-        await fetchHosted(
-          context,
-          '/api/operator/slots/STAGING_IMPORTED_DB/admission',
-          operator.cookie,
-          {},
-          { method: 'POST', body: JSON.stringify({ enabled: true }) },
-        )
-      ).status,
-    ).toBe(409);
-    await context.control.query(
-      `UPDATE ${context.control.table('workspaces')} SET state='suspended' WHERE id=$1`,
-      [workspaceId],
-    );
-    expect(
-      (
-        await fetchHosted(context, '/api/auth/imported-identity', owner.cookie, {
-          'x-uptime-workspace': workspaceId,
-        })
-      ).status,
-    ).toBe(403);
-  });
 
-  it('bridges the production legacy fleet to the existing owner without free limits or deletion', async () => {
-    const context = await createHostedContext();
-    const owner = await authenticatedCookie(
-      context.control,
-      'did:plc:lmkzmvv6sdxntwtyxpg7fqqq',
-      'noz.am',
-    );
-    const initialSession = await fetchHosted(context, '/api/auth/session', owner.cookie);
-    const workspaceId = ((await initialSession.json()) as { workspace: { id: string } }).workspace
-      .id;
-
-    // Reassign only this disposable workspace to the preserved production profile.
-    await context.control.query(
-      `DELETE FROM ${context.control.table('postgres_tenant_registry')} WHERE workspace_id=$1`,
-      [workspaceId],
-    );
-    await context.control.query(
-      `DELETE FROM ${context.control.table('tenant_slots')} WHERE workspace_id=$1`,
-      [workspaceId],
-    );
-    const imported = await addTenant(
-      context,
-      'PRODUCTION_IMPORTED_DB',
-      productionImportedDatabaseId,
-      'legacy-production',
-    );
-    await context.control.query(
-      `UPDATE ${context.control.table('postgres_tenant_registry')} SET workspace_id=$1,status='assigned' WHERE source_database_id=$2`,
-      [workspaceId, productionImportedDatabaseId],
-    );
-    await context.control.query(
-      `UPDATE ${context.control.table('tenant_slots')} SET workspace_id=$1,status='assigned' WHERE database_id=$2`,
-      [workspaceId, productionImportedDatabaseId],
-    );
-    await imported.query(
-      `INSERT INTO ${imported.table('production_workspace_identity')}(id,workspace_id,database_id) VALUES(1,$1,$2)`,
-      [workspaceId, productionImportedDatabaseId],
-    );
-    await imported.query(
-      `INSERT INTO ${imported.table('monitors')}(id,name,url,interval_seconds,timeout_ms,enabled,next_check_at)
-       SELECT '00000000-0000-4000-8000-' || lpad(i::text,12,'0'), 'Legacy ' || i,
-              'https://legacy.example.com/health',60,20000,1,$1
-       FROM generate_series(0,106) AS series(i)`,
-      [now()],
-    );
-    await imported.query(
-      `UPDATE ${imported.table('monitors')} SET is_public=1,public_slug='legacy' WHERE id=$1`,
-      ['00000000-0000-4000-8000-000000000000'],
-    );
-    await imported.query(
-      `INSERT INTO ${imported.table('monitor_regions')}(monitor_id,region_id) VALUES($1,$2)`,
-      ['00000000-0000-4000-8000-000000000000', 'us-east'],
-    );
-    await imported.query(
-      `INSERT INTO ${imported.table('status_pages')}(id,title,public_slug) VALUES($1,$2,$3)`,
-      ['11111111-1111-4111-8111-111111111115', 'Production services', 'production'],
-    );
-    await imported.query(
-      `INSERT INTO ${imported.table('notification_services')}(id,name,provider,enabled,config,created_at,updated_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7)`,
-      [
-        '22222222-2222-4222-8222-222222222222',
-        'Legacy SMTP',
-        'smtp',
-        1,
-        JSON.stringify({ host: 'smtp.example.com', username: 'legacy', password: 'secret-value' }),
-        now(),
-        now(),
-      ],
-    );
-
-    Object.assign(context.env, {
-      ENVIRONMENT: 'production',
-      OPERATOR_DIDS: `${owner.did},did:plc:operator1111111111111111111111`,
-    });
-
-    const adminDid = 'did:plc:operator1111111111111111111111';
-    await context.control.query(
-      `INSERT INTO ${context.control.table('users')}(did,handle,state,created_at,updated_at,last_seen_at) VALUES($1,$2,$3,$4,$5,$6)`,
-      [adminDid, 'operator.test', 'active', now(), now(), now()],
-    );
-    const operator = await authenticatedCookie(context.control, adminDid, 'operator.test');
-    const extraMemberDid = 'did:plc:viewer222222222222222222222222';
-    await context.control.query(
-      `INSERT INTO ${context.control.table('users')}(did,handle,state,created_at,updated_at,last_seen_at) VALUES($1,$2,$3,$4,$5,$6)`,
-      [extraMemberDid, 'viewer.test', 'active', now(), now(), now()],
-    );
-    await context.control.query(
-      `INSERT INTO ${context.control.table('memberships')}(workspace_id,did,role,created_at) VALUES($1,$2,'viewer',$3)`,
-      [workspaceId, extraMemberDid, now()],
-    );
-    const viewer = await authenticatedCookie(context.control, extraMemberDid, 'viewer.test');
-
-    const legacyEnv = {
-      ...context.env,
-      POSTGRES_SOURCE_DATABASE_ID: productionImportedDatabaseId,
-      ENVIRONMENT: 'production',
-      ADMIN_EMAIL: 'admin@example.com',
-      ADMIN_PASSWORD_HASH: await hashPassword('legacy-test-password'),
-      SESSION_SECRET: 'l'.repeat(32),
-      CREDENTIAL_ENCRYPTION_SECRET: 'legacy-secret'.repeat(4),
-      REGIONS_LIST: 'eu-west,us-east,asia,asia-east',
-      WEB_ORIGIN: 'https://api.example.com',
-      OAUTH: {
-        fetch: (request: Request) =>
-          hostedFetch(request, context.env, {
-            waitUntil: () => undefined,
-          } as unknown as ExecutionContext),
-      },
-    };
-    const reporterFetch = async (request: Request) =>
-      Response.json({ reporter: 'legacy', path: new URL(request.url).pathname });
-    const reportKeys: string[] = [];
-    Object.assign(context.env, {
-      IMPORTED_API: {
-        fetch: (request: Request) =>
-          worker.fetch(request, legacyEnv, {
-            waitUntil: () => undefined,
-          } as unknown as ExecutionContext),
-      },
-      IMPORTED_REPORTER: { fetch: reporterFetch },
-      REPORTS: {
-        get: async (key: string) => {
-          reportKeys.push(key);
-          return {
-            json: async () =>
-              key === 'public/cohort.json'
-                ? { generation: '123' }
-                : {
-                    statusPages: [
-                      { id: '11111111-1111-4111-8111-111111111115', publicSlug: 'production' },
-                    ],
-                  },
-          };
-        },
-      } as unknown as R2Bucket,
-    });
-
-    const session = await fetchHosted(context, '/api/auth/session', owner.cookie);
-    expect(session.status).toBe(200);
-    expect(await session.json()).toMatchObject({
-      workspace: { id: workspaceId, kind: 'legacy_import', state: 'active' },
-      isOperator: true,
-      limits: null,
-      usage: { monitors: 107, statusPages: 1, notificationServices: 1 },
-    });
-    expect(
-      (
-        await imported.query(
-          `SELECT count(*)::integer AS n FROM pg_catalog.pg_tables WHERE schemaname=$1 AND tablename='workspace_metadata'`,
-          [imported.schema],
-        )
-      ).rows[0],
-    ).toEqual({ n: 0 });
-
-    const monitors = await fetchHosted(context, '/api/monitors', owner.cookie);
-    expect(monitors.status).toBe(200);
-    expect(((await monitors.json()) as { monitors: unknown[] }).monitors).toHaveLength(107);
-    const usage = await fetchHosted(context, '/api/workspace/usage', owner.cookie);
-    expect(await usage.json()).toMatchObject({ limits: null, usage: { monitors: 107 } });
-    const operatorLimits = await fetchHosted(
-      context,
-      `/api/operator/workspaces/${workspaceId}/limits`,
-      owner.cookie,
-      {},
-      {
-        method: 'PATCH',
-        body: JSON.stringify({ monitors: 3, regions: 1, allowedRegionIds: ['us-east'] }),
-      },
-    );
-    expect(operatorLimits.status).toBe(409);
-    expect(await operatorLimits.json()).toMatchObject({ error: { code: 'limits_unsupported' } });
-
-    const identity = await fetchHosted(context, '/api/auth/imported-identity', owner.cookie, {
-      'x-uptime-workspace': workspaceId,
-    });
-    expect(await identity.json()).toMatchObject({
-      importedWorkspaceId: workspaceId,
-      role: 'owner',
-    });
-    const viewerIdentity = await fetchHosted(
-      context,
-      '/api/auth/imported-identity',
-      viewer.cookie,
-      {
-        'x-uptime-workspace': workspaceId,
-      },
-    );
-    expect(await viewerIdentity.json()).toMatchObject({
-      importedWorkspaceId: workspaceId,
-      role: 'viewer',
-    });
-    for (const outsider of [
-      await authenticatedCookie(
-        context.control,
-        'did:plc:outsider3333333333333333333333',
-        'outsider.test',
-      ),
-      operator,
-    ]) {
-      const denied = await fetchHosted(context, '/api/auth/imported-identity', outsider.cookie, {
-        'x-uptime-workspace': workspaceId,
-      });
-      expect(denied.status).toBe(403);
-    }
-    const viewerMutation = await fetchHosted(
-      context,
-      '/api/monitors/00000000-0000-4000-8000-000000000000',
-      viewer.cookie,
-      { 'x-uptime-workspace': workspaceId },
-      { method: 'PATCH', body: JSON.stringify({ name: 'Denied viewer edit' }) },
-    );
-    expect(viewerMutation.status).toBe(403);
-
-    const report = await fetchHosted(
-      context,
-      `/reports/public/monitors/legacy.json?workspace=${workspaceId}`,
-      '',
-    );
-    expect(await report.json()).toMatchObject({ schemaVersion: '1', staleAfterSeconds: 60 });
-    const statusIndex = await fetchHosted(
-      context,
-      `/reports/public/status-pages.json?workspace=${workspaceId}`,
-      '',
-    );
-    expect(await statusIndex.json()).toMatchObject({
-      statusPages: [{ id: '11111111-1111-4111-8111-111111111115', publicSlug: 'production' }],
-    });
-    expect(reportKeys).toEqual(['public/cohort.json', 'public/cohorts/123/status-pages.json']);
-
-    const exported = await fetchHosted(context, '/api/workspace/export', owner.cookie);
-    const exportBody = await exported.clone().text();
-    expect(exported.status).toBe(200);
-    expect(exportBody).not.toContain('secret-value');
-    expect(await exported.json()).toMatchObject({
-      destinations: [{ name: 'Legacy SMTP', provider: 'smtp' }],
-    });
-    const deletion = await fetchHosted(
-      context,
-      '/api/workspace',
-      owner.cookie,
-      {},
-      { method: 'DELETE' },
-    );
-    expect(deletion.status).toBe(409);
-    expect(
-      (await imported.query(`SELECT count(*)::integer AS n FROM ${imported.table('monitors')}`))
-        .rows[0],
-    ).toEqual({ n: 107 });
-    expect(
-      (
-        await context.control.query(
-          `SELECT owner_did,state FROM ${context.control.table('workspaces')} WHERE id=$1`,
-          [workspaceId],
-        )
-      ).rows[0],
-    ).toEqual({
-      owner_did: owner.did,
-      state: 'active',
-    });
-
-    const slots = await fetchHosted(context, '/api/operator/slots', owner.cookie);
-    expect(await slots.json()).toMatchObject({
-      configuredSlots: 0,
-      assignedSlots: 0,
-      availableSlots: 0,
-      slots: [{ bindingName: 'PRODUCTION_IMPORTED_DB', kind: 'legacy_import', workspaceId }],
-    });
-  });
   it('recognizes the default operator when no allowlist is configured', async () => {
     const context = await createHostedContext();
     const operator = await authenticatedCookie(
@@ -1357,81 +853,6 @@ describe('hosted control plane', { timeout: 300_000 }, () => {
       [suspended.did, 'suspended.test', now(), now(), now()],
     );
     expect((await fetchHosted(context, '/api/auth/identity', suspended.cookie)).status).toBe(403);
-  });
-
-  it('bridges a real hosted OAuth cookie into legacy session and monitor reads', async () => {
-    const context = await createHostedContext();
-    const operator = await authenticatedCookie(
-      context.control,
-      'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
-      'operator.test',
-    );
-    Object.assign(context.env, { OPERATOR_DIDS: operator.did });
-    const legacyDb = await addTenant(
-      context,
-      'STAGING_IMPORTED_DB',
-      stagingImportedDatabaseId,
-      'legacy-staging',
-    );
-    const legacyId = '11111111-1111-4111-8111-111111111111';
-    await seedControlUser(context.control, operator.did, 'operator.test');
-    await seedControlWorkspace(context.control, { workspaceId: legacyId, ownerDid: operator.did });
-    await legacyDb.query(
-      `INSERT INTO ${legacyDb.table('staging_workspace_identity')}(id,workspace_id,database_id) VALUES(1,$1,$2)`,
-      [legacyId, stagingImportedDatabaseId],
-    );
-    await context.control.query(
-      `UPDATE ${context.control.table('postgres_tenant_registry')} SET workspace_id=$1,status='assigned' WHERE source_database_id=$2`,
-      [legacyId, stagingImportedDatabaseId],
-    );
-    await context.control.query(
-      `UPDATE ${context.control.table('tenant_slots')} SET workspace_id=$1,status='assigned' WHERE database_id=$2`,
-      [legacyId, stagingImportedDatabaseId],
-    );
-    const legacyEnv = {
-      ...context.env,
-      POSTGRES_SOURCE_DATABASE_ID: stagingImportedDatabaseId,
-      ADMIN_EMAIL: 'admin@example.com',
-      ADMIN_PASSWORD_HASH: await hashPassword('correct horse battery staple'),
-      SESSION_SECRET: 'l'.repeat(32),
-      CREDENTIAL_ENCRYPTION_SECRET: 'c'.repeat(32),
-      REGIONS_LIST: '',
-      ENVIRONMENT: 'test',
-      OAUTH: {
-        fetch: (request: Request) =>
-          hostedFetch(request, context.env, {
-            waitUntil() {},
-          } as unknown as ExecutionContext),
-      },
-    };
-    const response = await worker.fetch(
-      new Request('https://legacy.example.com/api/auth/session', {
-        headers: { cookie: operator.cookie },
-      }),
-      legacyEnv as Parameters<typeof worker.fetch>[1],
-      { waitUntil() {} } as unknown as ExecutionContext,
-    );
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      user: { did: operator.did, handle: 'operator.test' },
-      role: 'owner',
-      isOperator: true,
-    });
-    const monitors = await worker.fetch(
-      new Request('https://legacy.example.com/api/monitors', {
-        headers: { cookie: operator.cookie },
-      }),
-      legacyEnv as Parameters<typeof worker.fetch>[1],
-      { waitUntil() {} } as unknown as ExecutionContext,
-    );
-    expect(monitors.status).toBe(200);
-    expect(
-      (
-        await context.control.query(
-          `SELECT id FROM ${context.control.table('workspaces')} ORDER BY id`,
-        )
-      ).rows,
-    ).toEqual([{ id: legacyId }]);
   });
 
   it('confirms only the signed-in interest record and blocks new product access before release', async () => {
@@ -1622,14 +1043,20 @@ describe('hosted control plane', { timeout: 300_000 }, () => {
     const listed = (await operatorWorkspaces.json()) as {
       workspaces: { id: string; limits: unknown }[];
     };
-    expect(listed.workspaces.find((row) => row.id === workspace.id)?.limits).toBeNull();
+    // Waiting workspaces report their tier entitlements so operators can size the grant.
+    expect(listed.workspaces.find((row) => row.id === workspace.id)?.limits).toMatchObject({
+      monitors: 3,
+      regions: 3,
+      allowedRegionIds: ['eu-west', 'us-east', 'asia'],
+    });
     const path = `/api/operator/workspaces/${workspace.id}/state`;
     const activate = {
       method: 'POST',
       body: JSON.stringify({ state: 'active', reason: 'Operator restored' }),
     };
     expect((await fetchHosted(context, path, user.cookie, {}, activate)).status).toBe(403);
-    const unprovisionedLimits = await fetchHosted(
+    // Waiting workspaces accept a pre-provisioning grant that is applied on activation.
+    const waitingLimits = await fetchHosted(
       context,
       `/api/operator/workspaces/${workspace.id}/limits`,
       operator.cookie,
@@ -1643,9 +1070,9 @@ describe('hosted control plane', { timeout: 300_000 }, () => {
         }),
       },
     );
-    expect(unprovisionedLimits.status).toBe(409);
-    expect(await unprovisionedLimits.json()).toMatchObject({
-      error: { code: 'workspace_unprovisioned' },
+    expect(waitingLimits.status).toBe(200);
+    expect(await waitingLimits.json()).toMatchObject({
+      limits: { monitors: 5, regions: 3, allowedRegionIds: ['eu-west', 'us-east', 'asia'] },
     });
     const noCapacity = await fetchHosted(context, path, operator.cookie, {}, activate);
     expect(noCapacity.status).toBe(409);

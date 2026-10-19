@@ -2,6 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
 import { Readable, Transform } from 'node:stream';
+import { createGzip } from 'node:zlib';
 
 import { errorResponse } from './http.js';
 
@@ -105,19 +106,32 @@ function sendJson(res: ServerResponse, response: Response) {
   void writeResponse(res, response, body, false);
 }
 
+/** Large JSON reports cross a slow tunnel, so compress text bodies the client accepts as gzip. */
+function shouldGzip(response: Response, acceptEncoding: string | undefined): boolean {
+  if (response.status !== 200 || !acceptEncoding || !/\bgzip\b/i.test(acceptEncoding)) return false;
+  if (response.headers.has('content-encoding')) return false;
+  return /^(?:application\/(?:json|javascript)|text\/)/i.test(
+    response.headers.get('content-type') ?? '',
+  );
+}
+
 async function writeResponse(
   res: ServerResponse,
   response: Response,
   body: ReadableStream | null,
   head: boolean,
+  acceptEncoding?: string,
 ): Promise<void> {
+  const compress = !head && !!body && shouldGzip(response, acceptEncoding);
   const flat: string[] = [];
   for (const [name, value] of response.headers) {
     if (name === 'set-cookie' || hopByHop.has(name)) continue;
-    flat.push(name, value);
+    if (compress && name === 'content-length') continue;
+    flat.push(name, compress && name === 'etag' && !value.startsWith('W/') ? `W/${value}` : value);
   }
   // One Set-Cookie header per cookie; iterating Headers would fold them together.
   for (const cookie of response.headers.getSetCookie()) flat.push('set-cookie', cookie);
+  if (compress) flat.push('content-encoding', 'gzip', 'vary', 'accept-encoding');
   res.writeHead(response.status, flat);
   const bodyless = head || !body || response.status === 204 || response.status === 304;
   if (bodyless) {
@@ -125,7 +139,9 @@ async function writeResponse(
     res.end();
     return;
   }
-  const stream = Readable.fromWeb(body as never);
+  const source = Readable.fromWeb(body as never);
+  const stream = compress ? source.pipe(createGzip()) : source;
+  if (compress) source.once('error', (error) => stream.destroy(error));
   await new Promise<void>((resolve) => {
     // Destroy both sides on failure so a client abort cancels the upstream stream.
     const finish = () => resolve();
@@ -232,7 +248,13 @@ export function createNodeAdapter(options: NodeAdapterOptions): NodeAdapter {
       void response.body?.cancel().catch(() => undefined);
       return;
     }
-    await writeResponse(res, response, response.body, method === 'HEAD');
+    await writeResponse(
+      res,
+      response,
+      response.body,
+      method === 'HEAD',
+      req.headers['accept-encoding'] as string | undefined,
+    );
   }
 
   return {
