@@ -17,7 +17,7 @@ export interface TierEntitlements {
   customDomains: number;
   intervalSeconds: 300;
   rawRetentionHours: 24;
-  dailyRetentionDays: 30;
+  dailyRetentionDays: 90;
 }
 
 export interface PlanDefinition {
@@ -87,7 +87,7 @@ export function tierFeatures(e: TierEntitlements): string[] {
     `${e.customDomains} custom status domains (preview)`,
     'Five-minute checks',
     '24-hour detailed history',
-    '30-day daily uptime',
+    '90-day daily uptime',
     'Telegram and Discord',
   ];
 }
@@ -124,8 +124,8 @@ export function validateProductCatalog(
       new Set(allowed).size !== allowed.length
     )
       invalid('Region grants must use distinct deployed regions');
-    if (e.intervalSeconds !== 300 || e.rawRetentionHours !== 24 || e.dailyRetentionDays !== 30)
-      invalid('All tiers require 300-second checks, 24-hour raw history and 30-day daily uptime');
+    if (e.intervalSeconds !== 300 || e.rawRetentionHours !== 24 || e.dailyRetentionDays !== 90)
+      invalid('All tiers require 300-second checks, 24-hour raw history and 90-day daily uptime');
     const entitlements: TierEntitlements = {
       monitors: integer(e.monitors, 0, 1000, 'monitors'),
       regions: integer(e.regions, 1, allowed.length, 'regions'),
@@ -141,7 +141,7 @@ export function validateProductCatalog(
       customDomains: integer(e.customDomains, 0, 1000, 'customDomains'),
       intervalSeconds: 300,
       rawRetentionHours: 24,
-      dailyRetentionDays: 30,
+      dailyRetentionDays: 90,
     };
     if (entitlements.customDomains > entitlements.statusPages)
       invalid('At most one custom domain per page');
