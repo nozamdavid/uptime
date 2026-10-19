@@ -2,6 +2,7 @@ import { quotePostgresIdentifier, type Database } from '../postgres/database.js'
 import {
   CONTROL_TABLES,
   TENANT_TABLES,
+  tablesForRuntimeProfile,
   type PostgresTenantCatalogEntry,
 } from '../postgres/index.js';
 import {
@@ -51,7 +52,7 @@ export async function createTenantFixture(
   const fixture = await createPostgresTestDatabase({
     migrations,
     profile,
-    tables: TENANT_TABLES,
+    tables: profile === 'full-hosted' ? tablesForRuntimeProfile(profile) : TENANT_TABLES,
   });
   const identityTable =
     profile === 'legacy-staging'

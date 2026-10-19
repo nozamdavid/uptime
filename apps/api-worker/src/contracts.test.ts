@@ -69,7 +69,8 @@ describe('observation evidence projection', () => {
 describe('weighted uptime semantics', () => {
   it('weights imported closed days by explicit weight and computes the live day', async () => {
     const ctx = await context();
-    const id = await seedMonitor(ctx.db, { isPublic: true });
+    // The public uptime route caches per monitor id and updated_at in a process-wide cache.
+    const id = await seedMonitor(ctx.db, { id: crypto.randomUUID(), isPublic: true });
     // Imported closed day with an explicit weight and no counts.
     await ctx.db.query(
       `INSERT INTO ${ctx.db.table('monitor_daily_uptime')}
@@ -104,7 +105,7 @@ describe('weighted uptime semantics', () => {
 
   it('reports unknown when no day has measurements', async () => {
     const ctx = await context();
-    const id = await seedMonitor(ctx.db, { isPublic: true });
+    const id = await seedMonitor(ctx.db, { id: crypto.randomUUID(), isPublic: true });
     const response = await request(ctx.app, `/api/monitors/public/${id}/uptime`);
     const uptime = (await json(response)).uptime;
     expect(uptime.uptimePercentage).toBeNull();
@@ -114,7 +115,7 @@ describe('weighted uptime semantics', () => {
 
   it('falls back exactly to raw observations only when a daily rollup is missing', async () => {
     const ctx = await context();
-    const id = await seedMonitor(ctx.db, { isPublic: true });
+    const id = await seedMonitor(ctx.db, { id: crypto.randomUUID(), isPublic: true });
     const run = await seedRun(ctx.db, {
       monitorId: id,
       status: 'complete',

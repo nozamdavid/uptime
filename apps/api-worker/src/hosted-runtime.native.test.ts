@@ -5,9 +5,9 @@ import {
   quotePostgresIdentifier,
   resolveRuntimeWorkspace,
 } from '@uptime/cloudflare/postgres';
-import worker from './index.js';
 import * as domains from './custom-domain-http.js';
-import { budgetSummary, consumeBudget, ensureWorkspace } from './hosted-app.js';
+import { budgetSummary, consumeBudget, ensureWorkspace, hostedFetch } from './hosted-app.js';
+import { reconcileScheduled } from './reconcile.js';
 import { createRuntimeFixture } from './testing/runtime-fixture.js';
 
 let fixture: Awaited<ReturnType<typeof createRuntimeFixture>>;
@@ -40,7 +40,7 @@ async function request(
   path: string,
   options: { method?: string; cookie?: string; body?: object; workspaceId?: string } = {},
 ) {
-  return worker.fetch(
+  return hostedFetch(
     new Request(`https://api.test${path}`, {
       method: options.method ?? 'GET',
       headers: {
@@ -61,7 +61,7 @@ describe('native hosted runtime', () => {
     fixture.env.OPERATOR_DIDS = did;
     const cookie = await fixture.cookie(did);
     const request = (path: string, options: { method?: string; body?: object } = {}) =>
-      worker.fetch(
+      hostedFetch(
         new Request(`https://api.test${path}`, {
           method: options.method ?? 'GET',
           headers: { cookie, 'content-type': 'application/json' },
@@ -289,7 +289,6 @@ describe('native hosted runtime', () => {
     const control = fixture.control.db;
     expect(await budgetSummary(control)).toMatchObject({
       forecastUsd: null,
-      cloudflareCostUsd: null,
       admissionOpen: false,
     });
     expect(
@@ -321,56 +320,6 @@ describe('native hosted runtime', () => {
     });
   }, 120_000);
 
-  it('bridges legacy OAuth roles, validates the selected physical workspace, and drains login cleanup', async () => {
-    const env = {
-      ...fixture.env,
-      POSTGRES_SOURCE_DATABASE_ID: 'source-3',
-      ADMIN_EMAIL: 'admin@example.test',
-      ADMIN_PASSWORD_HASH: await hashPassword('correct horse battery staple'),
-      DISABLE_RATE_LIMIT: 'false',
-      ENVIRONMENT: 'staging',
-      OAUTH: {
-        async fetch() {
-          return Response.json({
-            user: { did: legacyDid, handle: 'legacy.test' },
-            importedWorkspaceId: legacyId,
-            role: 'viewer',
-          });
-        },
-      },
-    };
-    const bridge = (path: string, method = 'GET', id = legacyId) =>
-      worker.fetch(
-        new Request(`https://api.test${path}`, {
-          method,
-          headers: { cookie: 'uptime_atproto_session=opaque', 'x-uptime-workspace': id },
-        }),
-        env,
-        context,
-      );
-    const session = await bridge('/api/auth/session');
-    expect(session.status).toBe(200);
-    expect(await session.json()).toMatchObject({ role: 'viewer', isOperator: false });
-    expect((await bridge('/api/monitors')).status).toBe(200);
-    expect((await bridge('/api/monitors', 'POST')).status).toBe(403);
-    expect((await bridge('/api/monitors', 'GET', workspaceId)).status).toBe(403);
-    const login = await worker.fetch(
-      new Request('https://api.test/api/auth/login', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password: 'correct horse battery staple' }),
-      }),
-      env,
-      context,
-    );
-    expect(login.status).toBe(200);
-    expect(pending).toHaveLength(0);
-    const tenant = fixture.tenants[2]!.db;
-    expect(
-      await pgFirst(tenant, `SELECT count(*)::integer AS count FROM ${tenant.table('sessions')}`),
-    ).toEqual({ count: 1 });
-  }, 120_000);
-
   it('isolates scheduled failures and closes clients after success, failure, and reconciliation', async () => {
     expect((await request('/health')).status).toBe(200);
     expect(
@@ -384,7 +333,7 @@ describe('native hosted runtime', () => {
       `ALTER TABLE ${admin.table('workspace_billing')} RENAME TO workspace_billing_failure_fixture`,
     );
     try {
-      await worker.scheduled({} as ScheduledController, fixture.env, context);
+      await reconcileScheduled(fixture.env);
       await Promise.all(pending.splice(0));
       expect(errors).toHaveBeenCalledWith('Scheduled reconciliation failed', {
         event: 'billing_reconciliation_failed',

@@ -2,6 +2,7 @@ import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import {
   createControlFixture,
   createTenantFixture,
+  grantTenantAccessToControl,
   seedControlUserAndWorkspace,
   seedTenantIdentity,
   type ControlTestFixture,
@@ -65,6 +66,7 @@ describePg('Native PostgreSQL Control & Tenant Business Logic', () => {
   beforeAll(async () => {
     control = await createControlFixture();
     tenant = await createTenantFixture('tenant-db-01', 'full-hosted');
+    await grantTenantAccessToControl(control, tenant);
     await seedTenantIdentity(tenant.db, {
       workspaceId: 'ws-tenant-sync-01',
       sourceDatabaseId: 'tenant-db-01',
@@ -335,7 +337,7 @@ describePg('Native PostgreSQL Control & Tenant Business Logic', () => {
     expect(stateCleared.paused).toBe(false);
   }, 30_000);
 
-  it('meters native PostgreSQL statements and flushes usage with null D1 metrics', async () => {
+  it('meters native PostgreSQL statements and flushes usage with null row metrics', async () => {
     const workspaceId = 'ws-test-meter-01';
     await seedControlUserAndWorkspace(control.db, { workspaceId });
 
@@ -346,7 +348,7 @@ describePg('Native PostgreSQL Control & Tenant Business Logic', () => {
 
     expect(metered.usage.statements).toBe(1);
     expect(metered.usage.durationMs).toBeGreaterThanOrEqual(0);
-    // Unavailable D1 metrics are explicitly distinguished as null
+    // Row metrics unavailable on PostgreSQL are explicitly distinguished as null
     expect(metered.usage.rowsRead).toBeNull();
     expect(metered.usage.rowsWritten).toBeNull();
     expect(metered.usage.storageBytes).toBeNull();

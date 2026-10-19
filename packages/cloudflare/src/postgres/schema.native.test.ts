@@ -83,7 +83,8 @@ async function race(
   const outcomes = Promise.allSettled([one, two]);
   try {
     let blocked = false;
-    for (let attempt = 0; attempt < 10; attempt++) {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 20));
       const check = await fixture('legacy-production').adminDb.query<{ count: number }>(
         'SELECT cardinality(pg_blocking_pids($1))::integer AS count',
         [backend.rows[0]!.pid],

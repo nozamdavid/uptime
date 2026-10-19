@@ -37,56 +37,6 @@ export const freeLimits: FreeLimits = {
   dnsDiagnostics: false,
 };
 
-export interface MeasuredUsage {
-  readonly checks?: number;
-  readonly rowsRead?: number | null;
-  readonly rowsWritten?: number | null;
-  readonly storageBytes?: number | null;
-  readonly statements?: number;
-  readonly durationMs?: number;
-}
-
-export interface UsageAllowances {
-  readonly rowsRead: number;
-  readonly rowsWritten: number;
-  readonly storageBytes: number;
-}
-
-export interface MonthlyCostEstimate {
-  readonly baseUsd: 5;
-  readonly estimatedUsd: number;
-  readonly overageUsd: number;
-  readonly withinAllowance: boolean;
-}
-
-const defaultAllowances: UsageAllowances = {
-  rowsRead: 25_000_000_000,
-  rowsWritten: 50_000_000,
-  storageBytes: 5_000_000_000,
-};
-
-/** Historical D1 estimate only. Native PostgreSQL statements/duration do not fabricate D1 row measurements. */
-export function estimateMonthlyCost(
-  usage: MeasuredUsage,
-  allowances: UsageAllowances = defaultAllowances,
-): MonthlyCostEstimate {
-  const overage = (key: keyof UsageAllowances, rate: number) => {
-    const val = usage[key];
-    if (val === null || val === undefined) return 0;
-    return Math.max(0, Number(val) - allowances[key]) * rate;
-  };
-  const overageUsd =
-    overage('rowsRead', 0.000000001) +
-    overage('rowsWritten', 0.000001) +
-    overage('storageBytes', 0.00000000075);
-  return {
-    baseUsd: 5,
-    overageUsd,
-    estimatedUsd: 5 + overageUsd,
-    withinAllowance: overageUsd === 0,
-  };
-}
-
 /** Resolve a tenant workspace database using verified PG resolver. */
 export async function resolveWorkspaceDatabase(
   control: Database,

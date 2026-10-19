@@ -5,7 +5,7 @@
  * dependency and requires no lockfile change. The union is structurally
  * identical to `RegionId` from `@uptime/regions`, so values are mutually
  * assignable. Keep this list in sync with `packages/regions/src/index.ts` and
- * the CHECK constraints in `migrations/0001_initial.sql`.
+ * the CHECK constraints in `postgres/migrations/tenant/0001_initial.sql`.
  */
 export const regionIds = [
   'us-east',

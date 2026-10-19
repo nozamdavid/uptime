@@ -54,7 +54,7 @@ The product already has regional HTTP checks, latency charts, observation histor
 
 ### Concrete gaps
 
-- **Identity:** `packages/cloudflare/src/migrations/0001_initial.sql` enforces a singleton administrator. `apps/api-worker/src/auth.ts` seeds one administrator; login accepts a password for that administrator. Signup, customer memberships, account recovery, and verified identities are absent.
+- **Identity:** `packages/cloudflare/src/postgres/migrations/control/0001_control.sql` enforces a singleton administrator. `apps/api-worker/src/auth.ts` seeds one administrator; login accepts a password for that administrator. Signup, customer memberships, account recovery, and verified identities are absent.
 - **Tenancy:** private routes in `apps/api-worker/src/app.ts` select all monitors or individual global IDs. API and coordinator configurations bind one `DB`. There is no workspace registry, customer database allocation, or cross-customer authorization boundary.
 - **Scale:** `apps/coordinator-worker/src/coordinator.ts` clamps batches to 50 monitors and limits regional tasks to 108 per tick. One global loop cannot be treated as unlimited capacity. The current estimator counts target requests, not total platform cost.
 - **Public content:** public reports and R2 pointers assume the current global dataset. Snapshot generation, caches, Workflow identities, slugs, and invalidation need workspace scope.

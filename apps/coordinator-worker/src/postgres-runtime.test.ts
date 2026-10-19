@@ -1,4 +1,3 @@
-import { createRequire } from 'node:module';
 import { afterAll, beforeAll, afterEach, describe, expect, it, vi } from 'vitest';
 import {
   scopePostgresDatabase,
@@ -13,12 +12,7 @@ import {
   createPostgresTestDatabase,
   loadPostgresMigrations,
 } from '@uptime/cloudflare/testing/postgres';
-import coordinator from './index.js';
-import reporter, {
-  MonitorRefreshWorkflow,
-  withReporterDatabase,
-  type ReporterRuntimeEnv,
-} from './reporter.js';
+import type { CoordinatorEnv } from './env.js';
 import {
   budgetAllowsWork,
   claimDispatches,
@@ -28,13 +22,6 @@ import {
   runTenantJob,
 } from './tenant-dispatch.js';
 import { FakeR2 } from './testing-r2.js';
-import { readJob } from './state.js';
-
-const pg = createRequire(new URL('../../../packages/cloudflare/package.json', import.meta.url))(
-  'pg',
-) as {
-  Client: { prototype: { end(): Promise<void> } };
-};
 
 async function createControlFixture() {
   const migrations = await loadPostgresMigrations(
@@ -129,15 +116,6 @@ async function seedTenantIdentity(
   ]);
 }
 
-vi.mock('cloudflare:workers', () => ({
-  WorkflowEntrypoint: class {
-    env: ReporterRuntimeEnv;
-    constructor(_ctx: unknown, env: ReporterRuntimeEnv) {
-      this.env = env;
-    }
-  },
-}));
-
 const workspaceId = '00000000-0000-4000-8000-000000000501';
 const legacyId = '00000000-0000-4000-8000-000000000502';
 const now = new Date();
@@ -146,7 +124,7 @@ let hosted: Awaited<ReturnType<typeof createTenantFixture>>;
 let legacy: Awaited<ReturnType<typeof createTenantFixture>>;
 let control: Database;
 let other: Database;
-let env: ReporterRuntimeEnv;
+let env: CoordinatorEnv;
 const queued: unknown[] = [];
 
 afterEach(() => {
@@ -154,7 +132,7 @@ afterEach(() => {
   queued.length = 0;
 });
 
-describe('native Worker event sessions and dispatch', () => {
+describe('native runtime sessions and dispatch', () => {
   beforeAll(async () => {
     controlFixture = await createControlFixture();
     hosted = await createTenantFixture('hosted-original-source');
@@ -199,12 +177,11 @@ describe('native Worker event sessions and dispatch', () => {
       }),
       POSTGRES_SOURCE_DATABASE_ID: hosted.catalogEntry.sourceDatabaseId,
       REPORTS: new FakeR2(),
-      MONITOR_REFRESH: { create: vi.fn(), get: vi.fn() } as unknown as Workflow,
       TENANT_JOBS: {
         send: async (job: unknown) => {
           queued.push(job);
         },
-      } as unknown as Queue,
+      },
       WORKERS_URL_DOMAIN: 'account.workers.dev',
       REGIONS_LIST: 'us-east',
       PROBE_SIGNING_SECRET: 'x'.repeat(40),
@@ -311,45 +288,7 @@ describe('native Worker event sessions and dispatch', () => {
     );
   });
 
-  it('closes scheduled sessions and queue sessions on success, failure, and invalid payloads', async () => {
-    const ended = vi.spyOn(pg.Client.prototype, 'end');
-    await coordinator.scheduled({} as ScheduledController, env);
-    expect(ended).toHaveBeenCalledTimes(1);
-    const ack = vi.fn();
-    const retry = vi.fn();
-    await coordinator.queue(
-      { messages: [{ body: { workspaceId: 'bad' }, ack, retry }] } as never,
-      env,
-    );
-    expect(ack).toHaveBeenCalledOnce();
-    expect(ended).toHaveBeenCalledTimes(1);
-    await coordinator.queue(
-      {
-        messages: [{ body: { workspaceId, scheduledAt: now.toISOString() }, ack, retry }],
-      } as never,
-      {
-        ...env,
-        POSTGRES_RUNTIME_CATALOG: JSON.stringify({
-          controlSchema: controlFixture.schema,
-          sources: [],
-        }),
-      },
-    );
-    expect(retry).toHaveBeenCalledOnce();
-    expect(ended).toHaveBeenCalledTimes(2);
-  }, 30_000);
-
-  it('resolves hosted views and the original legacy marker, closing after callback failures', async () => {
-    const ended = vi.spyOn(pg.Client.prototype, 'end');
-    await expect(
-      withReporterDatabase(env, async (session) => {
-        expect(session.schedulingPolicy).toBe('hosted');
-        expect(session.DB.table('tier_schedulable_monitors')).toContain(hosted.schema);
-        await session.DB.query('SELECT 1');
-        throw new Error('test callback failure');
-      }),
-    ).rejects.toThrow('test callback failure');
-    expect(ended).toHaveBeenCalledTimes(1);
+  it('resolves hosted views and the original legacy marker', async () => {
     await withPostgresRuntime(env, async (db, catalog) => {
       const resolved = await resolveRuntimeSource(db, catalog, 'legacy-original-source');
       expect(resolved.source.identityTable).toBe('staging_workspace_identity');
@@ -359,46 +298,6 @@ describe('native Worker event sessions and dispatch', () => {
         `SELECT workspace_id FROM ${resolved.db.table('staging_workspace_identity')} WHERE id = 1`,
       );
     });
-    expect(ended).toHaveBeenCalledTimes(2);
-  }, 30_000);
-
-  it('runs the legacy cron and separate reporter with native persistence and retained exemptions', async () => {
-    const legacyEnv = {
-      ...env,
-      POSTGRES_SOURCE_DATABASE_ID: 'legacy-original-source',
-      LEGACY_IMPORT_COORDINATOR: 'true',
-    };
-    await coordinator.scheduled({} as ScheduledController, legacyEnv);
-    expect((await readJob(legacy.db, 'coordinator'))?.last_completed_at).toBeTruthy();
-    await reporter.scheduled({} as ScheduledController, legacyEnv);
-    expect((await readJob(legacy.db, 'reports'))?.last_completed_at).toBeTruthy();
-  }, 180_000);
-
-  it('keeps fetch waitUntil alive through close and drains retired Workflows without database work', async () => {
-    const ended = vi.spyOn(pg.Client.prototype, 'end');
-    const tasks: Promise<unknown>[] = [];
-    const response = await reporter.fetch(
-      new Request('https://reporter/reports/public/monitors/missing.json'),
-      env,
-      {
-        waitUntil: (task) => {
-          tasks.push(task);
-        },
-      } as ExecutionContext,
-    );
-    expect(response.status).toBe(404);
-    await Promise.all(tasks);
-    expect(ended).toHaveBeenCalledTimes(1);
-    const workflow = new MonitorRefreshWorkflow({} as never, env);
-    await workflow.run(
-      { payload: { monitorId: 'missing', token: 'missing', initialInWorkflow: true } } as never,
-      {
-        do: async (_name: string, _options: unknown, callback: () => Promise<boolean>) =>
-          callback(),
-        sleep: vi.fn(),
-      } as never,
-    );
-    expect(ended).toHaveBeenCalledTimes(1);
   }, 30_000);
 
   it('drops imported queue work before a lease and validates all routing fields', async () => {
@@ -426,89 +325,4 @@ describe('native Worker event sessions and dispatch', () => {
       isTenantJob({ workspaceId, scheduledAt: now.toISOString(), routingGeneration: -1 }),
     ).toBe(false);
   });
-
-  it('acknowledges a suspended workspace before outbox or tenant resolution', async () => {
-    const ack = vi.fn();
-    const retry = vi.fn();
-    await control.query(
-      `UPDATE ${control.table('workspaces')} SET state = 'suspended' WHERE id = $1`,
-      [workspaceId],
-    );
-    try {
-      await coordinator.queue(
-        {
-          messages: [
-            {
-              body: { workspaceId, scheduledAt: new Date(now.getTime() + 5_000).toISOString() },
-              ack,
-              retry,
-            },
-          ],
-        } as never,
-        {
-          ...env,
-          POSTGRES_RUNTIME_CATALOG: JSON.stringify({
-            controlSchema: controlFixture.schema,
-            sources: [],
-          }),
-        },
-      );
-      expect(ack).toHaveBeenCalledOnce();
-      expect(retry).not.toHaveBeenCalled();
-    } finally {
-      await control.query(
-        `UPDATE ${control.table('workspaces')} SET state = 'active' WHERE id = $1`,
-        [workspaceId],
-      );
-    }
-  }, 30_000);
-
-  it('executes a native maintenance queue job once and closes both duplicate delivery sessions', async () => {
-    await hosted.db.query(
-      `INSERT INTO ${hosted.db.table('monitors')}
-      (id, name, url, interval_seconds, timeout_ms, next_check_at, enabled, outage_threshold, recovery_threshold, dns_diagnostics_enabled)
-      VALUES ('retention-runtime', 'Retention', 'https://example.com', 300, 1000, $1, 0, 2, 1, 0)`,
-      [now.toISOString()],
-    );
-    await hosted.db
-      .query(`INSERT INTO ${hosted.db.table('monitor_daily_uptime')} (monitor_id, day, uptime_percentage)
-      VALUES ('retention-runtime', '2000-01-01', 100)`);
-    const ended = vi.spyOn(pg.Client.prototype, 'end');
-    const ack = vi.fn();
-    const retry = vi.fn();
-    const body = { workspaceId, scheduledAt: now.toISOString(), maintenanceOnly: true };
-    await control.query(
-      `INSERT INTO ${control.table('dispatch_outbox')}
-      (id, workspace_id, scheduled_at, status, attempts, next_attempt_at, created_at)
-      VALUES ($1, $2, $3, 'sent', 1, $3, $3) ON CONFLICT (workspace_id, scheduled_at) DO NOTHING`,
-      [`${workspaceId}:${now.toISOString()}`, workspaceId, now.toISOString()],
-    );
-    await coordinator.queue(
-      {
-        messages: [
-          { body, ack, retry },
-          { body, ack, retry },
-        ],
-      } as never,
-      env,
-    );
-    expect(ack).toHaveBeenCalledTimes(2);
-    expect(retry).not.toHaveBeenCalled();
-    expect(ended).toHaveBeenCalledTimes(2);
-    expect(
-      (await readJob(hosted.db, `dispatch:${now.toISOString()}`))?.last_completed_at,
-    ).toBeTruthy();
-    const result = await control.query<{ execution_lease_token: string | null }>(
-      `SELECT execution_lease_token FROM ${control.table('workspaces')} WHERE id = $1`,
-      [workspaceId],
-    );
-    expect(result.rows[0]?.execution_lease_token).toBeNull();
-    expect(
-      (
-        await hosted.db.query(
-          `SELECT day FROM ${hosted.db.table('monitor_daily_uptime')} WHERE monitor_id = 'retention-runtime'`,
-        )
-      ).rows,
-    ).toEqual([]);
-  }, 180_000);
 });

@@ -85,5 +85,5 @@ if (password !== confirmation) {
 const hash = await hashPassword(password);
 console.log(`ADMIN_PASSWORD_HASH='${hash}'`);
 console.log(
-  'Set this with: wrangler secret put ADMIN_PASSWORD_HASH --config deploy/cloudflare/api/wrangler.toml',
+  'Set this as ADMIN_PASSWORD_HASH in the VPS service environment file.',
 );

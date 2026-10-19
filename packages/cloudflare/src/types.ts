@@ -4,7 +4,7 @@ import type { RegionId } from './regions.js';
  * Contract enums mirrored from `@uptime/contracts`. They are re-declared here
  * so this package has no non-region workspace dependency and can be installed
  * without touching the root lockfile. Values are kept in sync with the
- * contracts package; the D1 CHECK constraints enforce the same sets.
+ * contracts package; the PostgreSQL CHECK constraints enforce the same sets.
  */
 export type RunStatus = 'pending' | 'complete' | 'partial';
 export type ObservationStatus = 'success' | 'http_failure' | 'network_failure';
@@ -32,9 +32,9 @@ export interface NotificationMessage {
 }
 
 /**
- * Raw D1 row shapes. D1 returns SQLite storage values: booleans come back as
- * `0|1`, timestamps as ISO text. `toBoolean` in `env.ts` and `parseJsonColumn`
- * below convert to the contract domain types.
+ * Raw row shapes returned by the PostgreSQL query layer. Flag columns come back
+ * as `0|1` integers and JSON columns as text, so `toBoolean` in `env.ts` and
+ * `parseJsonColumn` below convert to the contract domain types.
  */
 export interface MonitorRow {
   id: string;

@@ -1,6 +1,6 @@
 {
   "name": "multi-region-uptime",
-  "description": "Uptime monitoring on Cloudflare Workers, D1, R2, and Pages",
+  "description": "Multi-region uptime monitoring on a Node and PostgreSQL VPS with Cloudflare probe Workers",
   "version": "0.1.0",
   "private": true,
   "packageManager": "pnpm@11.24.0",
@@ -14,7 +14,6 @@
     "test:postgres": "pnpm --filter @uptime/cloudflare test:postgres",
     "format:check": "prettier --check .",
     "generate:wrangler": "node scripts/generate-wrangler-configs.ts",
-    "db:migrate:local": "pnpm --filter @uptime/api-worker exec wrangler d1 migrations apply uptime --local --config ../../deploy/cloudflare/api/wrangler.toml",
     "hash:admin": "node scripts/hash-admin-password.ts"
   },
   "devDependencies": {

@@ -1,17 +1,13 @@
-import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseCoordinatorEnv, parseReportEnv, type CoordinatorConfig } from './env.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseCoordinatorEnv, type CoordinatorConfig } from './env.js';
 import { claimJob, readJob } from './state.js';
 import {
-  first,
   count,
   useTenantDatabase,
-  createRuntimeFixture,
   seedMonitor,
   seedObservation,
   seedRound,
 } from './testing-postgres.js';
-import { seedControlUser, seedControlWorkspace } from './testing-postgres.js';
-import type { ReporterRuntimeEnv } from './reporter.js';
 
 import { FakeR2 } from './testing-r2.js';
 import { regionIds } from '@uptime/regions';
@@ -22,37 +18,11 @@ import {
   reportLeaseSeconds,
   runReportSchedule,
   runtimeFetch,
-} from './index.js';
+} from './schedule.js';
 import { runReportJob } from './report-job.js';
-import reporter from './reporter.js';
 import { reportCohortPointerKey, reportCohortIndexKey } from './publisher.js';
 
-vi.mock('cloudflare:workers', () => ({ WorkflowEntrypoint: class {} }));
-
 const makeDatabase = useTenantDatabase();
-let runtime: Awaited<ReturnType<typeof createRuntimeFixture>>;
-beforeAll(async () => {
-  runtime = await createRuntimeFixture(['legacy-production']);
-}, 180_000);
-afterAll(async () => {
-  await runtime?.close();
-}, 180_000);
-
-function runtimeEnv(): ReporterRuntimeEnv {
-  return {
-    ...runtime.env,
-    POSTGRES_SOURCE_DATABASE_ID: 'source-1',
-    WORKERS_URL_DOMAIN: 'account.workers.dev',
-    PROBE_SIGNING_SECRET: 'x'.repeat(40),
-    CREDENTIAL_ENCRYPTION_SECRET: 'y'.repeat(40),
-    REPORTS: new FakeR2(),
-    CURRENT_BUDGET_USAGE_JSON: JSON.stringify({
-      month: '2026-09',
-      observedAt: '2026-09-20T10:00:00.000Z',
-      cloudflareCostUsd: 0,
-    }),
-  } as unknown as ReporterRuntimeEnv;
-}
 
 function config(db: CoordinatorConfig['db']): CoordinatorConfig {
   return {
@@ -76,160 +46,12 @@ function config(db: CoordinatorConfig['db']): CoordinatorConfig {
 }
 
 describe('coordinator runtime dependencies', () => {
-  it('runs the identity-verified legacy coordinator in maintenance mode under a CONTROL pause', async () => {
-    const workspaceId = '00000000-0000-4000-8000-000000000107';
-    await runtime.assign(0, workspaceId, 'did:plc:legacy-coordinator');
-    const db = runtime.tenants[0]!.db;
-    const control = runtime.control.db;
-    await control.query(
-      `INSERT INTO ${control.table('scheduling_controls')}
-      (scope,paused,reason,actor,changed_at) VALUES ('fleet',1,'maintenance','operator',$1)`,
-      ['2026-09-20T10:00:00.000Z'],
-    );
-    await seedMonitor(db, { regions: ['us-east'], nextCheckAt: '2026-09-20T10:00:00.000Z' });
-    const env = { ...runtimeEnv(), ENVIRONMENT: 'production', LEGACY_IMPORT_COORDINATOR: 'true' };
-    await (await import('./index.js')).default.scheduled({} as never, env);
-    expect(await count(db, 'check_runs')).toBe(0);
-    expect(await first(db, `SELECT name FROM ${db.table('jobs')} WHERE name='retention'`)).toEqual({
-      name: 'retention',
-    });
-    expect(
-      await first(
-        control,
-        `SELECT workspace_id FROM ${control.table('coordinator_runtime_health')}`,
-      ),
-    ).toEqual({ workspace_id: workspaceId });
-    await db.query(`UPDATE ${db.table('production_workspace_identity')} SET database_id='wrong'`);
-    try {
-      await expect(
-        (await import('./index.js')).default.scheduled({} as never, env),
-      ).rejects.toThrow(/identity mismatch/i);
-    } finally {
-      await db.query(
-        `UPDATE ${db.table('production_workspace_identity')} SET database_id='source-1'`,
-      );
-      await db.query(`DELETE FROM ${db.table('monitors')}`);
-      await db.query(`DELETE FROM ${db.table('jobs')}`);
-      await control.query(`DELETE FROM ${control.table('scheduling_controls')}`);
-    }
-  });
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-09-20T10:00:00.000Z'));
   });
 
   afterEach(() => vi.useRealTimers());
-
-  it('acknowledges queued work for a suspended workspace without resolving a tenant database', async () => {
-    const db = runtime.control.db;
-    await seedControlUser(db, 'did:plc:00000000-0000-4000-8000-000000000001', 'owner.test');
-    await seedControlWorkspace(db, {
-      workspaceId: '00000000-0000-4000-8000-000000000001',
-      ownerDid: 'did:plc:00000000-0000-4000-8000-000000000001',
-      state: 'suspended',
-    });
-
-    let acknowledged = false;
-    let retried = false;
-    await (
-      await import('./index.js')
-    ).default.queue(
-      {
-        messages: [
-          {
-            body: {
-              workspaceId: '00000000-0000-4000-8000-000000000001',
-              scheduledAt: '2026-09-20T10:00:00.000Z',
-            },
-            ack: () => (acknowledged = true),
-            retry: () => (retried = true),
-          },
-        ],
-      } as never,
-      runtimeEnv(),
-    );
-    expect(acknowledged).toBe(true);
-    expect(retried).toBe(false);
-  });
-
-  it('retries queued work when an active workspace has a live execution lease', async () => {
-    const db = runtime.control.db;
-    await seedControlUser(db, 'did:plc:00000000-0000-4000-8000-000000000002', 'owner.test');
-    await seedControlWorkspace(db, {
-      workspaceId: '00000000-0000-4000-8000-000000000002',
-      ownerDid: 'did:plc:00000000-0000-4000-8000-000000000002',
-      state: 'active',
-    });
-    await db.query(
-      `UPDATE ${db.table('workspaces')} SET execution_lease_token='held', execution_lease_until='2099-01-01T00:00:00.000Z' WHERE id=$1`,
-      ['00000000-0000-4000-8000-000000000002'],
-    );
-    await db.query(
-      `INSERT INTO ${db.table('dispatch_outbox')} (id,workspace_id,scheduled_at,status,attempts,next_attempt_at,created_at)
-      VALUES ($1,$1,$2,'sent',1,$2,$2)`,
-      ['00000000-0000-4000-8000-000000000002', '2026-09-20T10:00:00.000Z'],
-    );
-    let acknowledged = false;
-    let retried = false;
-    await (
-      await import('./index.js')
-    ).default.queue(
-      {
-        messages: [
-          {
-            body: {
-              workspaceId: '00000000-0000-4000-8000-000000000002',
-              scheduledAt: '2026-09-20T10:00:00.000Z',
-            },
-            ack: () => (acknowledged = true),
-            retry: () => (retried = true),
-          },
-        ],
-      } as never,
-      runtimeEnv(),
-    );
-    expect(acknowledged).toBe(false);
-    expect(retried).toBe(true);
-  });
-  it('runs the separate reporter with native PostgreSQL and R2 bindings', async () => {
-    const db = runtime.tenants[0]!.db;
-    const env = runtimeEnv();
-    expect(parseReportEnv({ ...env, DB: db }, db).reports).toBe(env.REPORTS);
-    await reporter.scheduled({} as ScheduledController, env);
-    expect((await readJob(db, 'reports'))?.last_completed_at).not.toBeNull();
-    expect(env.REPORTS instanceof FakeR2 && env.REPORTS.store.has(reportCohortPointerKey)).toBe(
-      true,
-    );
-  });
-
-  it('runs the separate reporter against the legacy production schema without hosted metadata', async () => {
-    const db = runtime.tenants[0]!.db;
-    const env = runtimeEnv();
-    await reporter.scheduled({} as ScheduledController, env);
-    expect(env.REPORTS instanceof FakeR2 && env.REPORTS.store.has(reportCohortPointerKey)).toBe(
-      true,
-    );
-    expect(await first(db, `SELECT name FROM ${db.table('jobs')} WHERE name='reports'`)).toEqual({
-      name: 'reports',
-    });
-    expect(() => db.table('workspace_metadata')).toThrow();
-    expect(
-      (
-        await db.query(
-          "SELECT table_name FROM information_schema.tables WHERE table_schema=$1 AND table_name='workspace_metadata'",
-          [db.schema],
-        )
-      ).rows,
-    ).toEqual([]);
-    expect(
-      (
-        await db.query(
-          "SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='production_workspace_identity' ORDER BY ordinal_position",
-          [db.schema],
-        )
-      ).rows.map((row) => row.column_name),
-    ).toEqual(['id', 'workspace_id', 'database_id']);
-  });
 
   it('keeps coordinator report scheduling enabled unless explicitly disabled', () => {
     const { db } = makeDatabase();

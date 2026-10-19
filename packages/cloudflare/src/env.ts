@@ -1,5 +1,5 @@
 import { regionIds, type RegionId } from './regions.js';
-import type { D1Database, PostgresHyperdriveBinding, R2Bucket } from './workers-types.js';
+import type { PostgresHyperdriveBinding, R2Bucket } from './workers-types.js';
 
 /**
  * Common Worker bindings for every Cloudflare deployment in this repository.
@@ -12,10 +12,7 @@ export interface CloudflareEnv {
   POSTGRES?: PostgresHyperdriveBinding;
   POSTGRES_RUNTIME_CATALOG?: string;
   POSTGRES_SOURCE_DATABASE_ID?: string;
-  DB: D1Database;
   REPORTS?: R2Bucket;
-  /** Control-plane D1 binding used by the hosted multi-tenant coordinator. */
-  CONTROL_DB?: D1Database;
   SESSION_SECRET?: string;
   PROBE_SIGNING_SECRET?: string;
   ADMIN_EMAIL?: string;
@@ -64,7 +61,7 @@ export function requireBinding<T>(value: T | undefined | null, name: string): T 
   return value;
 }
 
-/** `true` for `1`/`true`/`yes` values coming from D1 or Worker vars. */
+/** `true` for `1`/`true`/`yes` values coming from Worker vars or config rows. */
 export function toBoolean(value: unknown): boolean {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') return value !== 0;

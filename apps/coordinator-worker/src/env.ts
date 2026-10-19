@@ -7,7 +7,6 @@ import {
 } from '@uptime/cloudflare';
 import type { Database, PostgresRuntimeBindings } from '@uptime/cloudflare/postgres';
 import { regionById, type RegionDefinition, type RegionId } from '@uptime/regions';
-import type { MonitorRefreshParams } from './on-demand-monitor.js';
 
 /**
  * Validated coordinator configuration.
@@ -21,8 +20,6 @@ export interface ReportConfig {
   readonly reports: R2Bucket | null;
   readonly reportIntervalSeconds: number;
   readonly staleAfterSeconds: number;
-  /** Compatibility for deployed bindings; publication no longer starts these Workflows. */
-  readonly monitorRefresh?: Workflow<MonitorRefreshParams>;
 }
 
 export interface CoordinatorConfig extends ReportConfig {
@@ -50,8 +47,7 @@ export interface CoordinatorEnv
     Omit<CloudflareEnv, 'DB' | 'CONTROL_DB' | keyof PostgresRuntimeBindings>,
     PostgresRuntimeBindings {
   REPORTS?: R2Bucket;
-  MONITOR_REFRESH?: Workflow<MonitorRefreshParams>;
-  TENANT_JOBS?: Queue<import('./tenant-dispatch.js').TenantJob>;
+  TENANT_JOBS?: { send(job: import('./tenant-dispatch.js').TenantJob): Promise<void> };
   CURRENT_BUDGET_USAGE_JSON?: string;
   /** Only "true" disables budget enforcement. Unset keeps it on. */
   BUDGET_ENFORCEMENT_DISABLED?: string;
@@ -131,7 +127,7 @@ function probeWorkerNamePrefix(value: unknown): string {
 }
 
 function reportSettings(
-  source: Pick<CoordinatorEnv, 'REPORTS' | 'MONITOR_REFRESH'>,
+  source: Pick<CoordinatorEnv, 'REPORTS'>,
   db: Database,
 ): ReportConfig {
   const record = source as unknown as Record<string, unknown>;
@@ -141,7 +137,6 @@ function reportSettings(
     reports: source.REPORTS ?? null,
     reportIntervalSeconds,
     staleAfterSeconds: reportIntervalSeconds + 120,
-    ...(source.MONITOR_REFRESH ? { monitorRefresh: source.MONITOR_REFRESH } : {}),
   };
 }
 

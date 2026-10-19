@@ -2,7 +2,7 @@ import type { AddressInfo } from 'node:net';
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { reconcileScheduled } from './index.js';
+import { reconcileScheduled } from './reconcile.js';
 import { loadNodeRuntime, type NodeRuntime } from './node-env.js';
 import { createNodeServer, type NodeServer } from './node-server.js';
 import { createRuntimeFixture } from './testing/runtime-fixture.js';

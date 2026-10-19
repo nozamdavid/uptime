@@ -17,7 +17,7 @@ import {
 } from './testing-postgres.js';
 import { meterDatabase } from './query-metrics.js';
 import { FakeR2 } from './testing-r2.js';
-import { runCoordinatorSchedule } from './index.js';
+import { runCoordinatorSchedule } from './schedule.js';
 import { claimJob, readJob } from './state.js';
 
 const now = new Date('2026-09-20T10:00:00.000Z');

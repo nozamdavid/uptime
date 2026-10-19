@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
     "./providers": "./src/providers.ts",
     "./credentials": "./src/credentials.ts",
     "./queries": "./src/queries.ts",
@@ -13,7 +12,6 @@
     "./r2-s3": "./src/r2-s3.ts"
   },
   "scripts": {
-    "dev": "wrangler dev --config ../../deploy/cloudflare/api/wrangler.toml",
     "build:node": "esbuild src/node-main.ts --bundle --platform=node --target=node24 --format=esm --external:pg-native --sourcemap --outfile=dist/node/server.mjs --banner:js=\"import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);\"",
     "start:node": "node dist/node/server.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -31,7 +29,6 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250829.0",
     "@types/node": "^24.3.0",
-    "esbuild": "0.25.12",
-    "wrangler": "^4.35.0"
+    "esbuild": "0.25.12"
   }
 }
