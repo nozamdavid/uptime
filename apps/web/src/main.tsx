@@ -13,7 +13,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import type { MonitorSummary } from '@uptime/contracts';
 import './styles.css';
-import { api } from './api.js';
+import { api, RequestError } from './api.js';
 import type { ProductSession } from './api.js';
 import { MonitorDetail } from './monitor-detail.js';
 import { MonitorForm } from './monitor-form.js';
@@ -36,7 +36,20 @@ import { MockBillingCheckoutPage } from './mock-billing-checkout.js';
 import { Select } from './select.js';
 import { ThemeControl } from './theme.js';
 
-const rootRoute = createRootRoute({ component: AppShell });
+function BuildVersion() {
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  if (pathname.startsWith('/status/') || pathname.startsWith('/monitors/public/')) return null;
+  return <span className="build-version">{__APP_VERSION__}</span>;
+}
+
+const rootRoute = createRootRoute({
+  component: () => (
+    <>
+      <AppShell />
+      <BuildVersion />
+    </>
+  ),
+});
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
@@ -155,6 +168,8 @@ export function AppShell() {
   const isAuthRoute = pathname === '/login' || pathname === '/signup';
   const [session, setSession] = useState<ProductSession | null>(null);
   const sessionGeneration = useRef(0);
+  const [sessionError, setSessionError] = useState(false);
+  const [sessionRetry, setSessionRetry] = useState(0);
   const [authenticated, setAuthenticated] = useState<boolean | null>(
     isLanding || isPricing || isAuthRoute ? false : null,
   );
@@ -163,6 +178,7 @@ export function AppShell() {
     window.sessionStorage.removeItem('uptime.workspaceId');
     setSession(null);
     setAuthenticated(false);
+    setSessionError(false);
   };
   useEffect(() => {
     if (isPublicRoute || isLanding || isPricing || isAuthRoute) return;
@@ -173,25 +189,31 @@ export function AppShell() {
       .session()
       .then((result) => {
         if (!active || generation !== sessionGeneration.current) return;
+        setSessionError(false);
         setSession(result);
         if (result.workspace?.id)
           window.sessionStorage.setItem('uptime.workspaceId', result.workspace.id);
         setAuthenticated(true);
       })
-      .catch(() => {
-        if (active && generation === sessionGeneration.current) clearSession();
+      .catch((error: unknown) => {
+        if (!active || generation !== sessionGeneration.current) return;
+        if (error instanceof RequestError && error.status === 401) clearSession();
+        else {
+          setSessionError(true);
+          setAuthenticated(null);
+        }
       });
     return () => {
       active = false;
     };
-  }, [isPublicRoute, isLanding, isPricing, isAuthRoute]);
+  }, [isPublicRoute, isLanding, isPricing, isAuthRoute, sessionRetry]);
   useEffect(() => {
     window.addEventListener('uptime:session-expired', clearSession);
     return () => window.removeEventListener('uptime:session-expired', clearSession);
   }, []);
   if (isLanding || isPricing)
     return (
-      <main className="public-workspace">
+      <main className="public-workspace public-workspace--nav-theme">
         <div className="theme-toolbar">
           <ThemeControl />
         </div>
@@ -216,6 +238,16 @@ export function AppShell() {
         <Outlet />
       </main>
     );
+  if (authenticated === null)
+    if (sessionError)
+      return (
+        <div className="center-state" role="alert">
+          <p>Can't reach the server right now.</p>
+          <button className="button button--primary" onClick={() => setSessionRetry((value) => value + 1)}>
+            Try again
+          </button>
+        </div>
+      );
   if (authenticated === null)
     return (
       <div className="center-state" role="status">
@@ -783,7 +815,7 @@ function Overview() {
           </button>
           {items && items.length > 0 && (
             <button
-              className="button button--primary"
+              className="button button--primary button--accent"
               type="button"
               onClick={() => setFormOpen(true)}
             >
@@ -867,7 +899,9 @@ function State({
       <p>{text}</p>
       {action && (
         <button
-          className={kind === 'empty' ? 'button button--primary' : 'button button--secondary'}
+          className={
+            kind === 'empty' ? 'button button--primary button--accent' : 'button button--secondary'
+          }
           onClick={action}
         >
           {kind === 'empty' ? 'Add monitor' : 'Retry'}

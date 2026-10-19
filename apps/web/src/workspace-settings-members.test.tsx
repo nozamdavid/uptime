@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, createElement } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { createTestRoot } from './testing/react-root.js';
 
 const apiMock = vi.hoisted(() => ({
@@ -47,6 +47,12 @@ describe('WorkspaceSettingsMembers', () => {
   };
 
   it('displays pending invitation with exact local expiry and active invite link', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-02T12:00:00.000Z'));
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+
     const view = createTestRoot();
     await act(async () => {
       view.root.render(

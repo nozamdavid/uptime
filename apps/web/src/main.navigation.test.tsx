@@ -14,7 +14,12 @@ const apiMock = vi.hoisted(() => ({
   signOut: vi.fn(),
 }));
 
-vi.mock('./api.js', () => ({ api: apiMock }));
+vi.mock('./api.js', () => ({
+  api: apiMock,
+  RequestError: class RequestError extends Error {
+    constructor(message: string, readonly status: number) { super(message); }
+  },
+}));
 vi.mock('./monitor-detail.js', () => ({
   MonitorDetail: () => createElement('div', null, 'Monitor detail'),
 }));
@@ -59,6 +64,51 @@ describe('private section navigation', () => {
   afterEach(() => {
     document.body.innerHTML = '';
     vi.clearAllMocks();
+  });
+
+  it('keeps the user out of login on a transient session error and retries', async () => {
+    window.history.replaceState({}, '', '/app');
+    const { RequestError } = await import('./api.js');
+    apiMock.session.mockRejectedValueOnce(new RequestError('Busy', 429));
+    apiMock.monitors.mockResolvedValue({ monitors: [] });
+    const { router } = await import('./main.js');
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(RouterProvider, { router }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Can't reach the server right now.");
+    expect(container.textContent).toContain('Try again');
+    expect(container.textContent).not.toContain('Login');
+    apiMock.session.mockResolvedValueOnce({ user: { did: 'did:plc:test', handle: 'test.example' }, workspace: null, workspaces: [], role: 'owner' });
+    await act(async () => {
+      container.querySelector('button')!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(apiMock.session).toHaveBeenCalledTimes(2);
+    await act(async () => root.unmount());
+  });
+
+  it('clears the session after a 401 response', async () => {
+    window.history.replaceState({}, '', '/app');
+    const { RequestError } = await import('./api.js');
+    apiMock.session.mockRejectedValueOnce(new RequestError('Unauthorized', 401));
+    const { router } = await import('./main.js');
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(RouterProvider, { router }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('Login');
+    expect(container.textContent).not.toContain('Try again');
+    await act(async () => root.unmount());
   });
 
   it.each([
@@ -218,6 +268,39 @@ describe('private section navigation', () => {
     expect(container.textContent).toContain('Login');
     expect(window.sessionStorage.getItem('uptime.workspaceId')).toBeNull();
 
+    await act(async () => root.unmount());
+  });
+
+  it('hides the build version on public status pages and shows it on console routes', async () => {
+    window.history.replaceState({}, '', '/app');
+    apiMock.session.mockResolvedValue({
+      user: { did: 'did:plc:test', handle: 'test.example' },
+      workspace: { id: 'workspace-1', name: 'Test', plan: 'free', state: 'active' },
+      workspaces: [],
+      role: 'owner',
+    });
+    apiMock.monitors.mockResolvedValue({ monitors: [] });
+
+    const { router } = await import('./main.js');
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(RouterProvider, { router }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('.build-version')).not.toBeNull();
+
+    await act(async () => {
+      await router.navigate({ to: '/status/$statusPageId', params: { statusPageId: 'page-1' } });
+    });
+    expect(container.textContent).toContain('Public status page');
+    expect(container.querySelector('.build-version')).toBeNull();
+
+    await act(async () => {
+      await router.navigate({ to: '/app' });
+    });
     await act(async () => root.unmount());
   });
 

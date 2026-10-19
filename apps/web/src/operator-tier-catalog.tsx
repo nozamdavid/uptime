@@ -152,7 +152,7 @@ export function OperatorTierCatalog({ availableRegions = [] }: OperatorTierCatal
         customDomains: 1,
         intervalSeconds: 300,
         rawRetentionHours: 24,
-        dailyRetentionDays: 30,
+        dailyRetentionDays: 90,
       },
       features: deriveTierFeatures({
         monitors: 15,
@@ -164,7 +164,7 @@ export function OperatorTierCatalog({ availableRegions = [] }: OperatorTierCatal
         customDomains: 1,
         intervalSeconds: 300,
         rawRetentionHours: 24,
-        dailyRetentionDays: 30,
+        dailyRetentionDays: 90,
       }),
       active: true,
       published: true,
@@ -746,7 +746,7 @@ export function OperatorTierCatalog({ availableRegions = [] }: OperatorTierCatal
 
                           <label className="field">
                             <span>Daily Retention (Fixed)</span>
-                            <input value="30 days" readOnly disabled />
+                            <input value="90 days" readOnly disabled />
                           </label>
                         </div>
 

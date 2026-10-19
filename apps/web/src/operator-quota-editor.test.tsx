@@ -38,7 +38,7 @@ describe('WorkspaceLimitsEditor', () => {
       statusPages: 1,
       notificationServices: 3,
       rawRetentionDays: 1,
-      dailyRetentionDays: 30,
+      dailyRetentionDays: 90,
     },
     rowsRead: 10,
     rowsWritten: 5,

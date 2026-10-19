@@ -336,7 +336,7 @@ describe('notifications admin', () => {
     await act(async () => root.unmount());
   });
 
-  it('does not display service updatedAt as delivery time and reports unavailable when missing delivery history', async () => {
+  it('does not display service updatedAt or an unavailable placeholder as delivery time', async () => {
     const updatedAtTimestamp = '2026-09-16T10:00:00.000Z';
     const { container, root } = renderPage({
       services: [
@@ -367,22 +367,8 @@ describe('notifications admin', () => {
       await Promise.resolve();
     });
 
-    const deliveryElements = container.querySelectorAll('.notification-card__delivery');
-    expect(deliveryElements).toHaveLength(2);
-
-    // The first service only has updatedAt: it must NOT use updatedAt as delivery time.
-    expect(deliveryElements[0]?.textContent).toBe('Last delivery: unavailable');
-    expect(deliveryElements[0]?.textContent).not.toContain('2026-09-16');
-    expect(deliveryElements[0]?.getAttribute('title')).toBe(
-      'Delivery history contains actual timestamps',
-    );
-
-    // The second service only has updatedAt: it must NOT use updatedAt as delivery time.
-    expect(deliveryElements[1]?.textContent).toBe('Last delivery: unavailable');
-    expect(deliveryElements[1]?.textContent).not.toContain('2026-09-16');
-    expect(deliveryElements[1]?.getAttribute('title')).toBe(
-      'Delivery history contains actual timestamps',
-    );
+    expect(container.textContent).not.toContain('Last delivery: unavailable');
+    expect(container.textContent).not.toContain('2026-09-16');
 
     await act(async () => root.unmount());
   });

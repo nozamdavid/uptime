@@ -476,6 +476,18 @@ kbd {
   box-shadow: inset 0 1px 0 var(--control-highlight);
 }
 
+/* Accent: a primary action in the brand color, in both themes. */
+.button--primary.button--accent {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.button--primary.button--accent:hover:not(:disabled),
+.button--primary.button--accent.is-hover {
+  background: var(--accent-hover);
+  color: var(--on-accent);
+}
+
 /* Secondary */
 .ut-btn--secondary,
 .button--secondary {
@@ -1260,6 +1272,35 @@ tbody tr:hover {
   padding-block: var(--space-4);
 }
 
+/* The home page fits one viewport and never scrolls. */
+.landing--home {
+  height: 100dvh;
+  overflow: hidden;
+}
+
+/* Equal inline padding keeps the links centered on the page, clear of the theme toggle. */
+.public-workspace--nav-theme .landing__nav--centered {
+  justify-content: center;
+  padding-left: calc(var(--control-md) + var(--space-4));
+}
+
+/* Public pages put the theme toggle in the nav row instead of a row above it. */
+.public-workspace--nav-theme {
+  position: relative;
+}
+
+.public-workspace--nav-theme > .theme-toolbar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+}
+
+.public-workspace--nav-theme .landing__nav {
+  min-height: var(--control-md);
+  padding-right: calc(var(--control-md) + var(--space-4));
+}
+
 .landing__nav,
 .landing__footer,
 .landing__foot {
@@ -1292,15 +1333,17 @@ tbody tr:hover {
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  width: min(100%, 44rem);
+  width: min(100%, 30rem);
   margin-inline: auto;
-  padding-block: var(--space-6);
+  gap: var(--space-5, 1.5rem);
+  padding-block: var(--space-4);
+  padding-bottom: 12vh;
   text-align: center;
 }
 
 .landing__hero h1 {
   max-width: 18ch;
-  margin-block: 0 var(--space-2);
+  margin-block: 0;
 }
 
 .landing__lede {
@@ -1338,7 +1381,13 @@ tbody tr:hover {
 .landing__form {
   display: grid;
   gap: var(--space-3);
-  width: 100%;
+  width: fit-content;
+  max-width: 100%;
+}
+
+/* Sized to fit the "handle.bsky.social" placeholder. */
+.landing__form input {
+  width: calc(18ch + 2 * var(--space-4));
 }
 
 .auth-page,
@@ -1504,6 +1553,7 @@ tbody tr:hover {
 }
 
 .public-status-group {
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   background: var(--surface);
@@ -1553,7 +1603,7 @@ tbody tr:hover {
 .public-status-monitor {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(10rem, 1fr) 5rem minmax(14rem, 2fr) auto;
+  grid-template-columns: minmax(10rem, 1fr) minmax(14rem, 2fr) 5rem auto;
   align-items: center;
   gap: var(--space-3);
   padding-block: var(--space-2);
@@ -1583,8 +1633,9 @@ tbody tr:hover {
 }
 
 .public-status-monitor__uptime {
-  grid-column: 2;
+  grid-column: 3;
   grid-row: 1;
+  text-align: right;
   font-family: var(--font-mono);
   font-size: var(--text-data-size);
   color: var(--muted);
@@ -1593,7 +1644,7 @@ tbody tr:hover {
 .public-status-monitor > .uptime-days,
 .public-status-monitor > .ut-strip__days,
 .public-status-monitor > .ut-strip {
-  grid-column: 3;
+  grid-column: 2;
   grid-row: 1;
   min-width: 0;
 }
@@ -1623,9 +1674,18 @@ tbody tr:hover {
   color: var(--unknown);
 }
 
-@media (max-width: 700px) {
+.public-status-monitor .uptime-day {
+  min-width: 0;
+}
+
+/* Stack the strip under the summary whenever the card is too narrow for one row. */
+@container (max-width: 44rem) {
   .public-status-monitor {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .public-status-monitor > .uptime-days {
+    gap: 1px;
   }
 
   .public-status-monitor__summary {
@@ -1649,6 +1709,7 @@ tbody tr:hover {
     grid-column: auto;
     grid-row: auto;
     flex: 0 0 auto;
+    text-align: left;
   }
 
   .public-status-monitor__state {
@@ -1777,4 +1838,28 @@ tbody tr:hover {
     min-height: calc(var(--control-touch) - var(--space-1));
     font-size: var(--text-body-sm-size);
   }
+}
+
+.build-version {
+  position: fixed;
+  left: var(--space-2);
+  bottom: var(--space-1);
+  z-index: 1;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--muted);
+  opacity: 0.7;
+  pointer-events: none;
+  user-select: text;
+}
+
+/* Pages with the site footer show the version inside it instead of the corner. */
+body:has(.landing__footer) .build-version {
+  display: none;
+}
+
+.site-footer__version {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  opacity: 0.7;
 }

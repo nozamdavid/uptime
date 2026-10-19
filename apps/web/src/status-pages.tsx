@@ -620,6 +620,19 @@ export function PublicStatusPage({ statusPageId }: { statusPageId: string }) {
   const [autoRefresh, setAutoRefresh] = useState(false);
   const refreshGeneration = useRef(0);
   const inFlightRefresh = useRef<{ pageId: string; promise: Promise<void> } | null>(null);
+  useEffect(() => {
+    if (!page) return;
+    const previousTitle = document.title;
+    const robotsMeta = document.createElement('meta');
+    robotsMeta.name = 'robots';
+    robotsMeta.content = 'noindex';
+    document.head.append(robotsMeta);
+    document.title = `${page.title} status`;
+    return () => {
+      document.title = previousTitle;
+      robotsMeta.remove();
+    };
+  }, [page]);
   const refreshPage = useCallback(() => {
     if (inFlightRefresh.current?.pageId === statusPageId) {
       return inFlightRefresh.current.promise;

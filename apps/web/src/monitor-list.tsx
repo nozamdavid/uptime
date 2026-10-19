@@ -1,18 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   intervalSecondsValues,
   type Badge,
   type IntervalSeconds,
   type MonitorSummary,
+  type MonitorMetrics,
 } from "@uptime/contracts";
 import { regions, type RegionId } from "@uptime/regions";
 
-import {
-  api,
-  productWorkspaceId,
-  type MonitorDetailResponse,
-  type UptimeDay,
-} from "./api.js";
+import { api, productWorkspaceId, type UptimeDay } from "./api.js";
 import { AppLink } from "./app-link.js";
 import { MonitorBadge } from "./monitor-badge.js";
 import { Select } from "./select.js";
@@ -45,93 +41,10 @@ export interface RowMetrics {
   error: string | null;
 }
 
-class RequestScheduler {
-  private maxConcurrent = 4;
-  private running = 0;
-  private queue: Array<() => void> = [];
-
-  enqueue<T>(fn: (signal: AbortSignal) => Promise<T>, signal: AbortSignal): Promise<T> {
-    if (signal.aborted) {
-      return Promise.reject(new DOMException("Aborted", "AbortError"));
-    }
-
-    return new Promise<T>((resolve, reject) => {
-      let settled = false;
-
-      const cleanup = () => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-      };
-
-      const execute = async () => {
-        if (signal.aborted) {
-          cleanup();
-          this.running--;
-          this.drain();
-          reject(new DOMException("Aborted", "AbortError"));
-          return;
-        }
-
-        try {
-          const result = await fn(signal);
-          cleanup();
-          resolve(result);
-        } catch (err) {
-          cleanup();
-          reject(err);
-        } finally {
-          this.running--;
-          this.drain();
-        }
-      };
-
-      const onAbort = () => {
-        if (settled) return;
-        cleanup();
-        const idx = this.queue.indexOf(runJob);
-        if (idx !== -1) {
-          this.queue.splice(idx, 1);
-        }
-        reject(new DOMException("Aborted", "AbortError"));
-      };
-
-      const runJob = () => {
-        if (signal.aborted) {
-          onAbort();
-          return;
-        }
-        this.running++;
-        void execute();
-      };
-
-      signal.addEventListener("abort", onAbort, { once: true });
-
-      if (this.running < this.maxConcurrent) {
-        this.running++;
-        void execute();
-      } else {
-        this.queue.push(runJob);
-      }
-    });
-  }
-
-  private drain() {
-    while (this.running < this.maxConcurrent && this.queue.length > 0) {
-      const next = this.queue.shift();
-      if (next) {
-        next();
-      }
-    }
-  }
-}
-
-const rowMetricsScheduler = new RequestScheduler();
-
 const CACHE_TTL_MS = 60_000;
 
 interface CacheEntry {
-  metrics: RowMetrics;
+  metrics: Promise<Record<string, MonitorMetrics>>;
   timestamp: number;
   fingerprint: string;
 }
@@ -142,66 +55,24 @@ export function clearRowMetricsCache() {
   rowMetricsCache.clear();
 }
 
-function getCacheKey(monitorId: string): string {
-  const workspaceId = productWorkspaceId() ?? "";
-  return `${workspaceId}:${monitorId}`;
-}
-
 function getFingerprint(item: MonitorSummary): string {
-  return `${item.monitor.updatedAt}:${JSON.stringify(item.latestByRegion)}`;
+  return `${item.monitor.id}:${item.monitor.updatedAt}:${JSON.stringify(item.latestByRegion)}`;
 }
 
-function getValidCachedMetrics(cacheKey: string, fingerprint: string): RowMetrics | null {
+function fetchListMetrics(
+  cacheKey: string,
+  fingerprint: string,
+): Promise<Record<string, MonitorMetrics>> {
   const entry = rowMetricsCache.get(cacheKey);
-  if (!entry) return null;
-  if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
-    rowMetricsCache.delete(cacheKey);
-    return null;
+  if (entry && Date.now() - entry.timestamp <= CACHE_TTL_MS && entry.fingerprint === fingerprint) {
+    return entry.metrics;
   }
-  if (entry.fingerprint !== fingerprint) {
-    rowMetricsCache.delete(cacheKey);
-    return null;
-  }
-  return entry.metrics;
-}
-
-export function extractUptime24h(res: MonitorDetailResponse): number | null {
-  const stats = res.latency?.stats;
-  if (!Array.isArray(stats) || stats.length === 0) {
-    return null;
-  }
-  let totalSamples = 0;
-  let totalSuccess = 0;
-  for (const stat of stats) {
-    if (typeof stat.sampleCount === "number" && typeof stat.successCount === "number") {
-      totalSamples += stat.sampleCount;
-      totalSuccess += stat.successCount;
-    }
-  }
-  if (totalSamples === 0) {
-    return null;
-  }
-  return (totalSuccess / totalSamples) * 100;
-}
-
-async function fetchMonitorRowMetrics(
-  monitorId: string,
-  signal: AbortSignal,
-): Promise<{ days: UptimeDay[]; uptime24h: number | null; p50Ms: number | null }> {
-  if (signal.aborted) {
-    throw new DOMException("Aborted", "AbortError");
-  }
-
-  const res = await api.monitor(monitorId, "24h");
-
-  if (signal.aborted) {
-    throw new DOMException("Aborted", "AbortError");
-  }
-
-  const days = Array.isArray(res.uptime?.days) ? res.uptime.days.slice(-30) : [];
-  const uptime24h = extractUptime24h(res);
-
-  return { days, uptime24h, p50Ms: null };
+  const metrics = api.monitorMetrics().catch((error: unknown) => {
+    if (rowMetricsCache.get(cacheKey)?.metrics === metrics) rowMetricsCache.delete(cacheKey);
+    throw error;
+  });
+  rowMetricsCache.set(cacheKey, { metrics, timestamp: Date.now(), fingerprint });
+  return metrics;
 }
 
 export function MonitorList({
@@ -226,6 +97,36 @@ export function MonitorList({
   const [regionFilter, setRegionFilter] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [metrics, setMetrics] = useState<Record<string, MonitorMetrics>>({});
+  const [metricsLoading, setMetricsLoading] = useState(true);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
+  const workspaceId = productWorkspaceId() ?? "";
+  const fingerprint = items.map(getFingerprint).sort().join("|");
+
+  useEffect(() => {
+    let active = true;
+    setMetrics({});
+    setMetricsLoading(true);
+    setMetricsError(null);
+    if (!fingerprint) {
+      setMetricsLoading(false);
+      return;
+    }
+    void fetchListMetrics(workspaceId, fingerprint)
+      .then((data) => {
+        if (!active) return;
+        setMetrics(data);
+        setMetricsLoading(false);
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setMetricsError(reason instanceof Error ? reason.message : "Metrics unavailable");
+        setMetricsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [workspaceId, fingerprint, items]);
 
   useEffect(() => {
     void api
@@ -520,6 +421,13 @@ export function MonitorList({
           <MonitorRowItem
             key={item.monitor.id}
             item={item}
+            metrics={{
+              days: metrics[item.monitor.id]?.days ?? null,
+              uptime24h: metrics[item.monitor.id]?.uptime24h ?? null,
+              p50Ms: metrics[item.monitor.id]?.p50Ms ?? null,
+              loading: metricsLoading,
+              error: metricsError,
+            }}
             bulkEditing={bulkEditing}
             isSelected={selectedIds.has(item.monitor.id)}
             onToggle={(shiftKey) => toggleMonitor(item.monitor.id, shiftKey)}
@@ -538,108 +446,17 @@ export function MonitorList({
 
 function MonitorRowItem({
   item,
+  metrics,
   bulkEditing,
   isSelected,
   onToggle,
 }: {
   item: MonitorSummary;
+  metrics: RowMetrics;
   bulkEditing: boolean;
   isSelected: boolean;
   onToggle: (shiftKey: boolean) => void;
 }) {
-  const rowRef = useRef<HTMLDivElement>(null);
-  const hasIntersectionObserver = typeof IntersectionObserver !== "undefined";
-  const [isVisible, setIsVisible] = useState(() => !hasIntersectionObserver);
-
-  useEffect(() => {
-    if (isVisible) return;
-    const element = rowRef.current;
-    if (!element || typeof IntersectionObserver === "undefined") {
-      setIsVisible(true);
-      return;
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            setIsVisible(true);
-            observer.disconnect();
-            break;
-          }
-        }
-      },
-      { rootMargin: "200px" },
-    );
-
-    observer.observe(element);
-    return () => {
-      observer.disconnect();
-    };
-  }, [isVisible]);
-
-  const cacheKey = getCacheKey(item.monitor.id);
-  const fingerprint = getFingerprint(item);
-
-  const [metrics, setMetrics] = useState<RowMetrics>(() => {
-    const cached = getValidCachedMetrics(cacheKey, fingerprint);
-    return (
-      cached ?? {
-        days: null,
-        uptime24h: null,
-        p50Ms: null,
-        loading: isVisible,
-        error: null,
-      }
-    );
-  });
-
-  useEffect(() => {
-    if (!isVisible) return;
-
-    const cached = getValidCachedMetrics(cacheKey, fingerprint);
-    if (cached) {
-      setMetrics(cached);
-      return;
-    }
-
-    const controller = new AbortController();
-    setMetrics({ days: null, uptime24h: null, p50Ms: null, loading: true, error: null });
-
-    rowMetricsScheduler
-      .enqueue((signal) => fetchMonitorRowMetrics(item.monitor.id, signal), controller.signal)
-      .then((data) => {
-        const loaded: RowMetrics = {
-          days: data.days,
-          uptime24h: data.uptime24h,
-          p50Ms: data.p50Ms,
-          loading: false,
-          error: null,
-        };
-        rowMetricsCache.set(cacheKey, {
-          metrics: loaded,
-          timestamp: Date.now(),
-          fingerprint,
-        });
-        setMetrics(loaded);
-      })
-      .catch((err) => {
-        if (err instanceof DOMException && err.name === "AbortError") return;
-        const failed: RowMetrics = {
-          days: null,
-          uptime24h: null,
-          p50Ms: null,
-          loading: false,
-          error: err instanceof Error ? err.message : "Metric unavailable",
-        };
-        setMetrics(failed);
-      });
-
-    return () => {
-      controller.abort();
-    };
-  }, [item.monitor.id, fingerprint, isVisible, cacheKey]);
-
   const name = monitorDisplayName(item.monitor);
   const effectiveStatus = !item.monitor.enabled ? "paused" : item.status;
   const statusWord =
@@ -655,7 +472,6 @@ function MonitorRowItem({
 
   return (
     <div
-      ref={rowRef}
       className={`ut-board__row-shell monitor-row-shell${
         bulkEditing ? " monitor-row-shell--selectable" : ""
       }`}
@@ -675,23 +491,18 @@ function MonitorRowItem({
         {/* 1. Status chip */}
         <div>
           <span
-            className={`ut-status ut-status--chip ut-status--${effectiveStatus} status-dot status-dot--${effectiveStatus}`}
+            className={`status-dot status-dot--${effectiveStatus}`}
             role="img"
-            aria-label={effectiveStatus}
-          >
-            <i className={`ut-glyph ut-glyph--${effectiveStatus}`} aria-hidden="true" />
-            <span>{statusWord}</span>
-          </span>
+            aria-label={statusWord}
+            title={statusWord}
+          />
         </div>
 
-        {/* 2. Identity: name, badges, URL */}
-        <div className="ut-monitor__identity monitor-row__identity">
+        {/* 2. Identity: name and badges; the URL shows on hover */}
+        <div className="ut-monitor__identity monitor-row__identity" title={item.monitor.url}>
           <span className="ut-monitor__title monitor-row__name">
             <strong>{name}</strong>
             <MonitorBadge badge={item.monitor.badge} />
-          </span>
-          <span className="ut-data ut-muted ut-monitor__url" title={item.monitor.url}>
-            <small>{item.monitor.url}</small>
           </span>
         </div>
 

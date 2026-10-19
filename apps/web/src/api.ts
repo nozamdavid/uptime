@@ -8,6 +8,8 @@ import type {
   MonitorBulkBadgeUpdate,
   MonitorCreate,
   MonitorSummary,
+  MonitorMetrics,
+  MonitorMetricsResponse,
   NotificationService,
   NotificationServiceCreate,
   NotificationServiceUpdate,
@@ -112,7 +114,7 @@ export interface TierEntitlements {
   customDomains: number;
   intervalSeconds: 300;
   rawRetentionHours: 24;
-  dailyRetentionDays: 30;
+  dailyRetentionDays: 90;
 }
 
 export interface PlanPrice {
@@ -363,7 +365,7 @@ export function deriveTierFeatures(e: TierEntitlements): string[] {
     `${e.customDomains} custom status domains (preview)`,
     'Five-minute checks',
     '24-hour detailed history',
-    '30-day daily uptime',
+    '90-day daily uptime',
     'Telegram and Discord',
   ];
 }
@@ -387,7 +389,6 @@ export interface ProductBudget {
   ceilingUsd: number;
   baseUsd?: number | null;
   forecastUsd?: number | null;
-  cloudflareCostUsd?: number | null;
   externalMonthlyCostUsd?: number | null;
   observedAt?: string | null;
   admissionOpen?: boolean;
@@ -485,12 +486,6 @@ export interface OperatorHealthResponse {
   workspaces: WorkspaceHealth[];
   nextCursor: string | null;
 }
-export interface HistoricalD1Usage {
-  rowsRead: number;
-  rowsWritten: number;
-  storageBytes: number;
-}
-
 export interface OperatorWorkspace {
   id: string;
   name: string;
@@ -502,7 +497,6 @@ export interface OperatorWorkspace {
   rowsRead: number | null;
   rowsWritten: number | null;
   storageBytes: number | null;
-  historicalD1Usage?: HistoricalD1Usage | null;
   lastSeenAt: string | null;
 }
 export type ImportedWorkspaceKind = 'staging_import' | 'legacy_import';
@@ -807,6 +801,8 @@ export const api = {
     }),
   regions: () => request<{ regions: RegionDefinition[] }>('/regions'),
   monitors: () => request<{ monitors: MonitorSummary[] }>('/monitors'),
+  monitorMetrics: async (): Promise<Record<string, MonitorMetrics>> =>
+    (await request<MonitorMetricsResponse>('/monitors/metrics?range=24h')).metrics,
   badges: () => request<{ badges: Badge[] }>('/badges'),
   createBadge: (input: BadgeCreate) =>
     sendJson<{ badge: Badge }>('/badges', 'POST', input).then((result) => result.badge),

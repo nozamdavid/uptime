@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import type { IntervalSeconds } from '@uptime/contracts';
 import { regionById, regionIds } from '@uptime/regions';
+import { api } from './api.js';
 
 document.body.innerHTML = '<div id="root"></div>';
 (window as unknown as { scrollTo: () => void }).scrollTo = () => undefined;
@@ -35,6 +36,33 @@ function render(
 }
 
 describe('nine-region monitor form', () => {
+  it('labels webhook notification destinations by provider', async () => {
+    vi.spyOn(api, 'notificationServices').mockResolvedValue({
+      services: [{
+        id: 'service-1', name: 'Webhook target', provider: 'webhook', enabled: true,
+        config: { serverUrl: 'https://example.test/hook' },
+        createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      }],
+    });
+    const view = createTestRoot();
+    await act(async () => {
+      view.root.render(createElement(MonitorForm, {
+        monitor: {
+          id: 'monitor-1', name: 'Test', url: 'https://status.example.test/health',
+          regionIds: ['us-east'], intervalSeconds: 60, timeoutMs: 10_000,
+          enabled: true, dnsDiagnosticsEnabled: true, isPublic: false,
+        },
+        onCancel: () => undefined, onSaved: () => undefined,
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(view.container.textContent).toContain('Webhook');
+    expect(view.container.textContent).not.toContain('Discord');
+    await act(async () => view.root.unmount());
+    vi.restoreAllMocks();
+  });
+
   it('applies hosted free notification and check policy', () => {
     const html = renderToStaticMarkup(
       createElement(
@@ -53,7 +81,7 @@ describe('nine-region monitor form', () => {
               statusPages: 1,
               notificationServices: 3,
               rawRetentionDays: 1,
-              dailyRetentionDays: 30,
+              dailyRetentionDays: 90,
             },
           },
         },
@@ -237,7 +265,7 @@ describe('nine-region monitor form', () => {
                     statusPages: 1,
                     notificationServices: 3,
                     rawRetentionDays: 1,
-                    dailyRetentionDays: 30,
+                    dailyRetentionDays: 90,
                   },
                   budget: { baseUsd: 5, ceilingUsd: 20 },
                 }
@@ -288,7 +316,7 @@ describe('nine-region monitor form', () => {
                 statusPages: 1,
                 notificationServices: 3,
                 rawRetentionDays: 1,
-                dailyRetentionDays: 30,
+                dailyRetentionDays: 90,
               },
               budget: { baseUsd: 5, ceilingUsd: 20 },
             }
@@ -326,7 +354,7 @@ describe('nine-region monitor form', () => {
                 statusPages: 1,
                 notificationServices: 3,
                 rawRetentionDays: 1,
-                dailyRetentionDays: 30,
+                dailyRetentionDays: 90,
               },
             },
           },
@@ -401,7 +429,7 @@ describe('nine-region monitor form', () => {
                     statusPages: 1,
                     notificationServices: 3,
                     rawRetentionDays: 1,
-                    dailyRetentionDays: 30,
+                    dailyRetentionDays: 90,
                   },
                   budget: { baseUsd: 5, ceilingUsd: 20 },
                 }
@@ -434,7 +462,7 @@ describe('nine-region monitor form', () => {
                 statusPages: 1,
                 notificationServices: 3,
                 rawRetentionDays: 1,
-                dailyRetentionDays: 30,
+                dailyRetentionDays: 90,
               },
             },
           },
@@ -486,7 +514,7 @@ describe('nine-region monitor form', () => {
                     statusPages: 1,
                     notificationServices: 3,
                     rawRetentionDays: 1,
-                    dailyRetentionDays: 30,
+                    dailyRetentionDays: 90,
                   },
                   budget: { baseUsd: 5, ceilingUsd: 20 },
                 }
@@ -519,7 +547,7 @@ describe('nine-region monitor form', () => {
                 statusPages: 1,
                 notificationServices: 3,
                 rawRetentionDays: 1,
-                dailyRetentionDays: 30,
+                dailyRetentionDays: 90,
               },
             },
           },
@@ -564,7 +592,7 @@ describe('nine-region monitor form', () => {
                   statusPages: 1,
                   notificationServices: 3,
                   rawRetentionDays: 1,
-                  dailyRetentionDays: 30,
+                  dailyRetentionDays: 90,
                 },
                 budget: { baseUsd: 5, ceilingUsd: 20 },
               }),
@@ -661,7 +689,7 @@ describe('nine-region monitor form', () => {
               statusPages: 1,
               notificationServices: 3,
               rawRetentionDays: 1,
-              dailyRetentionDays: 30,
+              dailyRetentionDays: 90,
             },
           },
         },
@@ -695,7 +723,7 @@ describe('nine-region monitor form', () => {
               statusPages: 1,
               notificationServices: 3,
               rawRetentionDays: 1,
-              dailyRetentionDays: 30,
+              dailyRetentionDays: 90,
             },
           },
         },
@@ -725,7 +753,7 @@ describe('nine-region monitor form', () => {
                   statusPages: 1,
                   notificationServices: 3,
                   rawRetentionDays: 1,
-                  dailyRetentionDays: 30,
+                  dailyRetentionDays: 90,
                 },
                 budget: { baseUsd: 5, ceilingUsd: 20 },
               }
@@ -760,7 +788,7 @@ describe('nine-region monitor form', () => {
                 statusPages: 1,
                 notificationServices: 3,
                 rawRetentionDays: 1,
-                dailyRetentionDays: 30,
+                dailyRetentionDays: 90,
               },
             },
           },

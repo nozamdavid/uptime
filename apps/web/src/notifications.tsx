@@ -239,12 +239,6 @@ export function NotificationsPage() {
                         ? 'Discord webhook configured'
                         : 'Configuration saved'}
                 </p>
-                <small
-                  className="notification-card__delivery"
-                  title="Delivery history contains actual timestamps"
-                >
-                  Last delivery: unavailable
-                </small>
               </div>
               <div className="notification-card__actions">
                 <label className="notification-enabled">

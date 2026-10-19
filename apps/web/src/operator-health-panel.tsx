@@ -365,7 +365,6 @@ export function OperatorHealthPanel({ knownWorkspaces = [] }: OperatorHealthPane
                 ? health.dispatch.deadLetterCount
                 : 'unknown'}
             </strong>
-            <small>D1 queue state (Not measured)</small>
           </div>
         </div>
       )}

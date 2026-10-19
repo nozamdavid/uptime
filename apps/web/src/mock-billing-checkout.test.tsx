@@ -47,7 +47,7 @@ const validMockSession = {
       customDomains: 3,
       intervalSeconds: 300 as const,
       rawRetentionHours: 24 as const,
-      dailyRetentionDays: 30 as const,
+      dailyRetentionDays: 90 as const,
     },
     features: ['25 monitors', 'Up to 6 regions per check', 'Custom status domains'],
     active: true,

@@ -1,5 +1,3 @@
-import type { HistoricalD1Usage } from './api.js';
-
 export function formatBudgetForecast(
   budget: { forecastUsd?: number | null; ceilingUsd?: number } | null | undefined,
 ): string {
@@ -32,19 +30,6 @@ export function formatStorageMiB(
     })} MiB`;
   }
   return fallback;
-}
-
-export function formatHistoricalD1Usage(
-  usage: HistoricalD1Usage | null | undefined,
-): string | null {
-  if (!usage) return null;
-  if (usage.rowsRead === 0 && usage.rowsWritten === 0 && usage.storageBytes === 0) {
-    return null;
-  }
-  const storageMiB = (usage.storageBytes / 1_048_576).toLocaleString(undefined, {
-    maximumFractionDigits: 2,
-  });
-  return `Historical D1: ${usage.rowsRead.toLocaleString()} rows read · ${usage.rowsWritten.toLocaleString()} rows written · ${storageMiB} MiB`;
 }
 
 export function formatWorkspaceDatabaseMetrics(workspace: {

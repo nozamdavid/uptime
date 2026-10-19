@@ -721,7 +721,7 @@ export function MonitorForm({ monitor, onCancel, onSaved, onHistoryDeleted }: Pr
                   <span>
                     <strong>{service.name}</strong>
                     <small>
-                      {service.provider === 'telegram' ? 'Telegram' : 'Discord'}
+                      {({ telegram: 'Telegram', discord: 'Discord', webhook: 'Webhook', resend: 'Email (Resend)', smtp: 'Email (SMTP)', gotify: 'Gotify', bluesky: 'Bluesky' } as Record<string, string>)[service.provider] ?? service.provider}
                       {service.enabled ? '' : ' · disabled'}
                     </small>
                   </span>

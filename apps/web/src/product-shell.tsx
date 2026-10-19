@@ -13,6 +13,7 @@ import { WorkspaceCustomDomainsPanel } from './workspace-custom-domains-panel.js
 import { formatBudgetForecast, formatWorkspaceDatabaseMetrics } from './format-usage.js';
 import { fontOptions, readFontPreference, saveFontPreference } from './font-choice.js';
 import { Select } from './select.js';
+import { SiteFooter } from './site-footer.js';
 import './admin-views.css';
 
 export const ProductSessionContext = createContext<ProductSession | null>(null);
@@ -45,21 +46,22 @@ export function LandingPage() {
       .catch(() => setInterestState('error'));
   }, []);
   return (
-    <main className="landing">
-      <header className="landing__nav">
+    <main className="landing landing--home">
+      <header className="landing__nav landing__nav--centered">
         <a className="brand" href="/">
           Uptime
         </a>
         <a className="brand" href="/pricing">
           Pricing
         </a>
-        <span className="mono-label">COMING SOON</span>
       </header>
       <section className="landing__hero">
         <h1>Simple uptime monitoring</h1>
-        <p className="landing__lede">Free early access soon</p>
         {interestState === 'confirmed' ? (
-          <p role="status">Thanks, @{interestSignup?.handle} is on the interest list.</p>
+          <>
+            <p role="status">Thanks, @{interestSignup?.handle} is on the interest list.</p>
+            <a href="/app">Open the console</a>
+          </>
         ) : interestState === 'loading' ? (
           <p role="status">Checking your signup…</p>
         ) : (
@@ -72,23 +74,8 @@ export function LandingPage() {
             <InterestForm />
           </>
         )}
-        <details className="landing__disclosure">
-          <summary>What we store</summary>
-          <p>
-            Sign in requires only identification — we do not ask for repo or account write access.
-            We store your handle, DID, and workspace configuration so we know who created monitors.
-            Tokens are encrypted at rest and never shared. We do not sell data or run ads.
-          </p>
-        </details>
       </section>
-      <footer className="landing__foot">
-        <p>
-          An experimental project by{' '}
-          <a href="https://bsky.app/profile/noz.am" target="_blank" rel="noopener noreferrer">
-            @noz.am
-          </a>
-        </p>
-      </footer>
+      <SiteFooter />
     </main>
   );
 }

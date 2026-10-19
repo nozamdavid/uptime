@@ -5,7 +5,6 @@ import { resolve } from 'node:path';
 describe('self-hosted fonts', () => {
   const stylesPath = resolve(__dirname, 'styles.css');
   const publicFontsDir = resolve(__dirname, '../public/fonts');
-  const headersPath = resolve(__dirname, '../public/_headers');
   const stylesContent = readFileSync(stylesPath, 'utf8');
 
   it('does not contain any external Google Fonts stylesheet or asset imports', () => {
@@ -55,11 +54,5 @@ describe('self-hosted fonts', () => {
     expect(existsSync(resolve(publicFontsDir, 'public-sans-OFL.txt'))).toBe(true);
     expect(existsSync(resolve(publicFontsDir, 'martian-mono-OFL.txt'))).toBe(true);
     expect(existsSync(resolve(publicFontsDir, 'schibsted-grotesk-OFL.txt'))).toBe(true);
-  });
-
-  it('has CSP restricting font-src to self in _headers', () => {
-    const headersContent = readFileSync(headersPath, 'utf8');
-    expect(headersContent).toContain("font-src 'self'");
-    expect(headersContent).not.toContain('fonts.gstatic.com');
   });
 });

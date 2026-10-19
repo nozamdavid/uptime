@@ -1,7 +1,7 @@
 /**
  * Build-time frontend configuration.
  *
- * Cloudflare migration contract:
+ * Frontend deployment contract:
  *   VITE_API_BASE_URL      Absolute API root including the `/api` suffix, for
  *                          example `https://uptime-api.example.com/api`. All
  *                          authenticated requests are sent with

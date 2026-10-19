@@ -108,7 +108,6 @@ describe('OperatorHealthPanel', () => {
     expect(view.container.textContent).toContain('30s');
     // Honest null for dead letters
     expect(view.container.textContent).toContain('Dead Letter Count');
-    expect(view.container.textContent).toContain('D1 queue state (Not measured)');
     // Probe transport label - describes transport attempts, not website uptime
     expect(view.container.textContent).toContain(
       'Regional Probes (Last transport attempts, not target website uptime)',

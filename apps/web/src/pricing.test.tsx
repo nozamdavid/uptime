@@ -41,7 +41,7 @@ const mockPlans = [
       customDomains: 0,
       intervalSeconds: 300,
       rawRetentionHours: 24,
-      dailyRetentionDays: 30,
+      dailyRetentionDays: 90,
     },
     features: [
       '3 monitors',
@@ -73,7 +73,7 @@ const mockPlans = [
       customDomains: 1,
       intervalSeconds: 300,
       rawRetentionHours: 24,
-      dailyRetentionDays: 30,
+      dailyRetentionDays: 90,
     },
     features: [
       '10 monitors',
@@ -106,7 +106,7 @@ const mockPlans = [
       customDomains: 3,
       intervalSeconds: 300,
       rawRetentionHours: 24,
-      dailyRetentionDays: 30,
+      dailyRetentionDays: 90,
     },
     features: [
       '25 monitors',
@@ -156,10 +156,10 @@ describe('PricingPage', () => {
     expect(view.container.textContent).toContain('Simple, transparent monitoring.');
     expect(view.container.textContent).toContain('Free');
     expect(view.container.textContent).toContain('$0');
-    expect(view.container.textContent).toContain('Pro');
-    expect(view.container.textContent).toContain('$19 / month');
-    expect(view.container.textContent).toContain('Team');
-    expect(view.container.textContent).toContain('$49 / month');
+    // Paid tiers show placeholders so their real details are not in the DOM.
+    expect(view.container.textContent).not.toContain('$19 / month');
+    expect(view.container.textContent).not.toContain('$49 / month');
+    expect(view.container.textContent).toContain('$00 / month');
 
     await view.cleanup();
   });
@@ -174,63 +174,14 @@ describe('PricingPage', () => {
     expect(view.container.querySelector('.pricing-card__badge')).toBeNull();
     expect(view.container.textContent).not.toContain('POPULAR');
     expect(view.container.textContent).not.toContain('instant alerting');
-    expect(view.container.textContent).toContain('confirmed alerting');
-
-    await view.cleanup();
-  });
-
-  it('shows draft pricing preview banner when catalog.preview is true and billingMode is mock', async () => {
-    const view = createTestRoot();
-    await act(async () => {
-      view.root.render(createElement(PricingPage));
-      await Promise.resolve();
-    });
-
-    const banner = view.container.querySelector('.pricing-banner');
-    expect(banner).not.toBeNull();
-    expect(banner?.textContent).toContain('DRAFT PRICING');
-    expect(banner?.textContent).toContain(
-      'Staging simulation only — no real charges will be made.',
+    expect(view.container.textContent).toContain(
+      'Multi-region easy to use monitoring, alerts and 90-day history',
     );
 
     await view.cleanup();
   });
 
-  it('shows draft notice without no-charge claim when preview is true and billingMode is stripe', async () => {
-    apiMock.publicPlans.mockResolvedValue({
-      revision: 2,
-      preview: true,
-      billingMode: 'stripe',
-      plans: mockPlans,
-      capabilities: { checkout: true, portal: true },
-    });
-
-    const view = createTestRoot();
-    await act(async () => {
-      view.root.render(createElement(PricingPage));
-      await Promise.resolve();
-    });
-
-    const banner = view.container.querySelector('.pricing-banner');
-    expect(banner).not.toBeNull();
-    expect(banner?.textContent).toContain('DRAFT PRICING');
-    expect(banner?.textContent).toContain(
-      'Draft pricing preview — plans and pricing are subject to change.',
-    );
-    expect(banner?.textContent).not.toContain('no real charges will be made');
-
-    await view.cleanup();
-  });
-
-  it('hides draft banner when catalog.preview is false and mode is stripe', async () => {
-    apiMock.publicPlans.mockResolvedValue({
-      revision: 2,
-      preview: false,
-      billingMode: 'stripe',
-      plans: mockPlans.map((p) => ({ ...p, preview: false })),
-      capabilities: { checkout: false, portal: false },
-    });
-
+  it('shows no pricing banner or comparison table', async () => {
     const view = createTestRoot();
     await act(async () => {
       view.root.render(createElement(PricingPage));
@@ -238,6 +189,26 @@ describe('PricingPage', () => {
     });
 
     expect(view.container.querySelector('.pricing-banner')).toBeNull();
+    expect(view.container.textContent).not.toContain('DRAFT PRICING');
+    expect(view.container.querySelector('.pricing-table')).toBeNull();
+
+    await view.cleanup();
+  });
+
+  it('blurs and disables only the paid tiers', async () => {
+    const view = createTestRoot();
+    await act(async () => {
+      view.root.render(createElement(PricingPage));
+      await Promise.resolve();
+    });
+
+    const blurred = (plan: string) =>
+      view.container.querySelector(
+        `.pricing-card[data-plan="${plan}"] .pricing-card__body--blurred`,
+      );
+    expect(blurred('free')).toBeNull();
+    expect(blurred('pro')?.hasAttribute('inert')).toBe(true);
+    expect(blurred('team')?.getAttribute('aria-hidden')).toBe('true');
 
     await view.cleanup();
   });
@@ -317,25 +288,6 @@ describe('PricingPage', () => {
     );
     expect(proCta?.getAttribute('href')).toBe('/settings#subscription');
     expect(proCta?.textContent).toBe('Manage subscription');
-
-    await view.cleanup();
-  });
-
-  it('renders detailed comparison table with exact quotas', async () => {
-    const view = createTestRoot();
-    await act(async () => {
-      view.root.render(createElement(PricingPage));
-      await Promise.resolve();
-    });
-
-    const table = view.container.querySelector('.pricing-table');
-    expect(table).not.toBeNull();
-    expect(table?.textContent).toContain('Monitors');
-    expect(table?.textContent).toContain('5 minutes');
-    expect(table?.textContent).toContain('24 hours');
-    expect(table?.textContent).toContain('30 days');
-    expect(table?.textContent).toContain('Telegram & Discord');
-    expect(table?.textContent).toContain('Workspace seats');
 
     await view.cleanup();
   });

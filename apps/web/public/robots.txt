@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+Disallow: /app
+Disallow: /operator
+Disallow: /settings
+Disallow: /login
+Disallow: /signup
+Disallow: /monitors/
+Disallow: /status/

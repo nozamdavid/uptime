@@ -70,7 +70,7 @@ beforeEach(() => {
       customDomains: 0,
       intervalSeconds: 300,
       rawRetentionHours: 24,
-      dailyRetentionDays: 30,
+      dailyRetentionDays: 90,
     },
     overrides: null,
     usage: {
@@ -151,21 +151,14 @@ describe('free product shell', () => {
   it('presents a modest identity-only interest signup', () => {
     const html = renderToStaticMarkup(createElement(LandingPage));
     expect(html).toContain('Simple uptime monitoring');
-    expect(html).toContain('Free early access soon');
     expect(html).toContain('I&#x27;m interested!');
-    expect(html).toContain('href="https://bsky.app/profile/noz.am"');
-    expect(html).toContain('@noz.am');
+    expect(html).not.toContain('Free early access soon');
+    expect(html).not.toContain('What we store');
+    expect(html).toContain('href="https://bsky.app/profile/noz.am" target="_blank"');
+    expect(html).toContain('href="/operator"');
+    expect(html).not.toContain('href="/login"');
     expect(html).not.toContain('Only identification is requested');
     expect(html).not.toContain('Sign-in tokens are encrypted');
-  });
-
-  it('keeps the landing page in one viewport with the storage policy collapsed', () => {
-    const html = renderToStaticMarkup(createElement(LandingPage));
-    expect(html).toContain('landing__disclosure');
-    expect(html).toContain('<summary>What we store</summary>');
-    // The landing page must not render the old always-expanded policy section.
-    expect(html).not.toContain('landing__policies');
-    expect(html).not.toContain('id="privacy"');
   });
 
   it('starts an AT Protocol authorization request with the entered handle', async () => {
@@ -295,7 +288,7 @@ describe('free product shell', () => {
         statusPages: 1,
         notificationServices: 3,
         rawRetentionDays: 1,
-        dailyRetentionDays: 30,
+        dailyRetentionDays: 90,
       },
       budget: { baseUsd: 5, ceilingUsd: 20 },
     });
@@ -427,7 +420,6 @@ describe('free product shell', () => {
           ceilingUsd: 20,
           baseUsd: missing,
           forecastUsd: missing,
-          cloudflareCostUsd: missing,
           admissionOpen: false,
         },
         workspaces: [
@@ -443,7 +435,6 @@ describe('free product shell', () => {
             rowsRead: null,
             rowsWritten: null,
             storageBytes: null,
-            historicalD1Usage: { rowsRead: 12, rowsWritten: 8, storageBytes: 2 * 1_048_576 },
           },
         ],
       });
@@ -467,9 +458,6 @@ describe('free product shell', () => {
       expect(current.textContent).toContain('rows read unavailable');
       expect(current.textContent).toContain('rows written unavailable');
       expect(current.textContent).toContain('storage unavailable');
-      expect(current.textContent).not.toContain('12 rows read');
-      expect(view.container.querySelector('.operator-historical-d1')).toBeNull();
-      expect(view.container.textContent).not.toContain('Historical D1');
       await view.cleanup();
     },
   );
@@ -477,7 +465,7 @@ describe('free product shell', () => {
   it('renders measured zero costs and metrics as zero', async () => {
     apiMock.operatorWorkspaces.mockResolvedValue({
       availableRegions: [],
-      budget: { ceilingUsd: 20, baseUsd: 0, forecastUsd: 0, cloudflareCostUsd: 0 },
+      budget: { ceilingUsd: 20, baseUsd: 0, forecastUsd: 0 },
       workspaces: [
         {
           id: 'zero',
@@ -491,7 +479,6 @@ describe('free product shell', () => {
           rowsWritten: 0,
           storageBytes: 0,
           lastSeenAt: null,
-          historicalD1Usage: { rowsRead: 0, rowsWritten: 0, storageBytes: 0 },
         },
       ],
     });
@@ -543,7 +530,7 @@ describe('free product shell', () => {
             statusPages: 1,
             notificationServices: 3,
             rawRetentionDays: 1,
-            dailyRetentionDays: 30,
+            dailyRetentionDays: 90,
           },
           rowsRead: 12,
           rowsWritten: 8,
@@ -634,7 +621,7 @@ describe('free product shell', () => {
             statusPages: 1,
             notificationServices: 3,
             rawRetentionDays: 1,
-            dailyRetentionDays: 30,
+            dailyRetentionDays: 90,
           },
           rowsRead: 0,
           rowsWritten: 0,
@@ -725,7 +712,7 @@ describe('free product shell', () => {
             statusPages: 1,
             notificationServices: 3,
             rawRetentionDays: 1,
-            dailyRetentionDays: 30,
+            dailyRetentionDays: 90,
           },
           rowsRead: 0,
           rowsWritten: 0,
@@ -742,7 +729,7 @@ describe('free product shell', () => {
       statusPages: 1,
       notificationServices: 3,
       rawRetentionDays: 1,
-      dailyRetentionDays: 30,
+      dailyRetentionDays: 90,
     };
     let resolve!: (value: { limits: typeof updatedLimits }) => void;
     apiMock.updateOperatorWorkspaceLimits.mockReturnValue(
@@ -828,7 +815,7 @@ describe('free product shell', () => {
             statusPages: 1,
             notificationServices: 3,
             rawRetentionDays: 1,
-            dailyRetentionDays: 30,
+            dailyRetentionDays: 90,
           },
           rowsRead: 0,
           rowsWritten: 0,
