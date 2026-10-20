@@ -1863,3 +1863,19 @@ body:has(.landing__footer) .build-version {
   font-size: 0.6875rem;
   opacity: 0.7;
 }
+
+.legal-page__body {
+  flex: 1 1 auto;
+  width: min(100%, 44rem);
+  margin-inline: auto;
+  padding-block: var(--space-5, 1.5rem);
+}
+
+.legal-page__body section {
+  margin-top: var(--space-4);
+}
+
+.site-footer__links {
+  display: flex;
+  gap: var(--space-3);
+}

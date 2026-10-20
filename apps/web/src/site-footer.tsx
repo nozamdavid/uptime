@@ -9,6 +9,9 @@ export function SiteFooter() {
       </span>
       <span className="site-footer__version">{__APP_VERSION__}</span>
       <span className="site-footer__links">
+        <a href="/terms">Terms</a>
+        <a href="/privacy">Privacy</a>
+        <a href="/contact">Contact</a>
         <a href="/operator">Operator</a>
       </span>
     </footer>

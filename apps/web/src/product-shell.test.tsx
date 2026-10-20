@@ -156,6 +156,9 @@ describe('free product shell', () => {
     expect(html).not.toContain('What we store');
     expect(html).toContain('href="https://bsky.app/profile/noz.am" target="_blank"');
     expect(html).toContain('href="/operator"');
+    expect(html).toContain('href="/terms"');
+    expect(html).toContain('href="/privacy"');
+    expect(html).toContain('href="/contact"');
     expect(html).not.toContain('href="/login"');
     expect(html).not.toContain('Only identification is requested');
     expect(html).not.toContain('Sign-in tokens are encrypted');

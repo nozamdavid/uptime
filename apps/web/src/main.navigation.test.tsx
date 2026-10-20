@@ -407,4 +407,21 @@ describe('private section navigation', () => {
 
     await act(async () => root.unmount());
   });
+
+  it('renders the privacy page with the operator email', async () => {
+    window.history.replaceState({}, '', '/app');
+    const { router } = await import('./main.js');
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(RouterProvider, { router }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await router.navigate({ to: '/privacy' });
+    });
+    expect(container.textContent).toContain('davidmarcosg98@gmail.com');
+    await act(async () => root.unmount());
+  });
 });

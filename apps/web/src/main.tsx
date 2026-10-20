@@ -21,6 +21,7 @@ import { monitorDisplayName } from './monitor-format.js';
 import { MonitorList } from './monitor-list.js';
 import { NotificationsPage } from './notifications.js';
 import { PricingPage } from './pricing.js';
+import { ContactPage, PrivacyPage, TermsPage } from './legal.js';
 import { PublicStatusPage, StatusPageEditor, StatusPagesIndex } from './status-pages.js';
 import { WorkspaceState } from './workspace-state.js';
 import {
@@ -59,6 +60,21 @@ const pricingRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/pricing',
   component: PricingPage,
+});
+const termsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/terms',
+  component: TermsPage,
+});
+const privacyRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/privacy',
+  component: PrivacyPage,
+});
+const contactRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/contact',
+  component: ContactPage,
 });
 const appRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -128,6 +144,9 @@ const mockBillingCheckoutRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   indexRoute,
   pricingRoute,
+  termsRoute,
+  privacyRoute,
+  contactRoute,
   appRoute,
   loginRoute,
   signupRoute,
@@ -164,7 +183,7 @@ export function AppShell() {
   const isPublicRoute = isPublicMonitorPath(pathname);
   const isPublicStatusPage = pathname.startsWith('/status/');
   const isLanding = pathname === '/';
-  const isPricing = pathname === '/pricing';
+  const isPricing = ['/pricing', '/terms', '/privacy', '/contact'].includes(pathname);
   const isAuthRoute = pathname === '/login' || pathname === '/signup';
   const [session, setSession] = useState<ProductSession | null>(null);
   const sessionGeneration = useRef(0);
