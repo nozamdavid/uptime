@@ -116,8 +116,10 @@ export interface AtprotoAuthDependencies {
   /** Test-only runtime hook. Production always uses Workers WebCrypto. */
   oauthRuntime?: RuntimeImplementation;
   log?: { warn(bindings: Record<string, unknown>, message: string): void };
+  /** Called when authorization flow is initiated. */
+  onStart?: (handle: string, returnTo: string, channel?: string) => Promise<void>;
   /** Called only after OAuth and browser binding have both been verified. */
-  onLogin?: (principal: AtprotoPrincipal, returnTo: string) => Promise<void>;
+  onLogin?: (principal: AtprotoPrincipal, returnTo: string, channel?: string) => Promise<void>;
 }
 
 interface LoginSessionRow {
@@ -189,13 +191,30 @@ export function createAtprotoAuth(dependencies: AtprotoAuthDependencies) {
           : undefined,
         config.successPath,
       );
+      const rawChannel =
+        (typeof body === 'object' && body !== null
+          ? ((body as { channel?: unknown; source?: unknown }).channel ??
+             (body as { source?: unknown }).source)
+          : undefined) ??
+        new URL(request.url).searchParams.get('channel') ??
+        new URL(request.url).searchParams.get('source');
+      const channel =
+        typeof rawChannel === 'string' && /^[a-z0-9_-]{1,64}$/i.test(rawChannel.trim())
+          ? rawChannel.trim().toLowerCase()
+          : undefined;
       const binding = randomToken(32);
       // The SDK persists this value with the authorization state. It binds the
       // callback to the browser that started the login and carries no secret.
-      const appState = encodeAppState({ binding, handle, returnTo });
+      const appState = encodeAppState({
+        binding,
+        handle,
+        returnTo,
+        ...(channel ? { channel } : {}),
+      });
       let authorizationUrl: URL;
       try {
         authorizationUrl = await client.authorize(handle, { state: appState, scope: 'atproto' });
+        await dependencies.onStart?.(handle, returnTo, channel);
       } catch (error) {
         dependencies.log?.warn(
           {
@@ -255,6 +274,7 @@ export function createAtprotoAuth(dependencies: AtprotoAuthDependencies) {
       await dependencies.onLogin?.(
         { did: completed.session.did, handle: appState.handle },
         appState.returnTo,
+        appState.channel,
       );
 
       const token = randomToken(32);
@@ -944,13 +964,18 @@ function localReturnPath(value: unknown, fallback = '/'): string {
   }
 }
 
-function encodeAppState(value: { binding: string; handle: string; returnTo: string }): string {
+function encodeAppState(value: {
+  binding: string;
+  handle: string;
+  returnTo: string;
+  channel?: string;
+}): string {
   return base64UrlEncode(new TextEncoder().encode(JSON.stringify(value)));
 }
 
 function decodeAppState(
   value: string | null,
-): { binding: string; handle: string; returnTo: string } | null {
+): { binding: string; handle: string; returnTo: string; channel?: string } | null {
   if (!value || value.length > 1024) return null;
   try {
     const parsed = JSON.parse(new TextDecoder().decode(base64UrlDecode(value))) as Record<
@@ -958,8 +983,17 @@ function decodeAppState(
       unknown
     >;
     const handle = normalizeHandle(parsed.handle);
+    const channel =
+      typeof parsed.channel === 'string' && /^[a-z0-9_-]{1,64}$/.test(parsed.channel)
+        ? parsed.channel
+        : undefined;
     return typeof parsed.binding === 'string' && /^[A-Za-z0-9_-]{32,}$/.test(parsed.binding)
-      ? { binding: parsed.binding, handle, returnTo: localReturnPath(parsed.returnTo) }
+      ? {
+          binding: parsed.binding,
+          handle,
+          returnTo: localReturnPath(parsed.returnTo),
+          ...(channel ? { channel } : {}),
+        }
       : null;
   } catch {
     return null;

@@ -40,6 +40,7 @@ import type { RegionId } from '@uptime/regions';
 import {
   defaultStatusPageFontFamily,
   statusPageFontFamilySchema,
+  type NotificationMessage,
   type StatusPageReportSnapshot,
 } from '@uptime/contracts';
 import { z } from 'zod';
@@ -65,7 +66,14 @@ import {
   toPublicMonitorSummary,
 } from './queries.js';
 import { assertPublicHttpUrl, UrlPolicyError } from './security.js';
-import { interestList, interestReturnPath, interestSignup, recordInterest } from './interest.js';
+import {
+  interestList,
+  interestReturnPath,
+  interestSignup,
+  recordInterest,
+  recordInterestSignupStart,
+  recordWorkspaceActivation,
+} from './interest.js';
 import { operatorHealth } from './operator-health.js';
 import {
   acceptWorkspaceInvitation,
@@ -77,6 +85,9 @@ import {
 } from './workspace-invitations.js';
 import { billingReadiness, billingWebhook, workspaceBillingRequest } from './workspace-billing.js';
 import { handleCustomDomainManagement, handleCustomDomainPublic } from './custom-domain-http.js';
+import { createNotificationProvider } from './providers.js';
+import { openProviderConfig } from './credentials.js';
+import type { NotificationServiceRow } from './types.js';
 
 export const hostedLimits = {
   monitors: 3,
@@ -237,8 +248,12 @@ export async function hostedRuntimeFetch(
       const auth = createAtprotoAuth({
         db: control,
         log,
-        onLogin: async (principal, returnTo) => {
-          if (returnTo === interestReturnPath) await recordInterest(control, principal);
+        onStart: async (_handle, returnTo, channel) => {
+          if (returnTo === interestReturnPath) await recordInterestSignupStart(control, channel);
+        },
+        onLogin: async (principal, returnTo, channel) => {
+          if (returnTo === interestReturnPath)
+            await recordInterest(control, principal, new Date(), channel);
         },
         config: {
           publicOrigin,
@@ -870,6 +885,66 @@ async function withWorkspaceWriteLease(
   }
 }
 
+export async function notifyWorkspaceOwnerAdmitted(
+  env: HostedRuntimeEnv,
+  workspace: { id: string; name?: string },
+  fetchImpl: typeof fetch = (env as { fetch?: typeof fetch }).fetch ?? fetch,
+): Promise<void> {
+  try {
+    const db = await activeDatabase(env, workspace.id);
+    const services = await all<NotificationServiceRow>(
+      db,
+      `SELECT * FROM ${db.table('notification_services')} WHERE enabled = 1`,
+    );
+    if (!services || services.length === 0) return;
+    const secret =
+      (env as { CREDENTIAL_ENCRYPTION_SECRET?: string }).CREDENTIAL_ENCRYPTION_SECRET ||
+      (() => {
+        try {
+          return parseApiEnv(env).credentialEncryptionSecret;
+        } catch {
+          return '';
+        }
+      })();
+    const message: NotificationMessage = {
+      kind: 'test',
+      monitorName: workspace.name ?? 'Workspace',
+      monitorUrl:
+        typeof env.PUBLIC_ORIGIN === 'string' && env.PUBLIC_ORIGIN
+          ? `${env.PUBLIC_ORIGIN}/app`
+          : 'https://example.com',
+      occurredAt: new Date().toISOString(),
+      outageStartedAt: null,
+    };
+    for (const service of services) {
+      try {
+        const { config: serviceConfig } = await openProviderConfig(secret, service.config);
+        await createNotificationProvider(service.provider, serviceConfig, fetchImpl).send(message);
+      } catch (error) {
+        log.warn(
+          {
+            event: 'workspace_admission_notification_failed',
+            workspaceId: workspace.id,
+            notificationServiceId: service.id,
+            provider: service.provider,
+            error: String(error),
+          },
+          'Failed to send workspace admission notification to destination',
+        );
+      }
+    }
+  } catch (error) {
+    log.warn(
+      {
+        event: 'workspace_admission_notification_failed',
+        workspaceId: workspace.id,
+        error: String(error),
+      },
+      'Failed to resolve notification services for workspace admission',
+    );
+  }
+}
+
 /** Retry an interrupted allocation using its reserved slot. Slots are never reused automatically. */
 export async function ensureWorkspace(
   env: HostedRuntimeEnv,
@@ -919,6 +994,7 @@ async function provisionWorkspace(
   const control = env.controlDb;
   const timestamp = new Date().toISOString();
   const operatorActivation = options.operatorActivation === true;
+  let didAutoActivate = false;
   const explicitBinding = typeof options.bindingName === 'string';
   const reservedInExplicitCapacity = explicitBinding && isReservedSlot(env, options.bindingName);
   if (explicitBinding) {
@@ -1011,23 +1087,20 @@ async function provisionWorkspace(
             [timestamp, workspace.id],
           );
           current.state = 'active';
+          await recordWorkspaceActivation(tx, workspace.id, workspace.owner_did);
         }
         return current;
       });
     }
   }
   if (workspace.state === 'waiting_for_capacity') {
-    // Manual operator activation skips the cost-admission gate. Slot, reserve, and workspace-cap
+    // Manual operator activation skips the admission gate. Slot, reserve, and workspace-cap
     // checks below still apply, and monitoring dispatch enforces budget pauses on its own.
     const budget = operatorActivation ? null : await budgetSummary(control, env);
-    if (
-      operatorActivation ||
-      (budget !== null &&
-        budget.admissionOpen &&
-        (budget.enforcementDisabled || (budget.forecastUsd !== null && budget.forecastUsd < 15)))
-    ) {
+    if (operatorActivation || (budget !== null && budget.admissionOpen)) {
       await control.transaction(async (tx) => {
         // Serialize global admission and the reserve before selecting a physical source.
+        await recoverQuarantinedSlots(env, tx, timestamp);
         const settings = await first<{ max_workspaces: number }>(
           tx,
           `SELECT max_workspaces FROM ${tx.table('service_controls')} WHERE id=1 FOR UPDATE`,
@@ -1076,11 +1149,13 @@ async function provisionWorkspace(
                 parseApiEnv(env).enabledRegionIds,
               ),
             );
-          await run(
+          const updateResult = await run(
             tx,
             `UPDATE ${tx.table('workspaces')} SET state='active',updated_at=$1 WHERE id=$2`,
             [timestamp, workspace.id],
           );
+          if (updateResult.rowCount) didAutoActivate = true;
+          await recordWorkspaceActivation(tx, workspace.id, workspace.owner_did);
           return;
         }
         const inventory = await all<{
@@ -1179,11 +1254,13 @@ async function provisionWorkspace(
           `UPDATE ${tx.table('tenant_slots')} SET workspace_id=$1,status='assigned' WHERE database_id=$2`,
           [workspace.id, source.sourceDatabaseId],
         );
-        await run(
+        const updateResult = await run(
           tx,
           `UPDATE ${tx.table('workspaces')} SET state='active',updated_at=$1 WHERE id=$2 AND state='waiting_for_capacity'`,
           [timestamp, workspace.id],
         );
+        if (updateResult.rowCount) didAutoActivate = true;
+        await recordWorkspaceActivation(tx, workspace.id, workspace.owner_did);
       });
     }
     const current = await first<Workspace>(
@@ -1192,7 +1269,12 @@ async function provisionWorkspace(
       [workspace.id],
     );
     if (current) Object.assign(workspace, current);
-    if (current?.state === 'active') await resolveWorkspaceDatabase(env, workspace.id);
+    if (current?.state === 'active') {
+      await resolveWorkspaceDatabase(env, workspace.id);
+      if (!operatorActivation && didAutoActivate) {
+        await notifyWorkspaceOwnerAdmitted(env, current);
+      }
+    }
   }
   return workspace;
 }
@@ -1260,12 +1342,8 @@ export async function budgetSummary(
     forecastUsd,
     observedAt,
     enforcementDisabled,
-    // The admission setting still applies. Only the cost forecast condition is skipped.
-    admissionOpen:
-      settings?.admission_open === 1 &&
-      (enforcementDisabled ||
-        (forecastUsd !== null &&
-          forecastUsd < Math.min(15, Number(settings?.monthly_budget_usd ?? 20)))),
+    // Admission is gated by the operator admission_open setting and fixed product limits.
+    admissionOpen: settings?.admission_open === 1,
     billingWindow: 'current_calendar_month',
     coverage:
       'Current observed Cloudflare cost plus manually entered external costs. PostgreSQL statements and duration are telemetry only.',
@@ -1310,6 +1388,12 @@ function productLimitsResponse(limits: ProductLimits) {
   };
 }
 
+function clampMaxWorkspaces(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) return 10;
+  return Math.min(10, parsed);
+}
+
 async function operatorWorkspaceLimits(
   env: HostedRuntimeEnv,
   workspace: Workspace,
@@ -1334,7 +1418,7 @@ async function operatorWorkspaceLimits(
       limits,
       configuredMonitorBatch(env),
       null,
-      settings?.max_workspaces ?? 10,
+      clampMaxWorkspaces(settings?.max_workspaces),
     ),
   };
 }
@@ -1386,7 +1470,7 @@ async function workspaceCapacity(
     limits,
     configuredMonitorBatch(env),
     actual,
-    settings?.max_workspaces ?? 10,
+    clampMaxWorkspaces(settings?.max_workspaces),
   );
 }
 
@@ -1424,6 +1508,7 @@ function parseProductLimits(value: unknown): ProductLimits {
 
 async function slotInventory(env: HostedRuntimeEnv) {
   const control = env.controlDb;
+  await recoverQuarantinedSlots(env, control, new Date().toISOString());
   const rows = await all<{
     binding_name: string;
     database_id: string;
@@ -1453,7 +1538,7 @@ async function slotInventory(env: HostedRuntimeEnv) {
     `SELECT max_workspaces FROM ${control.table('service_controls')} WHERE id=1`,
   );
   return {
-    maxWorkspaces: settings?.max_workspaces ?? 10,
+    maxWorkspaces: clampMaxWorkspaces(settings?.max_workspaces),
     configuredSlots: configuredPublicSlots.length,
     assignedSlots: publicSlots.filter((slot) => slot.status === 'assigned').length,
     availableSlots: configuredPublicSlots.filter(
@@ -2063,6 +2148,7 @@ async function operatorRequest(
           'Activation needs an available database slot and space under the workspace limit.',
         );
       await audit(control, id, principal.did, 'workspace_state', input);
+      await notifyWorkspaceOwnerAdmitted(env, provisioned);
       return json({ id, state: provisioned.state });
     }
     const updated = await first(
@@ -2076,6 +2162,9 @@ async function operatorRequest(
         'invalid_state',
         'Only provisioned workspaces can be resumed or suspended',
       );
+    if (input.state === 'active' && workspace) {
+      await recordWorkspaceActivation(control, id, workspace.owner_did);
+    }
     await audit(control, id, principal.did, 'workspace_state', input);
     return json({ id, state: input.state });
   }
@@ -2108,6 +2197,80 @@ async function audit(
     `INSERT INTO ${control.table('workspace_events')}(id,workspace_id,event,actor_did,created_at,details) VALUES($1,$2,$3,$4,$5,$6)`,
     [randomId(), workspaceId, event, did, new Date().toISOString(), JSON.stringify(details)],
   );
+}
+
+/**
+ * Recover slots left quarantined ('deleting') after a completed deletion.
+ *
+ * Deletion keeps the physical source quarantined so it cannot be reassigned
+ * mid-purge. Once the workspace row reaches 'deleted', the purge is complete
+ * and the slot is safe to return to the pool. This also clears the tenant
+ * identity marker so a future workspace can claim the empty database.
+ */
+async function recoverQuarantinedSlots(
+  env: HostedRuntimeEnv,
+  db: Database,
+  timestamp: string,
+): Promise<void> {
+  const quarantined = await all<{
+    source_database_id: string;
+    schema_name: string;
+  }>(
+    db,
+    `SELECT r.source_database_id, r.schema_name
+     FROM ${db.table('postgres_tenant_registry')} r
+     WHERE r.status = 'deleting'
+       AND NOT EXISTS (
+         SELECT 1 FROM ${db.table('workspaces')} w
+         WHERE w.id = r.workspace_id AND w.state <> 'deleted'
+       )`,
+  );
+  for (const row of quarantined) {
+    const source = env.catalog.sources.find(
+      (s) => s.sourceDatabaseId === row.source_database_id && s.schema === row.schema_name,
+    );
+    if (source && source.profile === 'full-hosted') {
+      const tenant = scopePostgresDatabase(db, source);
+      const markerTable = source.identityTable ?? 'workspace_metadata';
+      try {
+        await run(tenant, `DELETE FROM ${tenant.table(markerTable)}`);
+        if (source.tables.includes('verified_targets')) {
+          await run(tenant, `DELETE FROM ${tenant.table('verified_targets')}`);
+        }
+      } catch {
+        // Ignored if table not in scope
+      }
+    }
+  }
+  try {
+    await run(
+      db,
+      `UPDATE ${db.table('postgres_tenant_registry')} r
+       SET status = 'available', workspace_id = NULL, updated_at = $1
+       WHERE r.status = 'deleting'
+         AND NOT EXISTS (
+           SELECT 1 FROM ${db.table('workspaces')} w
+           WHERE w.id = r.workspace_id AND w.state <> 'deleted'
+         )`,
+      [timestamp],
+    );
+  } catch {
+    // Ignored if table not in scope
+  }
+  try {
+    await run(
+      db,
+      `UPDATE ${db.table('tenant_slots')} s
+       SET status = 'available', workspace_id = NULL
+       WHERE s.status = 'deleting'
+         AND NOT EXISTS (
+           SELECT 1 FROM ${db.table('workspaces')} w
+           WHERE w.id = s.workspace_id AND w.state <> 'deleted'
+         )`,
+    );
+  } catch {
+    // Ignored if table not in scope
+  }
 }
 
 async function workspaceRequest(

@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { usePageMetadata } from './metadata.js';
 import { SiteFooter } from './site-footer.js';
 
 const EMAIL = 'davidmarcosg98@gmail.com';
@@ -26,6 +27,11 @@ function LegalPage({ title, children }: { title: string; children: ReactNode }) 
 }
 
 export function TermsPage() {
+  usePageMetadata({
+    title: 'Terms of service',
+    description: 'Terms of service and acceptable use policy for Uptime monitoring service.',
+    canonical: '/terms',
+  });
   return (
     <LegalPage title="Terms of service">
       <section>
@@ -95,6 +101,11 @@ export function TermsPage() {
 }
 
 export function PrivacyPage() {
+  usePageMetadata({
+    title: 'Privacy policy',
+    description: 'Privacy policy and data retention practices for Uptime monitoring service.',
+    canonical: '/privacy',
+  });
   return (
     <LegalPage title="Privacy policy">
       <section>
@@ -179,6 +190,11 @@ export function PrivacyPage() {
 }
 
 export function ContactPage() {
+  usePageMetadata({
+    title: 'Contact',
+    description: 'Contact and operator details for Uptime monitoring service.',
+    canonical: '/contact',
+  });
   return (
     <LegalPage title="Contact">
       <section>

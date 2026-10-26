@@ -36,6 +36,7 @@ import {
 import { MockBillingCheckoutPage } from './mock-billing-checkout.js';
 import { Select } from './select.js';
 import { ThemeControl } from './theme.js';
+import { usePageMetadata } from './metadata.js';
 
 function BuildVersion() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -230,6 +231,30 @@ export function AppShell() {
     window.addEventListener('uptime:session-expired', clearSession);
     return () => window.removeEventListener('uptime:session-expired', clearSession);
   }, []);
+  const isPublic = isLanding || isPricing || isPublicRoute;
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    let robotsMeta = document.head.querySelector<HTMLMetaElement>('meta[name="robots"]');
+    if (!isPublic) {
+      if (!robotsMeta) {
+        robotsMeta = document.createElement('meta');
+        robotsMeta.name = 'robots';
+        document.head.append(robotsMeta);
+      }
+      robotsMeta.content = 'noindex';
+      robotsMeta.dataset.managedBy = 'app-shell';
+    } else {
+      if (robotsMeta && robotsMeta.dataset.managedBy === 'app-shell') {
+        robotsMeta.remove();
+      }
+    }
+    return () => {
+      const currentMeta = document.head.querySelector<HTMLMetaElement>('meta[name="robots"]');
+      if (currentMeta && currentMeta.dataset.managedBy === 'app-shell') {
+        currentMeta.remove();
+      }
+    };
+  }, [isPublic]);
   if (isLanding || isPricing)
     return (
       <main className="public-workspace public-workspace--nav-theme">
@@ -892,6 +917,11 @@ function OperatorWorkspaceEditRoute() {
 function PublicDetailRoute() {
   const { monitorId } = publicDetailRoute.useParams();
   const statusPageId = new URLSearchParams(window.location.search).get('statusPage') ?? undefined;
+  usePageMetadata({
+    title: 'Monitor details',
+    description: 'Public uptime monitoring details and regional response metrics.',
+    canonical: `/monitors/public/${monitorId}`,
+  });
   return (
     <MonitorDetail monitorId={monitorId} publicMode {...(statusPageId ? { statusPageId } : {})} />
   );

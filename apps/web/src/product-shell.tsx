@@ -12,6 +12,7 @@ import { WorkspaceBillingPanel } from './workspace-billing-panel.js';
 import { WorkspaceCustomDomainsPanel } from './workspace-custom-domains-panel.js';
 import { formatBudgetForecast, formatWorkspaceDatabaseMetrics } from './format-usage.js';
 import { fontOptions, readFontPreference, saveFontPreference } from './font-choice.js';
+import { usePageMetadata } from './metadata.js';
 import { Select } from './select.js';
 import { SiteFooter } from './site-footer.js';
 import './admin-views.css';
@@ -22,6 +23,11 @@ export function useProductSession() {
 }
 
 export function LandingPage() {
+  usePageMetadata({
+    title: 'Uptime — Simple multi-region uptime monitoring',
+    description: 'Simple multi-region uptime monitoring with alerts and public status pages.',
+    canonical: '/',
+  });
   const [interestState, setInterestState] = useState<'idle' | 'loading' | 'confirmed' | 'error'>(
     'idle',
   );
@@ -75,6 +81,74 @@ export function LandingPage() {
           </>
         )}
       </section>
+      <section className="landing__envelope" aria-labelledby="free-plan-title">
+        <div className="landing__envelope-header">
+          <p className="mono-label">FREE PLAN ENVELOPE</p>
+          <h2 id="free-plan-title">Included capacity and limits</h2>
+          <p className="landing__envelope-lede">
+            Every workspace starts with our core free monitoring envelope.
+          </p>
+        </div>
+
+        <div className="landing__envelope-grid">
+          <article className="landing__envelope-card">
+            <h3>Monitoring capacity</h3>
+            <ul className="landing__envelope-list">
+              <li>
+                <strong>3 monitors</strong>: Track up to 3 endpoints.
+              </li>
+              <li>
+                <strong>5-minute checks (300s)</strong>: Fixed check cadence.
+              </li>
+              <li>
+                <strong>Up to 3 regions</strong>: Global checks across eu-west, us-east, and asia.
+              </li>
+              <li>
+                <strong>3 members</strong>: Collaborate with up to 3 workspace seats.
+              </li>
+              <li>
+                <strong>1 status page</strong>: Publish a public status page.
+              </li>
+            </ul>
+          </article>
+
+          <article className="landing__envelope-card">
+            <h3>Alert delay &amp; retention</h3>
+            <ul className="landing__envelope-list">
+              <li>
+                <strong>Alert delay</strong>: 2 consecutive failed rounds before dispatching an alert.
+              </li>
+              <li>
+                <strong>Recovery threshold</strong>: 1 successful round confirms recovery.
+              </li>
+              <li>
+                <strong>Data retention</strong>: 24-hour detailed ping history and 90-day daily uptime.
+              </li>
+              <li>
+                <strong>3 destinations</strong>: Telegram and Discord notifications.
+              </li>
+            </ul>
+          </article>
+
+          <article className="landing__envelope-card">
+            <h3>Limitations</h3>
+            <ul className="landing__envelope-list">
+              <li>
+                <strong>Public HTTPS only</strong>: Targets must use HTTPS on port 443 with GET requests.
+              </li>
+              <li>
+                <strong>10-second timeout</strong>: Responses must complete within 10 seconds.
+              </li>
+              <li>
+                <strong>No custom domains</strong>: Custom status domains are not available on the free plan.
+              </li>
+              <li>
+                <strong>No DNS diagnostics</strong>: In-depth DNS traces are unavailable in this release.
+              </li>
+            </ul>
+          </article>
+        </div>
+      </section>
       <SiteFooter />
     </main>
   );
@@ -108,6 +182,19 @@ function normalizeInterestHandle(value: string) {
   return value.trim().replace(/^@+/, '').toLowerCase();
 }
 
+export function getAttributionChannel(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const params = new URLSearchParams(window.location.search);
+  const raw =
+    params.get('channel') ??
+    params.get('source') ??
+    params.get('ref') ??
+    params.get('utm_source');
+  if (!raw) return undefined;
+  const sanitized = raw.trim().toLowerCase().slice(0, 64);
+  return /^[a-z0-9_-]+$/.test(sanitized) ? sanitized : undefined;
+}
+
 export function InterestForm() {
   const [handle, setHandle] = useState('');
   const [busy, setBusy] = useState(false);
@@ -125,7 +212,10 @@ export function InterestForm() {
     setError('');
     try {
       const returnPath = '/?interest=joined';
-      const { authorizationUrl } = await api.startAtProto(normalized, returnPath);
+      const channel = getAttributionChannel();
+      const { authorizationUrl } = channel
+        ? await api.startAtProto(normalized, returnPath, channel)
+        : await api.startAtProto(normalized, returnPath);
       setSubmitted(true);
       window.location.assign(authorizationUrl);
     } catch (reason) {
@@ -186,7 +276,10 @@ export function AuthPage({
     setBusy(true);
     setError('');
     try {
-      const { authorizationUrl } = await api.startAtProto(normalized);
+      const channel = isSignup ? getAttributionChannel() : undefined;
+      const { authorizationUrl } = channel
+        ? await api.startAtProto(normalized, undefined, channel)
+        : await api.startAtProto(normalized);
       window.location.assign(authorizationUrl);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Could not start AT Protocol sign in');
@@ -608,8 +701,8 @@ export function OperatorPage() {
                   event.preventDefault();
                   if (savingControls) return;
                   const maximum = Number(new FormData(event.currentTarget).get('maxWorkspaces'));
-                  if (!Number.isInteger(maximum) || maximum < 0 || maximum > 10) {
-                    setControlError('Capacity must be a whole number from 0 to 10.');
+                  if (!Number.isInteger(maximum) || maximum < 1 || maximum > 10) {
+                    setControlError('Capacity must be a whole number from 1 to 10.');
                     return;
                   }
                   setControlError('');
@@ -631,7 +724,7 @@ export function OperatorPage() {
                     className="ut-input ut-input--mono"
                     name="maxWorkspaces"
                     type="number"
-                    min="0"
+                    min="1"
                     max="10"
                     required
                     defaultValue={slots.maxWorkspaces}

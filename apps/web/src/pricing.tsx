@@ -1,10 +1,16 @@
 import { useEffect, useState } from 'react';
 import { api, formatPlanCents, productWorkspaceId } from './api.js';
 import type { PlanDefinition, PublicProductCatalog } from './api.js';
+import { usePageMetadata } from './metadata.js';
 import { SiteFooter } from './site-footer.js';
 import './pricing.css';
 
 export function PricingPage() {
+  usePageMetadata({
+    title: 'Plans & Pricing',
+    description: 'Simple, transparent pricing for multi-region uptime monitoring, alerts and 90-day history.',
+    canonical: '/pricing',
+  });
   const [catalog, setCatalog] = useState<PublicProductCatalog | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

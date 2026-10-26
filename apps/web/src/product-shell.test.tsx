@@ -164,6 +164,20 @@ describe('free product shell', () => {
     expect(html).not.toContain('Sign-in tokens are encrypted');
   });
 
+  it('states the free-plan envelope, alert delay, retention, and limitations clearly', () => {
+    const html = renderToStaticMarkup(createElement(LandingPage));
+    expect(html).toContain('3 monitors');
+    expect(html).toContain('5-minute checks (300s)');
+    expect(html).toContain('Up to 3 regions');
+    expect(html).toContain('3 members');
+    expect(html).toContain('1 status page');
+    expect(html).toContain('Alert delay');
+    expect(html).toContain('Data retention');
+    expect(html).toContain('Limitations');
+    expect(html).toContain('Public HTTPS only');
+    expect(html).toContain('10-second timeout');
+  });
+
   it('starts an AT Protocol authorization request with the entered handle', async () => {
     apiMock.startAtProto.mockResolvedValue({ authorizationUrl: '' });
     const view = createTestRoot();
@@ -205,6 +219,46 @@ describe('free product shell', () => {
     });
     expect(apiMock.startAtProto).toHaveBeenCalledWith('indie.test', '/?interest=joined');
     await view.cleanup();
+  });
+
+  it('captures attribution channel from query parameters without leaking URLs or emails', async () => {
+    apiMock.startAtProto.mockResolvedValue({ authorizationUrl: '' });
+    window.history.pushState({}, '', '/signup?channel=bluesky');
+    const view1 = createTestRoot();
+    await act(async () => view1.root.render(createElement(InterestForm)));
+    const input1 = view1.container.querySelector<HTMLInputElement>('#interest-handle')!;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(
+      input1,
+      'channel.test',
+    );
+    input1.dispatchEvent(new Event('input', { bubbles: true }));
+    await act(async () => {
+      view1.container
+        .querySelector('form')!
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(apiMock.startAtProto).toHaveBeenCalledWith('channel.test', '/?interest=joined', 'bluesky');
+    await view1.cleanup();
+
+    window.history.pushState({}, '', '/signup?channel=https://evil.com/leak');
+    const view2 = createTestRoot();
+    await act(async () => view2.root.render(createElement(InterestForm)));
+    const input2 = view2.container.querySelector<HTMLInputElement>('#interest-handle')!;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(
+      input2,
+      'safe.test',
+    );
+    input2.dispatchEvent(new Event('input', { bubbles: true }));
+    await act(async () => {
+      view2.container
+        .querySelector('form')!
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(apiMock.startAtProto).toHaveBeenCalledWith('safe.test', '/?interest=joined');
+    await view2.cleanup();
+    window.history.pushState({}, '', '/');
   });
 
   it('keeps signup as an interest form without workspace creation language', () => {
@@ -1227,6 +1281,19 @@ describe('free product shell', () => {
     expect(view.container.textContent).toContain('Hold');
     expect(view.container.textContent).toContain('Make available');
     const limit = view.container.querySelector<HTMLInputElement>('input[name="maxWorkspaces"]')!;
+    expect(limit.min).toBe('1');
+    expect(limit.max).toBe('10');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(limit, '0');
+    limit.dispatchEvent(new Event('change', { bubbles: true }));
+    await act(async () => {
+      limit
+        .closest('form')
+        ?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(view.container.textContent).toContain('Capacity must be a whole number from 1 to 10.');
+    expect(apiMock.updateOperatorSlots).not.toHaveBeenCalled();
+
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(limit, '2');
     limit.dispatchEvent(new Event('change', { bubbles: true }));
     await act(async () => {

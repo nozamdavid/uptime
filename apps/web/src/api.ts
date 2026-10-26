@@ -678,10 +678,11 @@ async function monitorDetail<TSummary>(path: string, range: string, isPublic = f
 
 export const api = {
   session: () => request<ProductSession>('/auth/session'),
-  startAtProto: (handle: string, returnTo?: string) =>
+  startAtProto: (handle: string, returnTo?: string, channel?: string) =>
     sendJson<{ authorizationUrl: string }>('/auth/atproto/start', 'POST', {
       handle,
       ...(returnTo ? { returnTo } : {}),
+      ...(channel ? { channel } : {}),
     }),
   interestSession: () => request<{ signup: InterestSignup | null }>('/interest/session'),
   signIn: (password: string) =>

@@ -1,8 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { pgFirst } from '@uptime/cloudflare/postgres';
+import { pgAll, pgFirst } from '@uptime/cloudflare/postgres';
 import { createControlFixture, type ControlTestFixture } from './testing/control-fixture.js';
 import { createAtprotoAuth, type AtprotoClientLike } from './atproto-auth.js';
-import { interestList, interestReturnPath, interestSignup, recordInterest } from './interest.js';
+import {
+  interestAttributionSummary,
+  interestList,
+  interestReturnPath,
+  interestSignup,
+  recordInterest,
+  recordInterestSignupStart,
+  recordWorkspaceActivation,
+} from './interest.js';
 
 const databases: ControlTestFixture[] = [];
 afterEach(async () => {
@@ -16,7 +24,12 @@ async function fixture() {
   const did = 'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa';
   const scopes: string[] = [];
   let clock = new Date('2026-10-02T12:00:00.000Z');
-  async function signup(handle: string, returnTo = interestReturnPath, tampered = false) {
+  async function signup(
+    handle: string,
+    returnTo = interestReturnPath,
+    tampered = false,
+    channel?: string,
+  ) {
     let state: string | null = null;
     let used = false;
     const client: AtprotoClientLike = {
@@ -45,14 +58,17 @@ async function fixture() {
       },
       now: () => clock,
       createClient: () => client,
-      onLogin: async (principal, path) => {
-        if (path === interestReturnPath) await recordInterest(db, principal, clock);
+      onStart: async (_handle, path, ch) => {
+        if (path === interestReturnPath) await recordInterestSignupStart(db, ch, clock);
+      },
+      onLogin: async (principal, path, ch) => {
+        if (path === interestReturnPath) await recordInterest(db, principal, clock, ch);
       },
     });
     const start = await auth.start(
       new Request('https://api.example.com/api/auth/atproto/start', {
         method: 'POST',
-        body: JSON.stringify({ handle, returnTo }),
+        body: JSON.stringify({ handle, returnTo, ...(channel ? { channel } : {}) }),
       }),
     );
     const cookie = start.headers.get('set-cookie')!.split(';')[0]!;
@@ -127,5 +143,59 @@ describe('interest signup collection', () => {
     await context.signup('alice.bsky.social', 'https://attacker.example/?interest=joined');
     expect(await interestSignup(context.db, context.did)).toBeNull();
     expect(await interestList(context.db)).toEqual({ total: 0, signups: [] });
+  });
+
+  it('tracks signup_started, signup_completed, and workspace_activation per channel', async () => {
+    const context = await fixture();
+    await context.signup('@alice.bsky.social', interestReturnPath, false, 'bluesky');
+
+    const signup = await interestSignup(context.db, context.did);
+    expect(signup?.channel).toBe('bluesky');
+
+    await recordWorkspaceActivation(context.db, 'ws_test_1', context.did);
+
+    const events = await pgAll<{ event: string; actor_did: string | null; details: string }>(
+      context.db,
+      `SELECT event, actor_did, details FROM ${context.db.table('workspace_events')} ORDER BY created_at ASC`,
+    );
+    expect(events.map((e) => e.event)).toEqual([
+      'signup_started',
+      'signup_completed',
+      'workspace_activation',
+    ]);
+    for (const e of events) {
+      const parsed = JSON.parse(e.details);
+      expect(parsed).toEqual({ channel: 'bluesky' });
+      expect(e.details).not.toMatch(/https?:\/\//);
+      expect(e.details).not.toMatch(/@/);
+    }
+
+    const summary = await interestAttributionSummary(context.db);
+    expect(summary.bluesky).toEqual({ started: 1, completed: 1, activated: 1 });
+  });
+
+  it('sanitizes channel and strictly avoids storing URLs, emails, or secrets', async () => {
+    const context = await fixture();
+    await context.signup(
+      '@alice.bsky.social',
+      interestReturnPath,
+      false,
+      'https://phishing.site/leak?token=supersecret',
+    );
+
+    const signup = await interestSignup(context.db, context.did);
+    // Invalid channel strings with slashes/colons/queries are rejected and not stored
+    expect(signup?.channel).toBeUndefined();
+
+    const events = await pgAll<{ details: string }>(
+      context.db,
+      `SELECT details FROM ${context.db.table('workspace_events')}`,
+    );
+    expect(events.length).toBeGreaterThan(0);
+    for (const e of events) {
+      expect(e.details).not.toContain('https://phishing.site');
+      expect(e.details).not.toContain('supersecret');
+      expect(JSON.parse(e.details)).toEqual({ channel: 'direct' });
+    }
   });
 });

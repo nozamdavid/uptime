@@ -100,15 +100,7 @@ export class Scheduler {
           and status in ('sent', 'cancelled', 'failed') order by created_at limit ${retentionBatchSize}
       )
     `);
-    await db.execute(sql`
-      WITH expired AS (
-        SELECT id FROM check_runs
-        WHERE created_at < now() - interval '90 days'
-        ORDER BY created_at ASC
-        LIMIT ${retentionBatchSize}
-      )
-      DELETE FROM check_runs WHERE id IN (SELECT id FROM expired)
-    `);
+    await db.execute(expiredCheckRunsQuery());
     await db.execute(sql`
       WITH expired AS (
         SELECT id FROM network_diagnostics
@@ -493,6 +485,18 @@ export function finalizeDailyUptimeRollupsQuery(currentTime: Date) {
       finalized_at = EXCLUDED.finalized_at,
       updated_at = now()
     WHERE monitor_daily_uptime.source = 'calculated'
+  `;
+}
+
+export function expiredCheckRunsQuery(batchSize = retentionBatchSize) {
+  return sql`
+    WITH expired AS (
+      SELECT id FROM check_runs
+      WHERE created_at < now() - interval '24 hours'
+      ORDER BY created_at ASC
+      LIMIT ${batchSize}
+    )
+    DELETE FROM check_runs WHERE id IN (SELECT id FROM expired)
   `;
 }
 

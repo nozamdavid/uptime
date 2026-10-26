@@ -1,9 +1,15 @@
 User-agent: *
 Allow: /
+Allow: /monitors/public/
+Allow: /status/
 Disallow: /app
 Disallow: /operator
 Disallow: /settings
 Disallow: /login
 Disallow: /signup
+Disallow: /notifications
+Disallow: /status-pages
 Disallow: /monitors/
-Disallow: /status/
+Disallow: /mock-billing/
+
+Sitemap: https://uptime.noz.am/sitemap.xml

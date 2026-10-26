@@ -424,4 +424,43 @@ describe('private section navigation', () => {
     expect(container.textContent).toContain('davidmarcosg98@gmail.com');
     await act(async () => root.unmount());
   });
+
+  it('keeps app routes noindexed and removes noindex on public routes with document metadata', async () => {
+    window.history.replaceState({}, '', '/app');
+    apiMock.session.mockResolvedValue({
+      user: { did: 'did:plc:test', handle: 'test.example' },
+      workspace: { id: 'workspace-1', name: 'Test', plan: 'free', state: 'active' },
+      workspaces: [],
+      role: 'owner',
+    });
+    apiMock.monitors.mockResolvedValue({ monitors: [] });
+
+    const { router } = await import('./main.js');
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(RouterProvider, { router }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await router.navigate({ to: '/app' });
+    });
+
+    expect(document.head.querySelector('meta[name="robots"]')?.getAttribute('content')).toBe('noindex');
+
+    await act(async () => {
+      await router.navigate({ to: '/terms' });
+    });
+
+    expect(document.head.querySelector('meta[name="robots"]')).toBeNull();
+    expect(document.title).toContain('Terms of service');
+    expect(document.head.querySelector('link[rel="canonical"]')?.getAttribute('href')).toBe(
+      'https://uptime.noz.am/terms',
+    );
+
+    await act(async () => root.unmount());
+  });
 });

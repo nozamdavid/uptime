@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   hashPassword,
@@ -23,6 +23,7 @@ import { seedControlUser, seedControlWorkspace } from './testing/control-fixture
 import { consumeBudget, ensureWorkspace, hostedFetch } from './hosted-app.js';
 import { recordInterest } from './interest.js';
 import { reconcileScheduled } from './reconcile.js';
+import { sealProviderConfig } from './credentials.js';
 
 let fixture: Awaited<ReturnType<typeof createRuntimeFixture>>;
 let usedTenants = new Set<number>();
@@ -931,6 +932,7 @@ describe('hosted control plane', { timeout: 300_000 }, () => {
         { method: 'PATCH', body: JSON.stringify({ maxWorkspaces: limit }) },
       );
     expect((await patch(11)).status).toBe(400);
+    expect((await patch(0)).status).toBe(400);
     expect(await (await patch(10)).json()).toMatchObject({ maxWorkspaces: 10 });
     expect(await (await patch(1)).json()).toMatchObject({ maxWorkspaces: 1 });
     const user = await authenticatedCookie(
@@ -2037,11 +2039,45 @@ describe('hosted control plane', { timeout: 300_000 }, () => {
     expect(
       (
         await context.control.query(
-          `SELECT status FROM ${context.control.table('tenant_slots')} WHERE workspace_id = $1`,
-          [workspaceId],
+          `SELECT status, workspace_id FROM ${context.control.table('tenant_slots')} WHERE database_id = $1`,
+          ['tenant-one'],
         )
       ).rows[0],
-    ).toEqual({ status: 'deleting' });
+    ).toEqual({ status: 'deleting', workspace_id: workspaceId });
+    expect(
+      (
+        await context.control.query(
+          `SELECT status, workspace_id FROM ${context.control.table('postgres_tenant_registry')} WHERE source_database_id = $1`,
+          ['tenant-one'],
+        )
+      ).rows[0],
+    ).toEqual({ status: 'deleting', workspace_id: workspaceId });
+    expect(
+      (
+        await context.tenant.query(
+          `SELECT count(*)::integer AS count FROM ${context.tenant.table('workspace_metadata')}`,
+        )
+      ).rows[0],
+    ).toEqual({ count: 1 });
+
+    const nextOwner = await authenticatedCookie(
+      context.control,
+      'did:plc:llllllllllllllllllllllll',
+      'next.bsky.social',
+    );
+    const nextSession = await fetchHosted(context, '/api/auth/session', nextOwner.cookie);
+    expect(nextSession.status).toBe(200);
+    const nextWorkspace = ((await nextSession.json()) as { workspace: { id: string; state: string } })
+      .workspace;
+    expect(nextWorkspace.state).toBe('active');
+    expect(
+      (
+        await context.control.query(
+          `SELECT status, workspace_id FROM ${context.control.table('tenant_slots')} WHERE database_id = $1`,
+          ['tenant-one'],
+        )
+      ).rows[0],
+    ).toEqual({ status: 'assigned', workspace_id: nextWorkspace.id });
   });
 
   it('accepts public HTTPS targets without ownership challenges and redacts public URLs', async () => {
@@ -2371,6 +2407,215 @@ describe('hosted control plane', { timeout: 300_000 }, () => {
     );
     expect(complete.status).toBe(200);
     expect(await complete.json()).toEqual({ state: 'deleted' });
+  });
+
+  it('notifies workspace owner when admitted from waitlist to active', async () => {
+    const context = await createHostedContext();
+    const operator = await authenticatedCookie(
+      context.control,
+      'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+      'operator.test',
+    );
+    Object.assign(context.env, { OPERATOR_DIDS: operator.did });
+
+    const applicant = await authenticatedCookie(
+      context.control,
+      'did:plc:bbbbbbbbbbbbbbbbbbbbbbbb',
+      'applicant.test',
+    );
+    const signup = await fetchHosted(context, '/api/auth/session', applicant.cookie);
+    const workspace = ((await signup.json()) as { workspace: { id: string; state: string } })
+      .workspace;
+    expect(workspace.state).toBe('active');
+
+    const webhookUrl = 'https://discord.com/api/webhooks/999/waitlist-token';
+    const destRes = await fetchHosted(
+      context,
+      '/api/notification-services',
+      applicant.cookie,
+      {},
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Discord Alerts',
+          provider: 'discord',
+          enabled: true,
+          config: { webhookUrl },
+        }),
+      },
+    );
+    expect(destRes.status).toBe(201);
+
+    await context.control.query(
+      `UPDATE ${context.control.table('workspaces')} SET state = 'waiting_for_capacity' WHERE id = $1`,
+      [workspace.id],
+    );
+
+    let sentUrl: string | null = null;
+    let sentBody: string | null = null;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as Request).url;
+      if (url.startsWith('https://discord.com/api/webhooks/')) {
+        sentUrl = url;
+        sentBody = String(init?.body ?? '');
+        return new Response(null, { status: 204 });
+      }
+      return new Response(null, { status: 200 });
+    });
+
+    try {
+      // 1. Operator manual admission path
+      const path = `/api/operator/workspaces/${workspace.id}/state`;
+      const activate = {
+        method: 'POST',
+        body: JSON.stringify({ state: 'active', reason: 'Admitted from waitlist' }),
+      };
+      const response = await fetchHosted(context, path, operator.cookie, {}, activate);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ id: workspace.id, state: 'active' });
+      expect(sentUrl).toBe(`${webhookUrl}?wait=true`);
+      expect(sentBody).toContain('Uptime notification test');
+
+      // 2. Resuming suspended or idempotent update does NOT notify
+      sentUrl = null;
+      await fetchHosted(context, path, operator.cookie, {}, {
+        method: 'POST',
+        body: JSON.stringify({ state: 'suspended', reason: 'Test suspend' }),
+      });
+      await fetchHosted(context, path, operator.cookie, {}, {
+        method: 'POST',
+        body: JSON.stringify({ state: 'active', reason: 'Test resume' }),
+      });
+      expect(sentUrl).toBeNull();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('notifies workspace owner on auto-activation when capacity opens', async () => {
+    const context = await createHostedContext();
+
+    const user = await authenticatedCookie(
+      context.control,
+      'did:plc:cccccccccccccccccccccccc',
+      'autowaitlist.test',
+    );
+    const signup = await fetchHosted(context, '/api/auth/session', user.cookie);
+    const workspace = ((await signup.json()) as { workspace: { id: string; state: string } })
+      .workspace;
+    expect(workspace.state).toBe('active');
+
+    const webhookUrl = 'https://discord.com/api/webhooks/888/auto-token';
+    const destRes = await fetchHosted(
+      context,
+      '/api/notification-services',
+      user.cookie,
+      {},
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Discord Auto Alerts',
+          provider: 'discord',
+          enabled: true,
+          config: { webhookUrl },
+        }),
+      },
+    );
+    expect(destRes.status).toBe(201);
+
+    await context.control.query(
+      `UPDATE ${context.control.table('workspaces')} SET state = 'waiting_for_capacity' WHERE id = $1`,
+      [workspace.id],
+    );
+
+    let sentUrl: string | null = null;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as Request).url;
+      if (url.startsWith('https://discord.com/api/webhooks/')) {
+        sentUrl = url;
+        return new Response(null, { status: 204 });
+      }
+      return new Response(null, { status: 200 });
+    });
+
+    try {
+      const activeSession = await fetchHosted(context, '/api/auth/session', user.cookie);
+      expect(activeSession.status).toBe(200);
+      const sessionData = (await activeSession.json()) as { workspace: { state: string } };
+      expect(sessionData.workspace.state).toBe('active');
+      expect(sentUrl).toBe(`${webhookUrl}?wait=true`);
+
+      sentUrl = null;
+      await fetchHosted(context, '/api/auth/session', user.cookie);
+      expect(sentUrl).toBeNull();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('handles notification failure gracefully without failing admission', async () => {
+    const context = await createHostedContext();
+    const operator = await authenticatedCookie(
+      context.control,
+      'did:plc:aaaaaaaaaaaaaaaaaaaaaaaa',
+      'operator.test',
+    );
+    Object.assign(context.env, { OPERATOR_DIDS: operator.did });
+
+    const applicant = await authenticatedCookie(
+      context.control,
+      'did:plc:dddddddddddddddddddddddd',
+      'failure-test.test',
+    );
+    const signup = await fetchHosted(context, '/api/auth/session', applicant.cookie);
+    const workspace = ((await signup.json()) as { workspace: { id: string } }).workspace;
+
+    const destRes = await fetchHosted(
+      context,
+      '/api/notification-services',
+      applicant.cookie,
+      {},
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Discord Fail Alerts',
+          provider: 'discord',
+          enabled: true,
+          config: { webhookUrl: 'https://discord.com/api/webhooks/777/fail-token' },
+        }),
+      },
+    );
+    expect(destRes.status).toBe(201);
+
+    await context.control.query(
+      `UPDATE ${context.control.table('workspaces')} SET state = 'waiting_for_capacity' WHERE id = $1`,
+      [workspace.id],
+    );
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network error'));
+    try {
+      const response = await fetchHosted(
+        context,
+        `/api/operator/workspaces/${workspace.id}/state`,
+        operator.cookie,
+        {},
+        { method: 'POST', body: JSON.stringify({ state: 'active', reason: 'Admit' }) },
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ id: workspace.id, state: 'active' });
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });
 

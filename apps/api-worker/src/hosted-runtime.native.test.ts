@@ -74,6 +74,10 @@ describe('native hosted runtime', () => {
       const control = fixture.control.db;
       const budgetObservation = fixture.env.CURRENT_BUDGET_USAGE_JSON;
       fixture.env.CURRENT_BUDGET_USAGE_JSON = undefined;
+      // Admission is gated by the operator toggle now that the cost forecast is gone.
+      await control.query(
+        `UPDATE ${control.table('service_controls')} SET admission_open=0 WHERE id=1`,
+      );
       const waiting = await ensureWorkspace(
         { ...fixture.env, controlDb: control, catalog: fixture.catalog },
         { did: 'did:plc:eeeeeeeeeeeeeeeeeeeeeeee', handle: 'waiting-policy.test' },
@@ -153,6 +157,9 @@ describe('native hosted runtime', () => {
         ),
       ).toEqual({ event: 'workspace_product_limits' });
       fixture.env.CURRENT_BUDGET_USAGE_JSON = budgetObservation;
+      await control.query(
+        `UPDATE ${control.table('service_controls')} SET admission_open=1 WHERE id=1`,
+      );
       const activated = await ensureWorkspace(
         { ...fixture.env, controlDb: control, catalog: fixture.catalog },
         { did: waiting.owner_did, handle: 'waiting-policy.test' },
@@ -285,11 +292,11 @@ describe('native hosted runtime', () => {
     expect(overQuota.status).toBe(409);
   }, 120_000);
 
-  it('keeps unknown and stale cost unknown and closes admission without reading analytics credentials', async () => {
+  it('keeps cost unknown without analytics credentials and gates admission by the operator toggle', async () => {
     const control = fixture.control.db;
     expect(await budgetSummary(control)).toMatchObject({
       forecastUsd: null,
-      admissionOpen: false,
+      admissionOpen: true,
     });
     expect(
       await budgetSummary(control, {
@@ -299,7 +306,7 @@ describe('native hosted runtime', () => {
           cloudflareCostUsd: 0,
         }),
       }),
-    ).toMatchObject({ forecastUsd: null, admissionOpen: false });
+    ).toMatchObject({ forecastUsd: null, admissionOpen: true });
     const env = {
       ...fixture.env,
       controlDb: control,
