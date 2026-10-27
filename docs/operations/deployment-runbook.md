@@ -31,8 +31,9 @@ bundles that require new migrations.
 
 For a routine application rollback, restore the previous API and scheduler image
 tags recorded on the VPS, then recreate those Compose services as described in
-the VPS runbook. Previous image tags and `*.prev-*` deployment artifacts are
-kept on the VPS for recovery. Do not restore the database for a code rollback.
+the VPS runbook. The previous images stay on the VPS; the runbook requires
+keeping the old tag and image ID in your deploy notes. Do not restore the
+database for a code rollback.
 
 Database and configuration backups are covered by the VPS runbook's
 [backup section](../../deploy/vps/staging/README.md#backups-and-restore).

@@ -27,4 +27,5 @@ Set these in the protected runtime file on the VPS (`/opt/uptime-staging/api.env
 1. `SESSION_SECRET` (min 32 chars): signs session cookies.
 2. `CREDENTIAL_ENCRYPTION_SECRET` (min 32 chars): AES-GCM key for encrypted monitor credentials.
 3. `OAUTH_STORAGE_SECRET` (min 32 chars): ATProto OAuth state store.
-4. `POSTGRES_URL`: `postgresql://uptime_staging_worker:<password>@127.0.0.1:5432/uptime_staging`.
+4. `API_GATEWAY_TOKEN` (min 32 chars): shared secret the reverse proxy sends as `x-uptime-gateway-token`. The API refuses to start in staging or production without it.
+5. `POSTGRES_URL`: `postgresql://uptime_staging_worker:<password>@127.0.0.1:5432/uptime_staging`.

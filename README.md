@@ -18,11 +18,13 @@ target Worker.
 ## Free hosted version
 
 The [first version](docs/plans/free-v1-implementation.md) includes AT Protocol
-OAuth signup, dedicated customer databases, team access, and an operator dashboard.
+OAuth signup, dedicated tenant schemas, team access, and an operator dashboard.
 Use the [hosted runbook](docs/deployment/free-hosted.md) for local OAuth development
-and deployment. Its $20 forecast guard requires Cloudflare billing alerts.
-The public landing currently collects interest through identity-only AT Protocol
-OAuth. Signups appear in the operator page and do not allocate workspace databases.
+and deployment. Admission is controlled by the operator `admission_open` toggle
+with fixed product limits (3 monitors, 300-second checks, 3 regions, 3 members,
+1 status page). The public landing currently collects interest through
+identity-only AT Protocol OAuth. Signups appear in the operator page and do not
+allocate tenant slots.
 The [product release plan](docs/plans/product-release-plan.md) covers positioning,
 user journeys, operations, launch gates, and the broader roadmap.
 The [platform research](docs/research/saas-platform-research.md) records infrastructure
